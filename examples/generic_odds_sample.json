@@ -1,0 +1,88 @@
+{
+  "source_name": "generic_odds",
+  "events": [
+    {
+      "external_event_id": "cs2_10001",
+      "sport": "cs2",
+      "tournament_name": "PGL CS2 Open",
+      "match_name": "Team Spirit vs NAVI",
+      "home_team": "Team Spirit",
+      "away_team": "NAVI",
+      "is_live": false
+    },
+    {
+      "external_event_id": "dota2_20001",
+      "sport": "dota 2",
+      "tournament_name": "DreamLeague",
+      "match_name": "Team Liquid vs Gaimin Gladiators",
+      "home_team": "Team Liquid",
+      "away_team": "Gaimin Gladiators",
+      "is_live": true
+    },
+    {
+      "external_event_id": "football_30001",
+      "sport": "football",
+      "tournament_name": "РПЛ",
+      "match_name": "Зенит vs Спартак",
+      "home_team": "Зенит",
+      "away_team": "Спартак",
+      "is_live": false
+    }
+  ],
+  "markets": [
+    {
+      "external_event_id": "cs2_10001",
+      "bookmaker": "fonbet",
+      "market_type": "match_winner",
+      "market_label": "Match winner",
+      "selection": "Team Spirit",
+      "odds_value": "1.85",
+      "section_name": "CS2",
+      "subsection_name": "Match",
+      "search_hint": "spirit navi winner"
+    },
+    {
+      "external_event_id": "dota2_20001",
+      "bookmaker": "winline",
+      "market_type": "moneyline",
+      "market_label": "Winner",
+      "selection": "Team Liquid",
+      "odds_value": "2.10",
+      "section_name": "Dota2",
+      "search_hint": "liquid gg moneyline"
+    },
+    {
+      "external_event_id": "football_30001",
+      "bookmaker": "betboom",
+      "market_type": "1x2",
+      "market_label": "Full time result",
+      "selection": "Зенит",
+      "odds_value": "2.15"
+    },
+    {
+      "external_event_id": "football_30001",
+      "bookmaker": "unknownbook",
+      "market_type": "1x2",
+      "market_label": "Full time result",
+      "selection": "Спартак",
+      "odds_value": "3.50"
+    },
+    {
+      "external_event_id": "missing_event_999",
+      "bookmaker": "fonbet",
+      "market_type": "match_winner",
+      "market_label": "Match winner",
+      "selection": "Someone",
+      "odds_value": "1.90"
+    },
+    {
+      "external_event_id": "cs2_10001",
+      "bookmaker": "fonbet",
+      "market_type": "maps_total",
+      "market_label": "Maps total",
+      "selection": "Over 2.5",
+      "odds_value": "1.55"
+    }
+  ]
+}
+

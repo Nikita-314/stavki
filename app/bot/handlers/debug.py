@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -35,6 +36,7 @@ from app.db.repositories.signal_repository import SignalRepository
 from app.services.sanity_check_service import SanityCheckService
 from app.providers.json_candidate_provider import JsonCandidateProvider
 from app.services.ingestion_service import IngestionService
+from app.providers.generic_odds_adapter import GenericOddsAdapter
 
 
 router = Router(name="debug")
@@ -1043,6 +1045,107 @@ async def cmd_file_ingest(message: Message, sessionmaker: async_sessionmaker[Asy
                 f"- created_signals: {res.created_signals}",
                 f"- skipped_candidates: {res.skipped_candidates}",
                 f"- created_signal_ids: {res.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("adapter_preview"))
+async def cmd_adapter_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    path = _parse_tail_arg(message)
+    if not path:
+        await message.answer("Usage: /adapter_preview <path>")
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            await message.answer("Payload must be a JSON object")
+            return
+    except Exception:
+        await message.answer("Unable to read JSON file")
+        return
+
+    adapter = GenericOddsAdapter()
+    raw = adapter.parse_payload(payload)
+    res = adapter.to_candidates(raw)
+
+    shown = res.candidates[:5]
+    lines = [
+        "ADAPTER PREVIEW",
+        f"- source_name: {res.source_name}",
+        f"- total_events: {res.total_events}",
+        f"- total_markets: {res.total_markets}",
+        f"- created_candidates: {res.created_candidates}",
+        f"- skipped_items: {res.skipped_items}",
+        "",
+        "candidates (first 5):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("adapter_ingest"))
+async def cmd_adapter_ingest(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    path = _parse_tail_arg(message)
+    if not path:
+        await message.answer("Usage: /adapter_ingest <path>")
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            await message.answer("Payload must be a JSON object")
+            return
+    except Exception:
+        await message.answer("Unable to read JSON file")
+        return
+
+    adapter = GenericOddsAdapter()
+    raw = adapter.parse_payload(payload)
+    adapter_res = adapter.to_candidates(raw)
+
+    async with sessionmaker() as session:
+        ing = await IngestionService().ingest_candidates_with_filter_and_dedup(session, adapter_res.candidates)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "ADAPTER INGEST",
+                f"- source_name: {adapter_res.source_name}",
+                f"- total_events: {adapter_res.total_events}",
+                f"- total_markets: {adapter_res.total_markets}",
+                f"- created_candidates: {adapter_res.created_candidates}",
+                f"- skipped_items: {adapter_res.skipped_items}",
+                f"- ingested_created_signals: {ing.created_signals}",
+                f"- ingested_skipped_candidates: {ing.skipped_candidates}",
+                f"- created_signal_ids: {ing.created_signal_ids}",
             ]
         )
     )
