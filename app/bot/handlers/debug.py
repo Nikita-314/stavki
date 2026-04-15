@@ -31,6 +31,7 @@ from app.services.period_report_service import PeriodReportService
 from app.services.orchestration_service import OrchestrationService
 from app.providers.mock_candidate_provider import MockCandidateProvider
 from app.services.demo_cycle_service import DemoCycleService
+from app.db.repositories.signal_repository import SignalRepository
 
 
 router = Router(name="debug")
@@ -930,6 +931,66 @@ async def cmd_orchestrate_mock_result(message: Message, sessionmaker: async_sess
 def _fmt_bool(v: bool) -> str:
     return "yes" if v else "no"
 
+
+@router.message(Command("system_status"))
+async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        summary = await AnalyticsSummaryService().get_summary(session)
+        balance_unit = await BalanceService().get_balance_overview(session)
+        balance_rub = await BalanceService().get_realistic_balance_overview(session)
+        period_unit = await PeriodReportService().get_period_report(session)
+        period_rub = await PeriodReportService().get_realistic_period_report(session)
+        quality = await SignalQualitySummaryService().build_quality_summary(session)
+        history = await BalanceService().list_balance_history(session)
+        latest_ids = await SignalRepository().list_latest_signal_ids(session, limit=10)
+
+    k = summary.kpis
+    latest_snapshot_label = history[0].label if history else None
+    latest_ids_str = ", ".join(str(x) for x in latest_ids) if latest_ids else "-"
+
+    lines = [
+        "SYSTEM STATUS",
+        "",
+        "Signals:",
+        f"- total_signals: {k.total_signals}",
+        f"- settled_signals: {k.settled_signals}",
+        f"- entered_signals: {k.entered_signals}",
+        f"- missed_signals: {k.missed_signals}",
+        "",
+        "Balance unit:",
+        f"- current_balance: {balance_unit.current_balance}",
+        f"- total_profit_loss_since_base: {balance_unit.total_profit_loss_since_base}",
+        "",
+        "Balance RUB:",
+        f"- flat_stake_rub: {balance_rub.flat_stake_rub}",
+        f"- current_balance_rub: {balance_rub.current_balance_rub}",
+        f"- total_profit_loss_rub: {balance_rub.total_profit_loss_rub}",
+        "",
+        "Period unit:",
+        f"- period_label: {period_unit.overview.period_label}",
+        f"- current_balance: {period_unit.overview.current_balance}",
+        "",
+        "Period RUB:",
+        f"- period_label: {period_rub.overview.period_label}",
+        f"- current_balance_rub: {period_rub.overview.current_balance_rub}",
+        "",
+        "Quality:",
+        f"- avg_prediction_error: {quality.avg_prediction_error}",
+        f"- overestimated_count: {quality.overestimated_count}",
+        f"- underestimated_count: {quality.underestimated_count}",
+        "",
+        "History:",
+        f"- snapshots count: {len(history)}",
+        f"- latest snapshot label: {latest_snapshot_label or 'none'}",
+        "",
+        "Latest signals:",
+        f"- {latest_ids_str}",
+    ]
+    await message.answer("\n".join(lines))
 
 @router.message(Command("demo_cycle"))
 async def cmd_demo_cycle(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
