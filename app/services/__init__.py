@@ -22,6 +22,7 @@ from app.services.signal_service import SignalService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
 from app.services.settlement_service import SettlementService
+from app.services.remote_smoke_service import RemoteSmokeService
 from app.services.training_dataset_service import TrainingDatasetService
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "SignalQualityService",
     "SignalQualitySummaryService",
     "SettlementService",
+    "RemoteSmokeService",
     "TrainingDatasetService",
 ]
 

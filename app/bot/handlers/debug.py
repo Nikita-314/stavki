@@ -42,6 +42,7 @@ from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
 from app.schemas.provider_client import ProviderClientConfig
+from app.services.remote_smoke_service import RemoteSmokeService
 
 
 router = Router(name="debug")
@@ -91,6 +92,23 @@ def _parse_sport(value: str):
 
 def _parse_int(value: str) -> int:
     return int(value)
+
+
+def _parse_required_parts(message: Message, *, min_parts: int, example: str) -> list[str] | None:
+    parts = (message.text or "").strip().split()
+    if len(parts) < min_parts:
+        return None
+    return parts
+
+
+def _parse_winner_tail(message: Message, *, event_external_id: str) -> str | None:
+    text = (message.text or "").strip()
+    needle = f" {event_external_id} "
+    idx = text.find(needle)
+    if idx < 0:
+        return None
+    tail = text[idx + len(needle) :].strip()
+    return tail or None
 
 
 @router.message(Command("debug"))
@@ -1691,6 +1709,123 @@ async def cmd_odds_http_ingest(message: Message, sessionmaker: async_sessionmake
                 f"- ingested_created_signals: {ing.created_signals}",
                 f"- ingested_skipped_candidates: {ing.skipped_candidates}",
                 f"- created_signal_ids: {ing.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("remote_smoke"))
+async def cmd_remote_smoke(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    config = _build_provider_client_config_from_settings()
+    if config is None:
+        await message.answer("REMOTE SMOKE\n- error: ODDS_PROVIDER_BASE_URL is not set")
+        return
+
+    res = await RemoteSmokeService().run_remote_smoke(sessionmaker, config=config)
+    await message.answer(
+        "\n".join(
+            [
+                "REMOTE SMOKE",
+                f"- endpoint: {res.endpoint}",
+                f"- fetch_ok: {res.fetch_ok}",
+                f"- preview_candidates: {res.preview_candidates}",
+                f"- preview_skipped_items: {res.preview_skipped_items}",
+                f"- ingested_created_signals: {res.ingested_created_signals}",
+                f"- ingested_skipped_candidates: {res.ingested_skipped_candidates}",
+                f"- created_signal_ids: {res.created_signal_ids}",
+                f"- sanity_issues_count: {res.sanity_issues_count}",
+                f"- total_signals: {res.total_signals}",
+                f"- settled_signals: {res.settled_signals}",
+                f"- current_balance_rub: {res.current_balance_rub}",
+                f"- message: {res.message}",
+            ]
+        )
+    )
+
+
+@router.message(Command("remote_settle"))
+async def cmd_remote_settle(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = _parse_required_parts(
+        message,
+        min_parts=4,
+        example="/remote_settle FOOTBALL football_30001 Зенит",
+    )
+    if not parts:
+        await message.answer(
+            "\n".join(
+                [
+                    "Usage: /remote_settle <sport> <event_external_id> <winner_selection>",
+                    "Examples:",
+                    "- /remote_settle FOOTBALL football_30001 Зенит",
+                    "- /remote_settle CS2 cs2_10001 Team Spirit",
+                ]
+            )
+        )
+        return
+
+    try:
+        sport = _parse_sport(parts[1])
+    except Exception:
+        await message.answer("REMOTE SETTLE\n- error: invalid sport (use FOOTBALL/CS2/DOTA2)")
+        return
+
+    event_external_id = parts[2]
+    winner_selection = _parse_winner_tail(message, event_external_id=event_external_id)
+    if not winner_selection:
+        await message.answer("REMOTE SETTLE\n- error: winner_selection is required (it can contain spaces)")
+        return
+
+    proc = await RemoteSmokeService().settle_latest_remote_signal(
+        sessionmaker,
+        winner_selection=winner_selection,
+        sport=sport,
+        event_external_id=event_external_id,
+    )
+    await message.answer(
+        "\n".join(
+            [
+                "REMOTE SETTLE",
+                f"- total_signals_found: {proc.total_signals_found}",
+                f"- settled_signals: {proc.settled_signals}",
+                f"- skipped_signals: {proc.skipped_signals}",
+                f"- created_failure_reviews: {proc.created_failure_reviews}",
+                f"- processed_signal_ids: {proc.processed_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("remote_status"))
+async def cmd_remote_status(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        summary = await AnalyticsSummaryService().get_summary(session)
+        balance = await BalanceService().get_realistic_balance_overview(session)
+        sanity = await SanityCheckService().run_sanity_check(session)
+        latest_ids = await SignalRepository().list_latest_signal_ids(session, limit=10)
+
+    k = summary.kpis
+    await message.answer(
+        "\n".join(
+            [
+                "REMOTE STATUS",
+                f"- total_signals: {k.total_signals}",
+                f"- settled_signals: {k.settled_signals}",
+                f"- wins/losses/voids: {k.wins}/{k.losses}/{k.voids}",
+                f"- current_balance_rub: {balance.current_balance_rub}",
+                f"- sanity_issues_count: {sanity.issues_count}",
+                f"- latest_signal_ids: {latest_ids}",
             ]
         )
     )
