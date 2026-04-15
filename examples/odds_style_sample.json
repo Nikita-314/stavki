@@ -1,0 +1,108 @@
+{
+  "source_name": "odds_style",
+  "data": [
+    {
+      "id": "football_30001",
+      "sport_key": "soccer",
+      "sport_title": "Football",
+      "commence_time": "2026-04-15T18:00:00Z",
+      "home_team": "Зенит",
+      "away_team": "Спартак",
+      "bookmakers": [
+        {
+          "key": "fonbet",
+          "title": "Fonbet",
+          "markets": [
+            {
+              "key": "h2h",
+              "outcomes": [
+                { "name": "Зенит", "price": 2.10 },
+                { "name": "Спартак", "price": 3.20 }
+              ]
+            },
+            {
+              "key": "totals",
+              "outcomes": [
+                { "name": "Over 2.5", "price": 1.95 },
+                { "name": "Under 2.5", "price": 1.85 }
+              ]
+            }
+          ]
+        },
+        {
+          "key": "unknownbook",
+          "title": "UnknownBook",
+          "markets": [
+            {
+              "key": "h2h",
+              "outcomes": [
+                { "name": "Зенит", "price": 2.00 },
+                { "name": "Спартак", "price": 3.40 }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cs2_10001",
+      "sport_key": "counter_strike",
+      "sport_title": "CS2",
+      "commence_time": "2026-04-15T19:30:00Z",
+      "home_team": "Team Spirit",
+      "away_team": "NAVI",
+      "bookmakers": [
+        {
+          "key": "winline",
+          "title": "Winline",
+          "markets": [
+            {
+              "key": "moneyline",
+              "outcomes": [
+                { "name": "Team Spirit", "price": 1.85 },
+                { "name": "NAVI", "price": 2.05 }
+              ]
+            },
+            {
+              "key": "spreads",
+              "outcomes": [
+                { "name": "Team Spirit -1.5", "price": 2.70 },
+                { "name": "NAVI +1.5", "price": 1.45 }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dota2_20001",
+      "sport_key": "dota2",
+      "sport_title": "Dota 2",
+      "commence_time": "2026-04-15T20:00:00Z",
+      "home_team": "Team Liquid",
+      "away_team": "Gaimin Gladiators",
+      "bookmakers": [
+        {
+          "key": "betboom",
+          "title": "BetBoom",
+          "markets": [
+            {
+              "key": "h2h",
+              "outcomes": [
+                { "name": "Team Liquid", "price": 2.10 },
+                { "name": "Gaimin Gladiators", "price": 1.70 }
+              ]
+            },
+            {
+              "key": "h2h",
+              "outcomes": [
+                { "name": "", "price": 1.50 }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+

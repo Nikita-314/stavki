@@ -948,6 +948,19 @@ def _parse_tail_arg(message: Message) -> str | None:
     return parts[1].strip()
 
 
+def _is_http_url(value: str) -> bool:
+    v = (value or "").strip().lower()
+    return v.startswith("http://") or v.startswith("https://")
+
+
+def _load_json_from_path(path: str) -> dict | list | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def _require_url_or_settings_default(message: Message) -> str | None:
     url = _parse_tail_arg(message)
     if url:
@@ -1348,6 +1361,185 @@ async def cmd_remote_ingest_default(message: Message, sessionmaker: async_sessio
             [
                 "REMOTE INGEST",
                 f"- url: {url}",
+                f"- source_name: {adapter_res.source_name}",
+                f"- total_events: {adapter_res.total_events}",
+                f"- total_markets: {adapter_res.total_markets}",
+                f"- created_candidates: {adapter_res.created_candidates}",
+                f"- skipped_items: {adapter_res.skipped_items}",
+                f"- ingested_created_signals: {ing.created_signals}",
+                f"- ingested_skipped_candidates: {ing.skipped_candidates}",
+                f"- created_signal_ids: {ing.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("odds_style_preview"))
+async def cmd_odds_style_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    arg = _parse_tail_arg(message)
+    if not arg:
+        await message.answer("Usage: /odds_style_preview <path_or_url>")
+        return
+
+    payload = None
+    if _is_http_url(arg):
+        settings = get_settings()
+        fetch_res = await asyncio.to_thread(
+            HttpFetchService().fetch_json, arg, int(settings.provider_test_timeout_seconds)
+        )
+        if not fetch_res.ok:
+            await message.answer(f"ODDS STYLE PREVIEW\n- ok: false\n- error: {fetch_res.error}")
+            return
+        payload = fetch_res.payload
+    else:
+        payload = _load_json_from_path(arg)
+
+    if not isinstance(payload, dict):
+        await message.answer("ODDS STYLE PREVIEW\n- ok: false\n- error: adapter expects JSON object payload")
+        return
+
+    res = AdapterIngestionService().preview_odds_style_payload(payload)
+    shown = res.candidates[:8]
+    lines = [
+        "ODDS STYLE PREVIEW",
+        f"- source_name: {res.source_name}",
+        f"- total_events: {res.total_events}",
+        f"- total_markets: {res.total_markets}",
+        f"- created_candidates: {res.created_candidates}",
+        f"- skipped_items: {res.skipped_items}",
+        "",
+        "candidates (first 8):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("odds_style_ingest"))
+async def cmd_odds_style_ingest(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    arg = _parse_tail_arg(message)
+    if not arg:
+        await message.answer("Usage: /odds_style_ingest <path_or_url>")
+        return
+
+    payload = None
+    if _is_http_url(arg):
+        settings = get_settings()
+        fetch_res = await asyncio.to_thread(
+            HttpFetchService().fetch_json, arg, int(settings.provider_test_timeout_seconds)
+        )
+        if not fetch_res.ok:
+            await message.answer(f"ODDS STYLE INGEST\n- error: {fetch_res.error}")
+            return
+        payload = fetch_res.payload
+    else:
+        payload = _load_json_from_path(arg)
+
+    if not isinstance(payload, dict):
+        await message.answer("ODDS STYLE INGEST\n- error: adapter expects JSON object payload")
+        return
+
+    async with sessionmaker() as session:
+        adapter_res, ing = await AdapterIngestionService().ingest_odds_style_payload(session, payload)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "ODDS STYLE INGEST",
+                f"- source_name: {adapter_res.source_name}",
+                f"- total_events: {adapter_res.total_events}",
+                f"- total_markets: {adapter_res.total_markets}",
+                f"- created_candidates: {adapter_res.created_candidates}",
+                f"- skipped_items: {adapter_res.skipped_items}",
+                f"- ingested_created_signals: {ing.created_signals}",
+                f"- ingested_skipped_candidates: {ing.skipped_candidates}",
+                f"- created_signal_ids: {ing.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("odds_style_preview_sample"))
+async def cmd_odds_style_preview_sample(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    payload = _load_json_from_path("examples/odds_style_sample.json")
+    if not isinstance(payload, dict):
+        await message.answer("ODDS STYLE PREVIEW\n- ok: false\n- error: unable to read sample payload")
+        return
+    res = AdapterIngestionService().preview_odds_style_payload(payload)
+    shown = res.candidates[:8]
+    lines = [
+        "ODDS STYLE PREVIEW",
+        f"- source_name: {res.source_name}",
+        f"- total_events: {res.total_events}",
+        f"- total_markets: {res.total_markets}",
+        f"- created_candidates: {res.created_candidates}",
+        f"- skipped_items: {res.skipped_items}",
+        "",
+        "candidates (first 8):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("odds_style_ingest_sample"))
+async def cmd_odds_style_ingest_sample(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    payload = _load_json_from_path("examples/odds_style_sample.json")
+    if not isinstance(payload, dict):
+        await message.answer("ODDS STYLE INGEST\n- error: unable to read sample payload")
+        return
+
+    async with sessionmaker() as session:
+        adapter_res, ing = await AdapterIngestionService().ingest_odds_style_payload(session, payload)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "ODDS STYLE INGEST",
                 f"- source_name: {adapter_res.source_name}",
                 f"- total_events: {adapter_res.total_events}",
                 f"- total_markets: {adapter_res.total_markets}",
