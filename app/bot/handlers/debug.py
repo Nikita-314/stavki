@@ -40,6 +40,8 @@ from app.services.ingestion_service import IngestionService
 from app.providers.generic_odds_adapter import GenericOddsAdapter
 from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
+from app.providers.odds_http_client import OddsHttpClient
+from app.schemas.provider_client import ProviderClientConfig
 
 
 router = Router(name="debug")
@@ -961,6 +963,23 @@ def _load_json_from_path(path: str) -> dict | list | None:
         return None
 
 
+def _build_provider_client_config_from_settings() -> ProviderClientConfig | None:
+    s = get_settings()
+    if not s.odds_provider_base_url:
+        return None
+    return ProviderClientConfig(
+        base_url=s.odds_provider_base_url,
+        api_key=s.odds_provider_api_key,
+        sport=s.odds_provider_sport,
+        regions=s.odds_provider_regions,
+        markets=s.odds_provider_markets,
+        bookmakers=s.odds_provider_bookmakers,
+        odds_format=s.odds_provider_odds_format,
+        date_format=s.odds_provider_date_format,
+        timeout_seconds=int(s.odds_provider_timeout_seconds),
+    )
+
+
 def _require_url_or_settings_default(message: Message) -> str | None:
     url = _parse_tail_arg(message)
     if url:
@@ -1541,6 +1560,130 @@ async def cmd_odds_style_ingest_sample(message: Message, sessionmaker: async_ses
             [
                 "ODDS STYLE INGEST",
                 f"- source_name: {adapter_res.source_name}",
+                f"- total_events: {adapter_res.total_events}",
+                f"- total_markets: {adapter_res.total_markets}",
+                f"- created_candidates: {adapter_res.created_candidates}",
+                f"- skipped_items: {adapter_res.skipped_items}",
+                f"- ingested_created_signals: {ing.created_signals}",
+                f"- ingested_skipped_candidates: {ing.skipped_candidates}",
+                f"- created_signal_ids: {ing.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("odds_http_url"))
+async def cmd_odds_http_url(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    config = _build_provider_client_config_from_settings()
+    if config is None:
+        await message.answer("ODDS_PROVIDER_BASE_URL is not set")
+        return
+
+    endpoint = OddsHttpClient().build_url(config)
+    await message.answer("\n".join(["ODDS HTTP URL", endpoint]))
+
+
+@router.message(Command("odds_http_preview"))
+async def cmd_odds_http_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    config = _build_provider_client_config_from_settings()
+    if config is None:
+        await message.answer("ODDS_PROVIDER_BASE_URL is not set")
+        return
+
+    fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
+    if not fetch_res.ok or fetch_res.payload is None:
+        await message.answer(
+            "\n".join(
+                [
+                    "ODDS HTTP PREVIEW",
+                    f"- endpoint: {fetch_res.endpoint}",
+                    f"- ok: false",
+                    f"- status_code: {fetch_res.status_code}",
+                    f"- error: {fetch_res.error}",
+                ]
+            )
+        )
+        return
+
+    adapter_res = AdapterIngestionService().preview_odds_style_payload(fetch_res.payload)
+    shown = adapter_res.candidates[:8]
+
+    lines = [
+        "ODDS HTTP PREVIEW",
+        f"- endpoint: {fetch_res.endpoint}",
+        f"- source_name: {fetch_res.source_name}",
+        f"- status_code: {fetch_res.status_code}",
+        f"- total_events: {adapter_res.total_events}",
+        f"- total_markets: {adapter_res.total_markets}",
+        f"- created_candidates: {adapter_res.created_candidates}",
+        f"- skipped_items: {adapter_res.skipped_items}",
+        "",
+        "candidates (first 8):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("odds_http_ingest"))
+async def cmd_odds_http_ingest(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    config = _build_provider_client_config_from_settings()
+    if config is None:
+        await message.answer("ODDS_PROVIDER_BASE_URL is not set")
+        return
+
+    fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
+    if not fetch_res.ok or fetch_res.payload is None:
+        await message.answer(
+            "\n".join(
+                [
+                    "ODDS HTTP INGEST",
+                    f"- endpoint: {fetch_res.endpoint}",
+                    f"- ok: false",
+                    f"- status_code: {fetch_res.status_code}",
+                    f"- error: {fetch_res.error}",
+                ]
+            )
+        )
+        return
+
+    async with sessionmaker() as session:
+        adapter_res, ing = await AdapterIngestionService().ingest_odds_style_payload(session, fetch_res.payload)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "ODDS HTTP INGEST",
+                f"- endpoint: {fetch_res.endpoint}",
+                f"- source_name: {fetch_res.source_name}",
+                f"- status_code: {fetch_res.status_code}",
                 f"- total_events: {adapter_res.total_events}",
                 f"- total_markets: {adapter_res.total_markets}",
                 f"- created_candidates: {adapter_res.created_candidates}",

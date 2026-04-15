@@ -5,6 +5,7 @@ from app.providers.base_adapter import BaseProviderAdapter
 from app.providers.generic_odds_adapter import GenericOddsAdapter
 from app.providers.json_candidate_provider import JsonCandidateProvider
 from app.providers.mock_candidate_provider import MockCandidateProvider
+from app.providers.odds_http_client import OddsHttpClient
 from app.providers.odds_style_adapter import OddsStyleAdapter
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "GenericOddsAdapter",
     "JsonCandidateProvider",
     "MockCandidateProvider",
+    "OddsHttpClient",
     "OddsStyleAdapter",
 ]
 
