@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.prediction_log import PredictionLog
 from app.db.models.signal import Signal
+from app.core.enums import SignalStatus
 from app.schemas.signal import PredictionLogCreate, SignalCreate
 
 
@@ -30,4 +31,9 @@ class SignalRepository:
         """Return Signal by id or None."""
         result = await session.execute(select(Signal).where(Signal.id == signal_id))
         return result.scalar_one_or_none()
+
+    async def update_status(self, session: AsyncSession, signal: Signal, status: SignalStatus) -> None:
+        """Update Signal.status (no commit)."""
+        signal.status = status
+        session.add(signal)
 
