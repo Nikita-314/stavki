@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from aiogram import Router
@@ -8,12 +9,18 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.keyboards.debug import get_debug_keyboard
+from app.core.enums import BetResult, EntryStatus
 from app.core.config import get_settings
+from app.schemas.entry import EntryCreate
+from app.schemas.settlement import SettlementCreate
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
+from app.services.entry_service import EntryService
+from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
+from app.services.settlement_service import SettlementService
 
 
 router = Router(name="debug")
@@ -35,6 +42,23 @@ def _fmt_decimal(v: Decimal | None) -> str:
     if v is None:
         return "None"
     return str(v)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _parse_signal_id(value: str) -> int:
+    return int(value)
+
+
+def _parse_decimal(value: str) -> Decimal:
+    # Accept "1.87" style values; keep Decimal precision.
+    return Decimal(value)
+
+
+def _fmt_enum(v: object) -> str:
+    return getattr(v, "value", str(v))
 
 
 @router.message(Command("debug"))
@@ -141,19 +165,19 @@ async def cmd_signal_report(message: Message, sessionmaker: async_sessionmaker[A
         await message.answer(str(e))
         return
 
-    settlement_result = report.settlement.result if report.settlement is not None else None
+    settlement_result = report.settlement.result.value if report.settlement is not None else None
     await message.answer(
         "\n".join(
             [
                 f"id: {report.signal.id}",
-                f"sport: {report.signal.sport}",
-                f"bookmaker: {report.signal.bookmaker}",
+                f"sport: {_fmt_enum(report.signal.sport)}",
+                f"bookmaker: {_fmt_enum(report.signal.bookmaker)}",
                 f"match: {report.signal.match_name}",
                 f"market_type: {report.signal.market_type}",
                 f"selection: {report.signal.selection}",
                 f"odds_at_signal: {report.signal.odds_at_signal}",
                 f"min_entry_odds: {report.signal.min_entry_odds}",
-                f"status: {report.signal.status}",
+                f"status: {_fmt_enum(report.signal.status)}",
                 f"entries: {len(report.entries)}",
                 f"settlement_result: {settlement_result}",
                 f"failure_reviews: {len(report.failure_reviews)}",
@@ -204,6 +228,216 @@ async def cmd_signal_quality(message: Message, sessionmaker: async_sessionmaker[
                 f"is_overestimated: {m.is_overestimated}",
                 f"is_underestimated: {m.is_underestimated}",
                 f"quality_label: {m.quality_label}",
+            ]
+        )
+    )
+
+
+@router.message(Command("enter_signal"))
+async def cmd_enter_signal(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 4:
+        await message.answer("Usage: /enter_signal <signal_id> <entered_odds> <stake_amount>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+        entered_odds = _parse_decimal(parts[2])
+        stake_amount = _parse_decimal(parts[3])
+    except Exception:
+        await message.answer("Example: /enter_signal 12 1.87 1000")
+        return
+
+    async with sessionmaker() as session:
+        entry = await EntryService().register_entry(
+            session,
+            EntryCreate(
+                signal_id=signal_id,
+                status=EntryStatus.ENTERED,
+                entered_odds=entered_odds,
+                stake_amount=stake_amount,
+                entered_at=_utc_now(),
+                is_manual=True,
+                delay_seconds=None,
+            ),
+        )
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"signal_id: {signal_id}",
+                f"status: {entry.status.value}",
+                f"entered_odds: {entry.entered_odds}",
+                f"stake_amount: {entry.stake_amount}",
+            ]
+        )
+    )
+
+
+@router.message(Command("miss_signal"))
+async def cmd_miss_signal(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer("Usage: /miss_signal <signal_id> <reason>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+    except Exception:
+        await message.answer("Example: /miss_signal 12 market moved too fast")
+        return
+
+    reason = (message.text or "").split(None, 2)[2].strip()
+    if not reason:
+        await message.answer("Usage: /miss_signal <signal_id> <reason>")
+        return
+
+    async with sessionmaker() as session:
+        entry = await EntryService().register_entry(
+            session,
+            EntryCreate(
+                signal_id=signal_id,
+                status=EntryStatus.SKIPPED,
+                missed_reason=reason,
+                is_manual=True,
+            ),
+        )
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"signal_id: {signal_id}",
+                f"status: {entry.status.value}",
+                f"missed_reason: {entry.missed_reason}",
+            ]
+        )
+    )
+
+
+@router.message(Command("settle_signal"))
+async def cmd_settle_signal(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 4:
+        await message.answer("Usage: /settle_signal <signal_id> <WIN|LOSE|VOID> <profit_loss>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+        result_raw = parts[2].upper().strip()
+        profit_loss = _parse_decimal(parts[3])
+        result = BetResult(result_raw)
+    except Exception:
+        await message.answer("Examples: /settle_signal 12 WIN 870 | /settle_signal 12 LOSE -1000 | /settle_signal 12 VOID 0")
+        return
+
+    async with sessionmaker() as session:
+        settlement = await SettlementService().register_settlement(
+            session,
+            SettlementCreate(
+                signal_id=signal_id,
+                result=result,
+                profit_loss=profit_loss,
+                bankroll_before=None,
+                bankroll_after=None,
+            ),
+        )
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"signal_id: {signal_id}",
+                f"result: {settlement.result.value}",
+                f"profit_loss: {settlement.profit_loss}",
+            ]
+        )
+    )
+
+
+@router.message(Command("auto_review"))
+async def cmd_auto_review(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: /auto_review <signal_id>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+    except Exception:
+        await message.answer("Example: /auto_review 12")
+        return
+
+    async with sessionmaker() as session:
+        review = await FailureReviewService().register_auto_failure_review(session, signal_id)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"signal_id: {signal_id}",
+                f"category: {review.category.value}",
+                f"auto_reason: {review.auto_reason}",
+            ]
+        )
+    )
+
+
+@router.message(Command("full_signal_review"))
+async def cmd_full_signal_review(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: /full_signal_review <signal_id>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+    except Exception:
+        await message.answer("Example: /full_signal_review 12")
+        return
+
+    try:
+        async with sessionmaker() as session:
+            report = await AnalyticsService().get_signal_report(session, signal_id)
+            q = await SignalQualityService().build_signal_quality_report(session, signal_id)
+    except ValueError as e:
+        await message.answer(str(e))
+        return
+
+    settlement_result = report.settlement.result.value if report.settlement is not None else None
+    m = q.metrics
+    await message.answer(
+        "\n".join(
+            [
+                f"id: {report.signal.id}",
+                f"match: {report.signal.match_name}",
+                f"bookmaker: {_fmt_enum(report.signal.bookmaker)}",
+                f"market_type: {report.signal.market_type}",
+                f"selection: {report.signal.selection}",
+                f"status: {_fmt_enum(report.signal.status)}",
+                f"entries: {len(report.entries)}",
+                f"settlement_result: {settlement_result}",
+                f"predicted_prob: {_fmt_decimal(m.predicted_prob)}",
+                f"implied_prob: {_fmt_decimal(m.implied_prob)}",
+                f"prediction_error: {_fmt_decimal(m.prediction_error)}",
+                f"quality_label: {m.quality_label}",
+                f"failure_reviews: {len(report.failure_reviews)}",
             ]
         )
     )
