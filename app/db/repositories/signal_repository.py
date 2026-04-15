@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.models.prediction_log import PredictionLog
 from app.db.models.signal import Signal
@@ -36,4 +37,19 @@ class SignalRepository:
         """Update Signal.status (no commit)."""
         signal.status = status
         session.add(signal)
+
+    async def get_signal_full_graph(self, session: AsyncSession, signal_id: int) -> Signal | None:
+        """Load Signal with prediction_logs, entries, settlement, failure_reviews."""
+        stmt = (
+            select(Signal)
+            .where(Signal.id == signal_id)
+            .options(
+                selectinload(Signal.prediction_logs),
+                selectinload(Signal.entries),
+                selectinload(Signal.settlement),
+                selectinload(Signal.failure_reviews),
+            )
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
