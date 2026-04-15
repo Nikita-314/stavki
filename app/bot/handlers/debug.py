@@ -750,6 +750,7 @@ async def cmd_period_report(message: Message, sessionmaker: async_sessionmaker[A
     o = report.overview
 
     lines: list[str] = [
+        "mode: unit_based",
         f"period_started_at: {o.period_started_at}",
         f"period_label: {o.period_label}",
         f"start_balance: {o.start_balance}",
@@ -777,6 +778,52 @@ async def cmd_period_report(message: Message, sessionmaker: async_sessionmaker[A
             lines.append(
                 f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
                 f"pl={it.total_profit_loss} avg={it.avg_profit_loss}"
+            )
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("period_report_rub"))
+async def cmd_period_report_rub(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        report = await PeriodReportService().get_realistic_period_report(session)
+
+    o = report.overview
+
+    lines: list[str] = [
+        "mode: realistic_fixed_stake",
+        f"period_started_at: {o.period_started_at}",
+        f"period_label: {o.period_label}",
+        f"start_balance_rub: {o.start_balance_rub}",
+        f"flat_stake_rub: {o.flat_stake_rub}",
+        f"total_profit_loss_rub: {o.total_profit_loss_rub}",
+        f"current_balance_rub: {o.current_balance_rub}",
+        f"settled_signals_count: {o.settled_signals_count}",
+        f"wins/losses/voids: {o.wins}/{o.losses}/{o.voids}",
+    ]
+
+    top_sport = report.by_sport[:5]
+    if top_sport:
+        lines.append("")
+        lines.append("top 5 by_sport:")
+        for it in top_sport:
+            lines.append(
+                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
+                f"pl_rub={it.total_profit_loss_rub} avg_rub={it.avg_profit_loss_rub}"
+            )
+
+    top_market = report.by_market_type[:5]
+    if top_market:
+        lines.append("")
+        lines.append("top 5 by_market_type:")
+        for it in top_market:
+            lines.append(
+                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
+                f"pl_rub={it.total_profit_loss_rub} avg_rub={it.avg_profit_loss_rub}"
             )
 
     await message.answer("\n".join(lines))
