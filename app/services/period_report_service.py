@@ -18,6 +18,8 @@ class PeriodReportService:
     _balance_repo = BalanceRepository()
 
     async def get_period_report(self, session: AsyncSession) -> PeriodReport:
+        # TODO: add a separate realistic period report (fixed stake in RUB) based on Settlement+Signal,
+        # keeping this unit-based report for analytics.
         snapshot = await self._balance_repo.get_latest_snapshot(session)
 
         if snapshot is not None:

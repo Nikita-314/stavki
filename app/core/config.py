@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated
 
 from pydantic import BeforeValidator
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     admin_user_ids: Annotated[list[int], BeforeValidator(_parse_admin_user_ids)] = []
     signal_chat_id: int | None = None
     result_chat_id: int | None = None
+    virtual_flat_stake_rub: Decimal = Decimal("1000.00")
+    virtual_start_balance_rub: Decimal = Decimal("50000.00")
 
     model_config = SettingsConfigDict(
         env_file=".env",

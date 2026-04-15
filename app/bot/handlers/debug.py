@@ -646,11 +646,38 @@ async def cmd_balance(message: Message, sessionmaker: async_sessionmaker[AsyncSe
     await message.answer(
         "\n".join(
             [
+                "mode: unit_based",
                 f"base_amount: {overview.base_amount}",
                 f"base_snapshot_at: {overview.base_snapshot_at}",
                 f"base_label: {overview.base_label}",
                 f"total_profit_loss_since_base: {overview.total_profit_loss_since_base}",
                 f"current_balance: {overview.current_balance}",
+                f"settled_signals_count: {overview.settled_signals_count}",
+                f"wins/losses/voids: {overview.wins}/{overview.losses}/{overview.voids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("balance_rub"))
+async def cmd_balance_rub(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        overview = await BalanceService().get_realistic_balance_overview(session)
+
+    await message.answer(
+        "\n".join(
+            [
+                "mode: realistic_fixed_stake",
+                f"flat_stake_rub: {overview.flat_stake_rub}",
+                f"base_amount: {overview.base_amount}",
+                f"base_snapshot_at: {overview.base_snapshot_at}",
+                f"base_label: {overview.base_label}",
+                f"total_profit_loss_rub: {overview.total_profit_loss_rub}",
+                f"current_balance_rub: {overview.current_balance_rub}",
                 f"settled_signals_count: {overview.settled_signals_count}",
                 f"wins/losses/voids: {overview.wins}/{overview.losses}/{overview.voids}",
             ]
