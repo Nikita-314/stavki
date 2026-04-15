@@ -11,6 +11,7 @@ from app.services.failure_review_service import FailureReviewService
 from app.services.ingestion_service import IngestionService
 from app.services.signal_service import SignalService
 from app.services.signal_quality_service import SignalQualityService
+from app.services.signal_quality_summary_service import SignalQualitySummaryService
 from app.services.settlement_service import SettlementService
 from app.services.training_dataset_service import TrainingDatasetService
 
@@ -26,6 +27,7 @@ __all__ = [
     "IngestionService",
     "SignalService",
     "SignalQualityService",
+    "SignalQualitySummaryService",
     "SettlementService",
     "TrainingDatasetService",
 ]

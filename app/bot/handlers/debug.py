@@ -13,6 +13,7 @@ from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
 from app.services.signal_quality_service import SignalQualityService
+from app.services.signal_quality_summary_service import SignalQualitySummaryService
 
 
 router = Router(name="debug")
@@ -206,3 +207,50 @@ async def cmd_signal_quality(message: Message, sessionmaker: async_sessionmaker[
             ]
         )
     )
+
+
+@router.message(Command("quality_summary"))
+async def cmd_quality_summary(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        summary = await SignalQualitySummaryService().build_quality_summary(session)
+
+    top_market = summary.by_market_type[:3]
+    top_label = summary.by_quality_label[:3]
+    top_buckets = summary.by_calibration_bucket[:5]
+
+    lines: list[str] = [
+        f"total_signals: {summary.total_signals}",
+        f"signals_with_outcome: {summary.signals_with_outcome}",
+        f"avg_prediction_error: {_fmt_decimal(summary.avg_prediction_error)}",
+        f"overestimated_count: {summary.overestimated_count}",
+        f"underestimated_count: {summary.underestimated_count}",
+        "",
+        "top by_market_type:",
+    ]
+    for it in top_market:
+        lines.append(
+            f"- {it.key}: total={it.total_signals}, with_outcome={it.with_outcome}, "
+            f"avg_err={_fmt_decimal(it.avg_prediction_error)}"
+        )
+
+    lines.append("")
+    lines.append("top by_quality_label:")
+    for it in top_label:
+        lines.append(
+            f"- {it.key}: total={it.total_signals}, with_outcome={it.with_outcome}, "
+            f"avg_err={_fmt_decimal(it.avg_prediction_error)}"
+        )
+
+    lines.append("")
+    lines.append("top by_calibration_bucket:")
+    for b in top_buckets:
+        lines.append(
+            f"- {b.bucket}: total={b.total_signals}, W/L={b.wins}/{b.losses}, "
+            f"win_rate={_fmt_decimal(b.actual_win_rate)}, avg_err={_fmt_decimal(b.avg_prediction_error)}"
+        )
+
+    await message.answer("\n".join(lines))
