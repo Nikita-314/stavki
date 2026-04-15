@@ -932,6 +932,59 @@ def _fmt_bool(v: bool) -> str:
     return "yes" if v else "no"
 
 
+@router.message(Command("latest_signals"))
+async def cmd_latest_signals(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    limit = 10
+    if len(parts) >= 2:
+        try:
+            limit = int(parts[1])
+        except Exception:
+            await message.answer("Usage: /latest_signals [limit] (example: /latest_signals 20)")
+            return
+
+    if limit <= 0:
+        await message.answer("limit must be > 0 (max 30)")
+        return
+    if limit > 30:
+        limit = 30
+
+    async with sessionmaker() as session:
+        signals = await SignalRepository().list_latest_signals(session, limit=limit)
+
+    if not signals:
+        await message.answer("No signals found")
+        return
+
+    lines: list[str] = ["LATEST SIGNALS", ""]
+    for s in signals:
+        sport = getattr(s.sport, "value", s.sport)
+        bookmaker = getattr(s.bookmaker, "value", s.bookmaker)
+        status = getattr(s.status, "value", s.status)
+        result = s.settlement.result.value if s.settlement is not None else "-"
+        lines.append(
+            " | ".join(
+                [
+                    f"#{s.id}",
+                    str(sport),
+                    str(bookmaker),
+                    s.match_name,
+                    s.market_type,
+                    s.selection,
+                    f"odds={s.odds_at_signal}",
+                    f"status={status}",
+                    f"result={result}",
+                ]
+            )
+        )
+
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("system_status"))
 async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):

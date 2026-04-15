@@ -110,3 +110,14 @@ class SignalRepository:
         result = await session.execute(stmt)
         return [int(x) for x in result.scalars().all()]
 
+    async def list_latest_signals(self, session: AsyncSession, limit: int = 10) -> list[Signal]:
+        """Return latest Signal rows ordered by id desc, with settlement preloaded."""
+        stmt = (
+            select(Signal)
+            .options(selectinload(Signal.settlement))
+            .order_by(Signal.id.desc())
+            .limit(int(limit))
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
