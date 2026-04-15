@@ -1,0 +1,8 @@
+2026-04-15 15:57:16,993 INFO aiogram.dispatcher: Start polling
+2026-04-15 15:57:20,372 INFO aiogram.dispatcher: Run polling for bot @admiewnlesstavki_bot id=8752474451 - 'stavki_admin'
+2026-04-15 16:02:42,138 INFO aiogram.event: Update id=748608485 is not handled. Duration 33 ms by bot id=8752474451
+2026-04-15 16:19:49,857 INFO aiogram.event: Update id=748608486 is not handled. Duration 37 ms by bot id=8752474451
+2026-04-15 16:19:57,418 INFO aiogram.event: Update id=748608487 is not handled. Duration 8 ms by bot id=8752474451
+2026-04-15 16:21:36,993 INFO aiogram.dispatcher: Start polling
+2026-04-15 16:21:37,011 INFO aiogram.dispatcher: Run polling for bot @admiewnlesstavki_bot id=8752474451 - 'stavki_admin'
+2026-04-15 16:21:47,661 INFO aiogram.event: Update id=748608488 is handled. Duration 103 ms by bot id=8752474451

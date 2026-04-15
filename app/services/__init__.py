@@ -4,6 +4,7 @@ from app.services.balance_service import BalanceService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
+from app.services.auto_signal_service import AutoSignalService
 from app.services.bootstrap_service import BootstrapService
 from app.services.candidate_filter_service import CandidateFilterService
 from app.services.demo_cycle_service import DemoCycleService
@@ -30,6 +31,7 @@ __all__ = [
     "AdapterIngestionService",
     "AnalyticsService",
     "AnalyticsSummaryService",
+    "AutoSignalService",
     "BootstrapService",
     "CandidateFilterService",
     "DemoCycleService",

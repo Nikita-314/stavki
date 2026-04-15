@@ -110,3 +110,49 @@ In Telegram (admin user), send:
 - `/remote_status`
 - `/sanity_check`
 
+### Automatic signals
+
+To enable automatic signal polling, set these values in `.env`:
+
+```text
+AUTO_SIGNAL_POLLING_ENABLED=true
+AUTO_SIGNAL_POLLING_INTERVAL_SECONDS=60
+AUTO_SIGNAL_PREVIEW_ONLY=false
+AUTO_SIGNAL_MAX_CREATED_PER_CYCLE=
+ODDS_PROVIDER_BASE_URL=...
+ODDS_PROVIDER_SPORT=...
+ODDS_PROVIDER_MARKETS=...
+SIGNAL_CHAT_ID=...
+```
+
+Safe test mode:
+
+```text
+AUTO_SIGNAL_PREVIEW_ONLY=true
+```
+
+This mode fetches and previews provider data, but does not save signals to the database.
+
+### Restart bot in screen after changing `.env`
+
+Inside screen:
+
+```bash
+cd /path/to/stavki
+source .venv/bin/activate
+python3 -m app.main
+```
+
+Or from outside:
+
+```bash
+screen -S stavki-bot -X quit
+screen -S stavki-bot -dm bash -c "cd /path/to/stavki && source .venv/bin/activate && python3 -m app.main"
+```
+
+### Check automatic cycle in Telegram
+
+- `/auto_signal_status` — show whether automatic signals are enabled
+- `/auto_signal_run_once` — run one cycle manually
+- `/remote_status` — inspect current signal flow after a cycle
+

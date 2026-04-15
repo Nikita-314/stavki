@@ -86,3 +86,27 @@ python3 -m app.main
   - `/sanity_check`
   - `/balance_rub`
 
+### Automatic signal polling
+
+Бот может сам периодически опрашивать внешний odds-style источник, сохранять новые сигналы и отправлять их в Telegram.
+
+Основные переменные:
+
+- `AUTO_SIGNAL_POLLING_ENABLED=true` — включает фоновый цикл
+- `AUTO_SIGNAL_POLLING_INTERVAL_SECONDS=60` — интервал опроса источника
+- `AUTO_SIGNAL_PREVIEW_ONLY=true` — только fetch + preview + логирование, без сохранения сигналов
+- `AUTO_SIGNAL_MAX_CREATED_PER_CYCLE=5` — ограничение на число новых сигналов за один цикл
+
+Для работы автосигналов также должны быть настроены:
+
+- `ODDS_PROVIDER_BASE_URL`
+- `ODDS_PROVIDER_SPORT`
+- `ODDS_PROVIDER_MARKETS`
+- при необходимости `ODDS_PROVIDER_API_KEY`
+- `SIGNAL_CHAT_ID`, если вы хотите автоматически отправлять новые сигналы в Telegram
+
+Проверка вручную:
+
+- `/auto_signal_status` — показать текущие настройки автопотока
+- `/auto_signal_run_once` — вручную выполнить один цикл fetch/preview/ingest/notify
+

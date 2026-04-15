@@ -7,6 +7,12 @@ from pydantic import BeforeValidator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _empty_str_to_none(v: object) -> object:
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 def _parse_admin_user_ids(v: object) -> list[int]:
     if v is None:
         return []
@@ -27,8 +33,8 @@ class Settings(BaseSettings):
     database_url: str
     debug: bool = False
     admin_user_ids: Annotated[list[int], BeforeValidator(_parse_admin_user_ids)] = []
-    signal_chat_id: int | None = None
-    result_chat_id: int | None = None
+    signal_chat_id: Annotated[int | None, BeforeValidator(_empty_str_to_none)] = None
+    result_chat_id: Annotated[int | None, BeforeValidator(_empty_str_to_none)] = None
     virtual_flat_stake_rub: Decimal = Decimal("1000.00")
     virtual_start_balance_rub: Decimal = Decimal("50000.00")
     provider_test_url: str | None = None
@@ -42,6 +48,10 @@ class Settings(BaseSettings):
     odds_provider_odds_format: str | None = "decimal"
     odds_provider_date_format: str | None = "iso"
     odds_provider_timeout_seconds: int = 20
+    auto_signal_polling_enabled: bool = False
+    auto_signal_polling_interval_seconds: int = 60
+    auto_signal_preview_only: bool = False
+    auto_signal_max_created_per_cycle: Annotated[int | None, BeforeValidator(_empty_str_to_none)] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

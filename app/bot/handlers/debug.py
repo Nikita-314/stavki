@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -41,11 +42,18 @@ from app.providers.generic_odds_adapter import GenericOddsAdapter
 from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
+from app.services.auto_signal_service import AutoSignalService
 from app.schemas.provider_client import ProviderClientConfig
 from app.services.remote_smoke_service import RemoteSmokeService
 
 
 router = Router(name="debug")
+logger = logging.getLogger(__name__)
+
+
+def _text_is(*values: str):
+    expected = {v.strip() for v in values}
+    return lambda m: (m.text or "").strip() in expected
 
 
 def _is_allowed(message: Message) -> bool:
@@ -57,13 +65,17 @@ def _is_allowed(message: Message) -> bool:
 
 
 async def _deny(message: Message) -> None:
-    await message.answer("Access denied")
+    await message.answer("Доступ запрещён")
 
 
 def _fmt_decimal(v: Decimal | None) -> str:
     if v is None:
         return "None"
     return str(v)
+
+
+def _fmt_yes_no(v: bool) -> str:
+    return "Да" if v else "Нет"
 
 
 def _utc_now() -> datetime:
@@ -81,6 +93,140 @@ def _parse_decimal(value: str) -> Decimal:
 
 def _fmt_enum(v: object) -> str:
     return getattr(v, "value", str(v))
+
+
+def _fmt_sport_ru(v: object) -> str:
+    raw = _fmt_enum(v)
+    mapping = {
+        "CS2": "CS2",
+        "DOTA2": "Dota 2",
+        "FOOTBALL": "Футбол",
+    }
+    return mapping.get(raw, raw)
+
+
+def _fmt_bookmaker_ru(v: object) -> str:
+    raw = _fmt_enum(v)
+    mapping = {
+        "FONBET": "Fonbet",
+        "WINLINE": "Winline",
+        "BETBOOM": "BetBoom",
+    }
+    return mapping.get(raw, raw)
+
+
+def _fmt_signal_status_ru(v: object) -> str:
+    raw = _fmt_enum(v)
+    mapping = {
+        "NEW": "Новый",
+        "SENT": "Отправлен",
+        "ENTERED": "Введён",
+        "MISSED": "Пропущен",
+        "SETTLED": "Завершён",
+        "CANCELED": "Отменён",
+    }
+    return mapping.get(raw, raw)
+
+
+def _fmt_bet_result_ru(v: object) -> str:
+    raw = _fmt_enum(v)
+    mapping = {
+        "WIN": "Победа",
+        "LOSE": "Поражение",
+        "VOID": "Возврат",
+        "UNKNOWN": "Неизвестно",
+        "-": "-",
+    }
+    return mapping.get(raw, raw)
+
+
+def _fmt_market_type_ru(value: str | None) -> str:
+    raw = (value or "").strip()
+    mapping = {
+        "match_winner": "Победитель матча",
+        "moneyline": "Победитель матча",
+        "h2h": "Победитель матча",
+        "1x2": "Исход 1X2",
+        "handicap": "Фора",
+        "total_goals": "Тотал",
+        "totals": "Тотал",
+        "spreads": "Фора",
+    }
+    return mapping.get(raw.lower(), raw or "-")
+
+
+def _fmt_quality_label_ru(value: str | None) -> str:
+    raw = (value or "").strip()
+    mapping = {
+        "strong_value_win": "Сильный value, победа",
+        "strong_value_loss": "Сильный value, проигрыш",
+        "market_aligned_win": "По рынку, победа",
+        "market_aligned_loss": "По рынку, проигрыш",
+        "insufficient_data": "Недостаточно данных",
+    }
+    return mapping.get(raw, raw.replace("_", " ") if raw else "-")
+
+
+def _fmt_failure_category_ru(value: str | None) -> str:
+    raw = (value or "").strip()
+    mapping = {
+        "MODEL_ERROR": "Ошибка модели",
+        "EXECUTION_ERROR": "Ошибка исполнения",
+        "MARKET_UNAVAILABLE": "Рынок недоступен",
+        "LINE_MOVEMENT": "Сдвиг линии",
+        "VARIANCE": "Дисперсия",
+        "DATA_ISSUE": "Проблема данных",
+        "UNKNOWN": "Неизвестно",
+    }
+    return mapping.get(raw, raw.replace("_", " ") if raw else "-")
+
+
+def _format_latest_signal_card(signal) -> str:
+    sport = _fmt_sport_ru(signal.sport)
+    bookmaker = _fmt_bookmaker_ru(signal.bookmaker)
+    status = _fmt_signal_status_ru(signal.status)
+    result = _fmt_bet_result_ru(signal.settlement.result if signal.settlement is not None else "-")
+    market = _fmt_market_type_ru(signal.market_type)
+    return "\n".join(
+        [
+            f"#{signal.id} • {sport} • {bookmaker}",
+            f"Матч: {signal.match_name}",
+            f"Рынок: {market} → {signal.selection}",
+            f"Коэффициент: {signal.odds_at_signal} • Статус: {status} • Итог: {result}",
+        ]
+    )
+
+
+def _format_latest_result_card(signal, quality_label: str) -> str:
+    sport = _fmt_sport_ru(signal.sport)
+    bookmaker = _fmt_bookmaker_ru(signal.bookmaker)
+    result = _fmt_bet_result_ru(signal.settlement.result if signal.settlement is not None else "-")
+    market = _fmt_market_type_ru(signal.market_type)
+    pl = signal.settlement.profit_loss if signal.settlement is not None else None
+    return "\n".join(
+        [
+            f"#{signal.id} • {sport} • {bookmaker}",
+            f"Матч: {signal.match_name}",
+            f"Рынок: {market} → {signal.selection}",
+            f"Итог: {result} • P/L: {pl} • Качество: {_fmt_quality_label_ru(quality_label)}",
+        ]
+    )
+
+
+def _format_latest_failure_card(signal, category: str, reason: str) -> str:
+    sport = _fmt_sport_ru(signal.sport)
+    bookmaker = _fmt_bookmaker_ru(signal.bookmaker)
+    result = _fmt_bet_result_ru(signal.settlement.result if signal.settlement is not None else "-")
+    market = _fmt_market_type_ru(signal.market_type)
+    return "\n".join(
+        [
+            f"#{signal.id} • {sport} • {bookmaker}",
+            f"Матч: {signal.match_name}",
+            f"Рынок: {market} → {signal.selection}",
+            f"Итог: {result} • Категория: {category}",
+            f"Причина: {reason}",
+        ]
+    )
 
 
 def _parse_sport(value: str):
@@ -116,7 +262,118 @@ async def cmd_debug(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
-    await message.answer("Debug menu", reply_markup=get_debug_keyboard())
+    await message.answer(
+        "🛠 Меню диагностики\nВыберите действие кнопками ниже.\nПолный список команд: /debug_help",
+        reply_markup=get_debug_keyboard(),
+    )
+
+
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer(
+        "👋 Бот запущен и готов к работе.\n"
+        "Это бот для сигналов и диагностики системы.\n\n"
+        "Нажмите кнопки ниже\n"
+        "или откройте список команд через /debug_help",
+        reply_markup=get_debug_keyboard(),
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("ℹ️ Используйте /debug_help для списка команд.", reply_markup=get_debug_keyboard())
+
+
+@router.message(_text_is("Проверка бота"))
+@router.message(Command("ping"))
+async def cmd_ping(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("🏓 Бот на связи: pong")
+
+
+@router.message(_text_is("Кто я"))
+@router.message(Command("whoami"))
+async def cmd_whoami(message: Message) -> None:
+    allowed = _is_allowed(message)
+    if not allowed:
+        await _deny(message)
+        return
+
+    user_id = message.from_user.id if message.from_user else None
+    chat_id = message.chat.id if getattr(message, "chat", None) is not None else None
+    chat_type = message.chat.type if getattr(message, "chat", None) is not None else None
+    await message.answer(
+        "\n".join(
+            [
+                "🪪 Кто вы для бота",
+                f"- User ID: {user_id}",
+                f"- Chat ID: {chat_id}",
+                f"- Тип чата: {chat_type}",
+                f"- Доступ: {_fmt_yes_no(allowed)}",
+            ]
+        )
+    )
+
+
+@router.message(_text_is("Автосигналы"))
+@router.message(Command("auto_signal_status"))
+async def cmd_auto_signal_status(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    settings = get_settings()
+    provider_configured = bool(settings.odds_provider_base_url)
+    signal_chat_configured = settings.signal_chat_id is not None
+    await message.answer(
+        "\n".join(
+            [
+                "🤖 Автосигналы",
+                f"- Включено: {_fmt_yes_no(settings.auto_signal_polling_enabled)}",
+                f"- Интервал: {settings.auto_signal_polling_interval_seconds} сек.",
+                f"- Только preview: {_fmt_yes_no(settings.auto_signal_preview_only)}",
+                f"- Лимит за цикл: {settings.auto_signal_max_created_per_cycle}",
+                f"- Provider настроен: {_fmt_yes_no(provider_configured)}",
+                f"- Чат сигналов настроен: {_fmt_yes_no(signal_chat_configured)}",
+            ]
+        ),
+        reply_markup=get_debug_keyboard(),
+    )
+
+
+@router.message(_text_is("Запустить цикл"))
+@router.message(Command("auto_signal_run_once"))
+async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    res = await AutoSignalService().run_single_cycle(sessionmaker, message.bot)
+    await message.answer(
+        "\n".join(
+            [
+                "🔄 Автосигналы: один цикл",
+                f"- Endpoint: {res.endpoint}",
+                f"- Fetch успешен: {_fmt_yes_no(res.fetch_ok)}",
+                f"- Кандидатов после preview: {res.preview_candidates}",
+                f"- Отброшено на preview: {res.preview_skipped_items}",
+                f"- Создано сигналов: {res.created_signals_count}",
+                f"- Пропущено кандидатов: {res.skipped_candidates_count}",
+                f"- Отправлено уведомлений: {res.notifications_sent_count}",
+                f"- Только preview: {_fmt_yes_no(res.preview_only)}",
+                f"- ID новых сигналов: {res.created_signal_ids}",
+                f"- Сообщение: {res.message}",
+            ]
+        )
+    )
 
 
 @router.message(lambda m: (m.text or "").strip() in {"Mock candidates", "/mock_candidates"})
@@ -668,6 +925,7 @@ async def cmd_notify_result(message: Message, sessionmaker: async_sessionmaker[A
     await message.answer("result notification sent")
 
 
+@router.message(_text_is("Баланс"))
 @router.message(Command("balance"))
 async def cmd_balance(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -680,19 +938,20 @@ async def cmd_balance(message: Message, sessionmaker: async_sessionmaker[AsyncSe
     await message.answer(
         "\n".join(
             [
-                "mode: unit_based",
-                f"base_amount: {overview.base_amount}",
-                f"base_snapshot_at: {overview.base_snapshot_at}",
-                f"base_label: {overview.base_label}",
-                f"total_profit_loss_since_base: {overview.total_profit_loss_since_base}",
-                f"current_balance: {overview.current_balance}",
-                f"settled_signals_count: {overview.settled_signals_count}",
-                f"wins/losses/voids: {overview.wins}/{overview.losses}/{overview.voids}",
+                "💼 Баланс (условные единицы)",
+                f"- Базовая точка: {overview.base_amount}",
+                f"- Время точки отсчёта: {overview.base_snapshot_at}",
+                f"- Метка точки отсчёта: {overview.base_label}",
+                f"- Прибыль с точки отсчёта: {overview.total_profit_loss_since_base}",
+                f"- Текущий баланс: {overview.current_balance}",
+                f"- Завершённых сигналов: {overview.settled_signals_count}",
+                f"- Побед / поражений / возвратов: {overview.wins}/{overview.losses}/{overview.voids}",
             ]
         )
     )
 
 
+@router.message(_text_is("Баланс ₽"))
 @router.message(Command("balance_rub"))
 async def cmd_balance_rub(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -705,15 +964,15 @@ async def cmd_balance_rub(message: Message, sessionmaker: async_sessionmaker[Asy
     await message.answer(
         "\n".join(
             [
-                "mode: realistic_fixed_stake",
-                f"flat_stake_rub: {overview.flat_stake_rub}",
-                f"base_amount: {overview.base_amount}",
-                f"base_snapshot_at: {overview.base_snapshot_at}",
-                f"base_label: {overview.base_label}",
-                f"total_profit_loss_rub: {overview.total_profit_loss_rub}",
-                f"current_balance_rub: {overview.current_balance_rub}",
-                f"settled_signals_count: {overview.settled_signals_count}",
-                f"wins/losses/voids: {overview.wins}/{overview.losses}/{overview.voids}",
+                "💰 Баланс (₽, фиксированная ставка)",
+                f"- Фиксированная ставка: {overview.flat_stake_rub}",
+                f"- Стартовый баланс: {overview.base_amount}",
+                f"- Время точки отсчёта: {overview.base_snapshot_at}",
+                f"- Метка точки отсчёта: {overview.base_label}",
+                f"- Текущий результат: {overview.total_profit_loss_rub}",
+                f"- Текущий баланс: {overview.current_balance_rub}",
+                f"- Завершённых сигналов: {overview.settled_signals_count}",
+                f"- Побед / поражений / возвратов: {overview.wins}/{overview.losses}/{overview.voids}",
             ]
         )
     )
@@ -772,6 +1031,7 @@ async def cmd_balance_history(message: Message, sessionmaker: async_sessionmaker
     await message.answer("\n".join(lines))
 
 
+@router.message(_text_is("Отчёт за период"))
 @router.message(Command("period_report"))
 async def cmd_period_report(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -784,39 +1044,40 @@ async def cmd_period_report(message: Message, sessionmaker: async_sessionmaker[A
     o = report.overview
 
     lines: list[str] = [
-        "mode: unit_based",
-        f"period_started_at: {o.period_started_at}",
-        f"period_label: {o.period_label}",
-        f"start_balance: {o.start_balance}",
-        f"total_profit_loss: {o.total_profit_loss}",
-        f"current_balance: {o.current_balance}",
-        f"settled_signals_count: {o.settled_signals_count}",
-        f"wins/losses/voids: {o.wins}/{o.losses}/{o.voids}",
+        "📈 Отчёт за период (условные единицы)",
+        f"- Период с: {o.period_started_at}",
+        f"- Метка периода: {o.period_label}",
+        f"- Стартовый баланс: {o.start_balance}",
+        f"- Результат за период: {o.total_profit_loss}",
+        f"- Текущий баланс: {o.current_balance}",
+        f"- Завершённых сигналов: {o.settled_signals_count}",
+        f"- Побед / поражений / возвратов: {o.wins}/{o.losses}/{o.voids}",
     ]
 
     top_sport = report.by_sport[:5]
     if top_sport:
         lines.append("")
-        lines.append("top 5 by_sport:")
+        lines.append("Топ-5 по видам спорта:")
         for it in top_sport:
             lines.append(
-                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
-                f"pl={it.total_profit_loss} avg={it.avg_profit_loss}"
+                f"- {it.key}: сигналов={it.settled_signals_count} побед/поражений/возвратов={it.wins}/{it.losses}/{it.voids} "
+                f"результат={it.total_profit_loss} среднее={it.avg_profit_loss}"
             )
 
     top_market = report.by_market_type[:5]
     if top_market:
         lines.append("")
-        lines.append("top 5 by_market_type:")
+        lines.append("Топ-5 по рынкам:")
         for it in top_market:
             lines.append(
-                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
-                f"pl={it.total_profit_loss} avg={it.avg_profit_loss}"
+                f"- {it.key}: сигналов={it.settled_signals_count} побед/поражений/возвратов={it.wins}/{it.losses}/{it.voids} "
+                f"результат={it.total_profit_loss} среднее={it.avg_profit_loss}"
             )
 
     await message.answer("\n".join(lines))
 
 
+@router.message(_text_is("Отчёт за период ₽"))
 @router.message(Command("period_report_rub"))
 async def cmd_period_report_rub(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -829,35 +1090,35 @@ async def cmd_period_report_rub(message: Message, sessionmaker: async_sessionmak
     o = report.overview
 
     lines: list[str] = [
-        "mode: realistic_fixed_stake",
-        f"period_started_at: {o.period_started_at}",
-        f"period_label: {o.period_label}",
-        f"start_balance_rub: {o.start_balance_rub}",
-        f"flat_stake_rub: {o.flat_stake_rub}",
-        f"total_profit_loss_rub: {o.total_profit_loss_rub}",
-        f"current_balance_rub: {o.current_balance_rub}",
-        f"settled_signals_count: {o.settled_signals_count}",
-        f"wins/losses/voids: {o.wins}/{o.losses}/{o.voids}",
+        "📊 Отчёт за период (₽)",
+        f"- Период с: {o.period_started_at}",
+        f"- Метка периода: {o.period_label}",
+        f"- Стартовый баланс: {o.start_balance_rub}",
+        f"- Фиксированная ставка: {o.flat_stake_rub}",
+        f"- Результат за период: {o.total_profit_loss_rub}",
+        f"- Текущий баланс: {o.current_balance_rub}",
+        f"- Завершённых сигналов: {o.settled_signals_count}",
+        f"- Побед / поражений / возвратов: {o.wins}/{o.losses}/{o.voids}",
     ]
 
     top_sport = report.by_sport[:5]
     if top_sport:
         lines.append("")
-        lines.append("top 5 by_sport:")
+        lines.append("Топ-5 по видам спорта:")
         for it in top_sport:
             lines.append(
-                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
-                f"pl_rub={it.total_profit_loss_rub} avg_rub={it.avg_profit_loss_rub}"
+                f"- {it.key}: сигналов={it.settled_signals_count} побед/поражений/возвратов={it.wins}/{it.losses}/{it.voids} "
+                f"результат={it.total_profit_loss_rub} среднее={it.avg_profit_loss_rub}"
             )
 
     top_market = report.by_market_type[:5]
     if top_market:
         lines.append("")
-        lines.append("top 5 by_market_type:")
+        lines.append("Топ-5 по рынкам:")
         for it in top_market:
             lines.append(
-                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
-                f"pl_rub={it.total_profit_loss_rub} avg_rub={it.avg_profit_loss_rub}"
+                f"- {it.key}: сигналов={it.settled_signals_count} побед/поражений/возвратов={it.wins}/{it.losses}/{it.voids} "
+                f"результат={it.total_profit_loss_rub} среднее={it.avg_profit_loss_rub}"
             )
 
     await message.answer("\n".join(lines))
@@ -1006,6 +1267,7 @@ def _require_url_or_settings_default(message: Message) -> str | None:
     return settings.provider_test_url
 
 
+@router.message(_text_is("Проверка данных"))
 @router.message(Command("sanity_check"))
 async def cmd_sanity_check(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -1017,21 +1279,21 @@ async def cmd_sanity_check(message: Message, sessionmaker: async_sessionmaker[As
 
     shown = report.issues[:10]
     lines = [
-        "SANITY CHECK",
-        f"- total_signals: {report.total_signals}",
-        f"- total_settlements: {report.total_settlements}",
-        f"- total_failure_reviews: {report.total_failure_reviews}",
-        f"- total_entries: {report.total_entries}",
-        f"- issues_count: {report.issues_count}",
+        "🧪 Проверка данных",
+        f"- Всего сигналов: {report.total_signals}",
+        f"- Завершений: {report.total_settlements}",
+        f"- Разборов ошибок: {report.total_failure_reviews}",
+        f"- Записей входа: {report.total_entries}",
+        f"- Найдено проблем: {report.issues_count}",
         "",
-        "issues (first 10):",
+        "Первые проблемы:",
     ]
     if not shown:
-        lines.append("- none")
+        lines.append("- Проблем не найдено")
     else:
         for it in shown:
             sid = it.signal_id if it.signal_id is not None else "-"
-            lines.append(f"- {it.issue_type} | signal_id={sid} | {it.details}")
+            lines.append(f"- {it.issue_type} • signal_id={sid} • {it.details}")
     await message.answer("\n".join(lines))
 
 
@@ -1824,20 +2086,20 @@ async def cmd_remote_status(message: Message, sessionmaker: async_sessionmaker[A
     await message.answer(
         "\n".join(
             [
-                "REMOTE STATUS",
-                f"- total_signals: {k.total_signals}",
-                f"- settled_signals: {k.settled_signals}",
-                f"- wins/losses/voids: {k.wins}/{k.losses}/{k.voids}",
-                f"- current_balance_rub: {balance.current_balance_rub}",
-                f"- current_balance_unit: {balance_unit.current_balance}",
-                f"- total_profit_loss_rub: {balance.total_profit_loss_rub}",
-                f"- snapshots_count: {snapshots_count}",
-                f"- latest_snapshot_label: {latest_snapshot_label}",
-                f"- avg_prediction_error: {qsum.avg_prediction_error}",
-                f"- overestimated_count: {qsum.overestimated_count}",
-                f"- underestimated_count: {qsum.underestimated_count}",
-                f"- sanity_issues_count: {sanity.issues_count}",
-                f"- latest_signal_ids: {latest_ids}",
+                "🌐 Состояние remote-потока",
+                f"- Всего сигналов: {k.total_signals}",
+                f"- Завершённых: {k.settled_signals}",
+                f"- Побед / поражений / возвратов: {k.wins}/{k.losses}/{k.voids}",
+                f"- Текущий баланс (₽): {balance.current_balance_rub}",
+                f"- Текущий баланс (unit): {balance_unit.current_balance}",
+                f"- Итог в рублях: {balance.total_profit_loss_rub}",
+                f"- Снимков баланса: {snapshots_count}",
+                f"- Последняя метка: {latest_snapshot_label}",
+                f"- Средняя ошибка прогноза: {qsum.avg_prediction_error}",
+                f"- Переоценённых: {qsum.overestimated_count}",
+                f"- Недооценённых: {qsum.underestimated_count}",
+                f"- Проблем в данных: {sanity.issues_count}",
+                f"- Последние ID сигналов: {latest_ids}",
             ]
         )
     )
@@ -1853,18 +2115,18 @@ async def cmd_server_checklist(message: Message) -> None:
     await message.answer(
         "\n".join(
             [
-                "SERVER CHECKLIST",
-                f"- bot token configured: {_fmt_bool(bool(getattr(s, 'bot_token', '') or ''))}",
-                f"- database url configured: {_fmt_bool(bool(getattr(s, 'database_url', '') or ''))}",
-                f"- signal chat id configured: {_fmt_bool(getattr(s, 'signal_chat_id', None) is not None)}",
-                f"- result chat id configured: {_fmt_bool(getattr(s, 'result_chat_id', None) is not None)}",
-                f"- odds provider base url configured: {_fmt_bool(bool(getattr(s, 'odds_provider_base_url', None)))}",
-                f"- odds provider sport configured: {_fmt_bool(bool(getattr(s, 'odds_provider_sport', None)))}",
-                f"- odds provider markets configured: {_fmt_bool(bool(getattr(s, 'odds_provider_markets', None)))}",
-                f"- admin ids configured: {_fmt_bool(bool(getattr(s, 'admin_user_ids', []) or []))}",
-                f"- provider timeout seconds: {getattr(s, 'odds_provider_timeout_seconds', None)}",
-                f"- virtual flat stake rub: {getattr(s, 'virtual_flat_stake_rub', None)}",
-                f"- virtual start balance rub: {getattr(s, 'virtual_start_balance_rub', None)}",
+                "🖥 Проверка настроек сервера",
+                f"- Токен бота задан: {_fmt_yes_no(bool(getattr(s, 'bot_token', '') or ''))}",
+                f"- Подключение к БД задано: {_fmt_yes_no(bool(getattr(s, 'database_url', '') or ''))}",
+                f"- Чат сигналов задан: {_fmt_yes_no(getattr(s, 'signal_chat_id', None) is not None)}",
+                f"- Чат результатов задан: {_fmt_yes_no(getattr(s, 'result_chat_id', None) is not None)}",
+                f"- URL remote provider задан: {_fmt_yes_no(bool(getattr(s, 'odds_provider_base_url', None)))}",
+                f"- Вид спорта provider задан: {_fmt_yes_no(bool(getattr(s, 'odds_provider_sport', None)))}",
+                f"- Рынки provider заданы: {_fmt_yes_no(bool(getattr(s, 'odds_provider_markets', None)))}",
+                f"- Admin ID заданы: {_fmt_yes_no(bool(getattr(s, 'admin_user_ids', []) or []))}",
+                f"- Таймаут provider: {getattr(s, 'odds_provider_timeout_seconds', None)} сек.",
+                f"- Фиксированная ставка: {getattr(s, 'virtual_flat_stake_rub', None)} ₽",
+                f"- Стартовый баланс: {getattr(s, 'virtual_start_balance_rub', None)} ₽",
             ]
         )
     )
@@ -1970,6 +2232,7 @@ async def cmd_remote_flow_demo(message: Message, sessionmaker: async_sessionmake
     )
 
 
+@router.message(_text_is("Помощь"))
 @router.message(Command("debug_help"))
 async def cmd_debug_help(message: Message) -> None:
     if not _is_allowed(message):
@@ -1979,20 +2242,39 @@ async def cmd_debug_help(message: Message) -> None:
     await message.answer(
         "\n".join(
             [
-                "DEBUG HELP",
+                "📚 Список команд",
                 "",
-                "BASIC",
-                "- /debug",
-                "- /system_status",
+                "Основное",
+                "- /start — открыть меню",
+                "- /ping — проверить, что бот жив",
+                "- /debug_help — показать список команд",
+                "",
+                "Сигналы",
+                "- /latest_signals",
+                "- /latest_results",
+                "- /latest_failures",
+                "- /signal_report <id>",
+                "- /signal_quality <id>",
+                "",
+                "Аналитика",
                 "- /quick_check",
+                "- /system_status",
+                "- /quality_summary",
+                "- /sanity_check",
                 "",
-                "DEMO",
-                "- /demo_cycle_win",
-                "- /demo_cycle_lose",
-                "- /demo_cycle_void",
-                "- /demo_smoke",
+                "Баланс",
+                "- /balance",
+                "- /balance_rub",
+                "- /period_report",
+                "- /period_report_rub",
+                "- /reset_balance <сумма> [метка]",
+                "- /balance_history",
                 "",
-                "REMOTE",
+                "Автосигналы",
+                "- /auto_signal_status",
+                "- /auto_signal_run_once",
+                "",
+                "Remote / ingest",
                 "- /odds_http_url",
                 "- /odds_http_preview",
                 "- /odds_http_ingest",
@@ -2001,28 +2283,13 @@ async def cmd_debug_help(message: Message) -> None:
                 "- /remote_flow_demo <sport> <event_external_id> <winner_selection>",
                 "- /remote_status",
                 "",
-                "DATA",
-                "- /latest_signals",
-                "- /latest_results",
-                "- /latest_failures",
-                "- /signal_report <id>",
-                "- /signal_quality <id>",
-                "- /quality_summary",
-                "",
-                "BALANCE",
-                "- /balance",
-                "- /balance_rub",
-                "- /period_report",
-                "- /period_report_rub",
-                "- /reset_balance <amount> [label...]",
-                "- /balance_history",
-                "",
-                "CHECKS",
-                "- /sanity_check",
-                "- /regression_pack",
+                "Debug",
+                "- /whoami",
                 "- /server_checklist",
+                "- /regression_pack",
             ]
-        )
+        ),
+        reply_markup=get_debug_keyboard(),
     )
 
 
@@ -2060,6 +2327,7 @@ async def cmd_regression_pack(message: Message, sessionmaker: async_sessionmaker
         )
     )
 
+@router.message(_text_is("Последние сигналы"))
 @router.message(Command("latest_signals"))
 async def cmd_latest_signals(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -2085,34 +2353,18 @@ async def cmd_latest_signals(message: Message, sessionmaker: async_sessionmaker[
         signals = await SignalRepository().list_latest_signals(session, limit=limit)
 
     if not signals:
-        await message.answer("No signals found")
+        await message.answer("📭 Пока сигналов нет.")
         return
 
-    lines: list[str] = ["LATEST SIGNALS", ""]
+    lines: list[str] = ["📌 Последние сигналы", ""]
     for s in signals:
-        sport = getattr(s.sport, "value", s.sport)
-        bookmaker = getattr(s.bookmaker, "value", s.bookmaker)
-        status = getattr(s.status, "value", s.status)
-        result = s.settlement.result.value if s.settlement is not None else "-"
-        lines.append(
-            " | ".join(
-                [
-                    f"#{s.id}",
-                    str(sport),
-                    str(bookmaker),
-                    s.match_name,
-                    s.market_type,
-                    s.selection,
-                    f"odds={s.odds_at_signal}",
-                    f"status={status}",
-                    f"result={result}",
-                ]
-            )
-        )
+        lines.append(_format_latest_signal_card(s))
+        lines.append("")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines).rstrip())
 
 
+@router.message(_text_is("Последние результаты"))
 @router.message(Command("latest_results"))
 async def cmd_latest_results(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -2137,16 +2389,11 @@ async def cmd_latest_results(message: Message, sessionmaker: async_sessionmaker[
         signals = await SignalRepository().list_latest_settled_signals(session, limit=limit)
 
         if not signals:
-            await message.answer("No settled signals found")
+            await message.answer("📭 Завершённых сигналов пока нет.")
             return
 
-        lines: list[str] = ["LATEST RESULTS", ""]
+        lines: list[str] = ["✅ Последние результаты", ""]
         for s in signals:
-            sport = getattr(s.sport, "value", s.sport)
-            bookmaker = getattr(s.bookmaker, "value", s.bookmaker)
-            result = s.settlement.result.value if s.settlement is not None else "-"
-            pl = s.settlement.profit_loss if s.settlement is not None else None
-
             quality_label = "-"
             try:
                 qr = await SignalQualityService().build_signal_quality_report(session, int(s.id))
@@ -2154,23 +2401,10 @@ async def cmd_latest_results(message: Message, sessionmaker: async_sessionmaker[
             except Exception:
                 quality_label = "-"
 
-            lines.append(
-                " | ".join(
-                    [
-                        f"#{s.id}",
-                        str(sport),
-                        str(bookmaker),
-                        s.match_name,
-                        s.market_type,
-                        s.selection,
-                        f"result={result}",
-                        f"pl={pl}",
-                        f"quality={quality_label}",
-                    ]
-                )
-            )
+            lines.append(_format_latest_result_card(s, quality_label))
+            lines.append("")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines).rstrip())
 
 
 @router.message(Command("latest_failures"))
@@ -2197,15 +2431,11 @@ async def cmd_latest_failures(message: Message, sessionmaker: async_sessionmaker
         signals = await SignalRepository().list_latest_failed_signals(session, limit=limit)
 
     if not signals:
-        await message.answer("No failed signals found")
+        await message.answer("📭 Неудачных сигналов пока нет.")
         return
 
-    lines: list[str] = ["LATEST FAILURES", ""]
+    lines: list[str] = ["⚠️ Последние неудачные сигналы", ""]
     for s in signals:
-        sport = getattr(s.sport, "value", s.sport)
-        bookmaker = getattr(s.bookmaker, "value", s.bookmaker)
-        result = s.settlement.result.value if s.settlement is not None else "-"
-
         category = "-"
         reason = "-"
         if getattr(s, "failure_reviews", None):
@@ -2213,25 +2443,13 @@ async def cmd_latest_failures(message: Message, sessionmaker: async_sessionmaker
             category = getattr(r0.category, "value", r0.category) if r0.category is not None else "-"
             reason = (r0.auto_reason or r0.manual_reason or "-")
 
-        lines.append(
-            " | ".join(
-                [
-                    f"#{s.id}",
-                    str(sport),
-                    str(bookmaker),
-                    s.match_name,
-                    s.market_type,
-                    s.selection,
-                    f"result={result}",
-                    f"category={category}",
-                    f"reason={reason}",
-                ]
-            )
-        )
+        lines.append(_format_latest_failure_card(s, _fmt_failure_category_ru(str(category)), reason))
+        lines.append("")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines).rstrip())
 
 
+@router.message(_text_is("Быстрая проверка"))
 @router.message(Command("quick_check"))
 async def cmd_quick_check(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -2250,13 +2468,13 @@ async def cmd_quick_check(message: Message, sessionmaker: async_sessionmaker[Asy
     await message.answer(
         "\n".join(
             [
-                "QUICK CHECK",
-                f"- total_signals: {k.total_signals}",
-                f"- settled_signals: {k.settled_signals}",
-                f"- wins/losses/voids: {k.wins}/{k.losses}/{k.voids}",
-                f"- unit_balance: {balance_unit.current_balance}",
-                f"- rub_balance: {balance_rub.current_balance_rub}",
-                f"- latest_ids: {latest_ids_str}",
+                "⚡ Быстрая проверка",
+                f"- Всего сигналов: {k.total_signals}",
+                f"- Завершённых: {k.settled_signals}",
+                f"- Побед / поражений / возвратов: {k.wins}/{k.losses}/{k.voids}",
+                f"- Баланс (unit): {balance_unit.current_balance}",
+                f"- Баланс (₽): {balance_rub.current_balance_rub}",
+                f"- Последние ID: {latest_ids_str}",
             ]
         )
     )
@@ -2293,6 +2511,7 @@ async def cmd_demo_smoke(message: Message, sessionmaker: async_sessionmaker[Asyn
     )
 
 
+@router.message(_text_is("Статус системы"))
 @router.message(Command("system_status"))
 async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -2314,41 +2533,41 @@ async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[A
     latest_ids_str = ", ".join(str(x) for x in latest_ids) if latest_ids else "-"
 
     lines = [
-        "SYSTEM STATUS",
+        "📊 Состояние системы",
         "",
-        "Signals:",
-        f"- total_signals: {k.total_signals}",
-        f"- settled_signals: {k.settled_signals}",
-        f"- entered_signals: {k.entered_signals}",
-        f"- missed_signals: {k.missed_signals}",
+        "Сигналы:",
+        f"- Всего: {k.total_signals}",
+        f"- Завершённых: {k.settled_signals}",
+        f"- Введённых: {k.entered_signals}",
+        f"- Пропущенных: {k.missed_signals}",
         "",
-        "Balance unit:",
-        f"- current_balance: {balance_unit.current_balance}",
-        f"- total_profit_loss_since_base: {balance_unit.total_profit_loss_since_base}",
+        "Баланс (unit):",
+        f"- Текущий баланс: {balance_unit.current_balance}",
+        f"- Прибыль с точки отсчёта: {balance_unit.total_profit_loss_since_base}",
         "",
-        "Balance RUB:",
-        f"- flat_stake_rub: {balance_rub.flat_stake_rub}",
-        f"- current_balance_rub: {balance_rub.current_balance_rub}",
-        f"- total_profit_loss_rub: {balance_rub.total_profit_loss_rub}",
+        "Баланс (₽):",
+        f"- Фиксированная ставка: {balance_rub.flat_stake_rub}",
+        f"- Текущий баланс (₽): {balance_rub.current_balance_rub}",
+        f"- Итог в рублях: {balance_rub.total_profit_loss_rub}",
         "",
-        "Period unit:",
-        f"- period_label: {period_unit.overview.period_label}",
-        f"- current_balance: {period_unit.overview.current_balance}",
+        "Период (unit):",
+        f"- Метка периода: {period_unit.overview.period_label}",
+        f"- Текущий баланс: {period_unit.overview.current_balance}",
         "",
-        "Period RUB:",
-        f"- period_label: {period_rub.overview.period_label}",
-        f"- current_balance_rub: {period_rub.overview.current_balance_rub}",
+        "Период (₽):",
+        f"- Метка периода: {period_rub.overview.period_label}",
+        f"- Текущий баланс (₽): {period_rub.overview.current_balance_rub}",
         "",
-        "Quality:",
-        f"- avg_prediction_error: {quality.avg_prediction_error}",
-        f"- overestimated_count: {quality.overestimated_count}",
-        f"- underestimated_count: {quality.underestimated_count}",
+        "Качество:",
+        f"- Средняя ошибка прогноза: {quality.avg_prediction_error}",
+        f"- Переоценённых: {quality.overestimated_count}",
+        f"- Недооценённых: {quality.underestimated_count}",
         "",
-        "History:",
-        f"- snapshots count: {len(history)}",
-        f"- latest snapshot label: {latest_snapshot_label or 'none'}",
+        "История баланса:",
+        f"- Количество снимков: {len(history)}",
+        f"- Последняя метка: {latest_snapshot_label or 'нет'}",
         "",
-        "Latest signals:",
+        "Последние сигналы:",
         f"- {latest_ids_str}",
     ]
     await message.answer("\n".join(lines))
@@ -2530,4 +2749,36 @@ async def cmd_demo_cycle_sport_scenario(message: Message, sessionmaker: async_se
                 f"message: {res.message}",
             ]
         )
+    )
+
+
+@router.message()
+async def fallback_unrecognized(message: Message) -> None:
+    allowed = _is_allowed(message)
+    if not allowed:
+        await _deny(message)
+        return
+
+    user_id = message.from_user.id if message.from_user else None
+    chat_id = message.chat.id if getattr(message, "chat", None) is not None else None
+    chat_type = message.chat.type if getattr(message, "chat", None) is not None else None
+    entities = [
+        {
+            "type": entity.type,
+            "offset": entity.offset,
+            "length": entity.length,
+        }
+        for entity in (message.entities or [])
+    ]
+    logger.info(
+        "Unhandled message: chat_id=%s user_id=%s chat_type=%s text=%r entities=%s",
+        chat_id,
+        user_id,
+        chat_type,
+        message.text,
+        entities,
+    )
+    await message.answer(
+        "Не понял команду или сообщение.\nОткройте меню кнопкой /start\nИли посмотрите список команд через /debug_help",
+        reply_markup=get_debug_keyboard(),
     )
