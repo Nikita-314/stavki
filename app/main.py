@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 
 from app.core.config import get_settings
+from app.bot.handlers import debug_router
 
 
 async def main() -> None:
@@ -19,7 +20,7 @@ async def main() -> None:
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
 
-    # Handlers will be registered later (app/bot/handlers).
+    dp.include_router(debug_router)
     await dp.start_polling(bot)
 
 
