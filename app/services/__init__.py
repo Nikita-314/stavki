@@ -15,6 +15,7 @@ from app.services.notification_service import NotificationService
 from app.services.orchestration_service import OrchestrationService
 from app.services.period_report_service import PeriodReportService
 from app.services.result_ingestion_service import ResultIngestionService
+from app.services.sanity_check_service import SanityCheckService
 from app.services.signal_service import SignalService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
@@ -37,6 +38,7 @@ __all__ = [
     "OrchestrationService",
     "PeriodReportService",
     "ResultIngestionService",
+    "SanityCheckService",
     "SignalService",
     "SignalQualityService",
     "SignalQualitySummaryService",

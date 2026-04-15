@@ -32,6 +32,9 @@ from app.services.orchestration_service import OrchestrationService
 from app.providers.mock_candidate_provider import MockCandidateProvider
 from app.services.demo_cycle_service import DemoCycleService
 from app.db.repositories.signal_repository import SignalRepository
+from app.services.sanity_check_service import SanityCheckService
+from app.providers.json_candidate_provider import JsonCandidateProvider
+from app.services.ingestion_service import IngestionService
 
 
 router = Router(name="debug")
@@ -931,6 +934,153 @@ async def cmd_orchestrate_mock_result(message: Message, sessionmaker: async_sess
 def _fmt_bool(v: bool) -> str:
     return "yes" if v else "no"
 
+
+def _parse_tail_arg(message: Message) -> str | None:
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    return parts[1].strip()
+
+
+@router.message(Command("sanity_check"))
+async def cmd_sanity_check(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        report = await SanityCheckService().run_sanity_check(session)
+
+    shown = report.issues[:10]
+    lines = [
+        "SANITY CHECK",
+        f"- total_signals: {report.total_signals}",
+        f"- total_settlements: {report.total_settlements}",
+        f"- total_failure_reviews: {report.total_failure_reviews}",
+        f"- total_entries: {report.total_entries}",
+        f"- issues_count: {report.issues_count}",
+        "",
+        "issues (first 10):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for it in shown:
+            sid = it.signal_id if it.signal_id is not None else "-"
+            lines.append(f"- {it.issue_type} | signal_id={sid} | {it.details}")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("file_preview"))
+async def cmd_file_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    path = _parse_tail_arg(message)
+    if not path:
+        await message.answer("Usage: /file_preview <path>")
+        return
+
+    provider = JsonCandidateProvider(path)
+    candidates, stats = provider.load_with_stats()
+
+    shown = candidates[:5]
+    lines = [
+        "FILE PREVIEW",
+        f"- path: {path}",
+        f"- total_items: {stats.total_items}",
+        f"- loaded_candidates: {stats.loaded_candidates}",
+        f"- skipped_items: {stats.skipped_items}",
+        "",
+        "candidates (first 5):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("file_ingest"))
+async def cmd_file_ingest(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    path = _parse_tail_arg(message)
+    if not path:
+        await message.answer("Usage: /file_ingest <path>")
+        return
+
+    provider = JsonCandidateProvider(path)
+    candidates, stats = provider.load_with_stats()
+
+    async with sessionmaker() as session:
+        res = await IngestionService().ingest_candidates_with_filter_and_dedup(session, candidates)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "FILE INGEST",
+                f"- total_items: {stats.total_items}",
+                f"- loaded_candidates: {stats.loaded_candidates}",
+                f"- skipped_items: {stats.skipped_items}",
+                f"- created_signals: {res.created_signals}",
+                f"- skipped_candidates: {res.skipped_candidates}",
+                f"- created_signal_ids: {res.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("regression_pack"))
+async def cmd_regression_pack(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    win_demo = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="win")
+    lose_demo = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="lose")
+    void_demo = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="void")
+
+    async with sessionmaker() as session:
+        sanity = await SanityCheckService().run_sanity_check(session)
+        summary = await AnalyticsSummaryService().get_summary(session)
+        bal_rub = await BalanceService().get_realistic_balance_overview(session)
+        qsum = await SignalQualitySummaryService().build_quality_summary(session)
+
+    await message.answer(
+        "\n".join(
+            [
+                "REGRESSION PACK",
+                f"- win_demo_created_signal_id: {win_demo.created_signal_id} ({win_demo.message})",
+                f"- lose_demo_created_signal_id: {lose_demo.created_signal_id} ({lose_demo.message})",
+                f"- void_demo_created_signal_id: {void_demo.created_signal_id} ({void_demo.message})",
+                f"- total_signals: {summary.kpis.total_signals}",
+                f"- settled_signals: {summary.kpis.settled_signals}",
+                f"- issues_count: {sanity.issues_count}",
+                f"- current_balance_rub: {bal_rub.current_balance_rub}",
+                f"- avg_prediction_error: {qsum.avg_prediction_error}",
+                f"- overestimated_count: {qsum.overestimated_count}",
+                f"- underestimated_count: {qsum.underestimated_count}",
+            ]
+        )
+    )
 
 @router.message(Command("latest_signals"))
 async def cmd_latest_signals(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
