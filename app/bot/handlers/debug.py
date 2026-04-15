@@ -848,14 +848,30 @@ async def cmd_orchestrate_mock_signal(message: Message, sessionmaker: async_sess
 
     candidate = filtered.accepted_candidates[0]
 
-    async with sessionmaker() as session:
-        signal_id = await OrchestrationService().create_signal_and_notify(session, message.bot, candidate)
-        await session.commit()
+    orch = OrchestrationService()
+    created_signal_id: int | None = None
+    skipped_reason: str | None = None
 
-    if signal_id is None:
-        await message.answer("candidate skipped")
+    async with sessionmaker() as session:
+        res = await orch.create_signal(session, candidate)
+        created_signal_id = res.signal_id
+        skipped_reason = res.skipped_reason
+        if created_signal_id is not None:
+            await session.commit()
+
+    if created_signal_id is None:
+        await message.answer(f"candidate skipped ({skipped_reason})")
         return
-    await message.answer(f"created signal id: {signal_id}")
+
+    notification_sent = "no"
+    try:
+        async with sessionmaker() as session2:
+            sent = await orch.notify_signal_if_configured(session2, message.bot, created_signal_id)
+            notification_sent = "yes" if sent else "no"
+    except Exception:
+        notification_sent = "no"
+
+    await message.answer("\n".join([f"created signal id: {created_signal_id}", f"notification sent: {notification_sent}"]))
 
 
 @router.message(Command("orchestrate_mock_result"))
@@ -877,10 +893,25 @@ async def cmd_orchestrate_mock_result(message: Message, sessionmaker: async_sess
         await message.answer("Example: /orchestrate_mock_result CS2 cs2_10001 Team Spirit")
         return
 
+    orch = OrchestrationService()
     async with sessionmaker() as session:
-        res = await OrchestrationService().process_event_result_and_notify(session, message.bot, data)
+        orch_res = await orch.process_event_result(session, data)
         await session.commit()
 
+    notifications_sent = 0
+    try:
+        async with sessionmaker() as session2:
+            for sid in orch_res.signal_ids_to_notify:
+                try:
+                    sent = await orch.notify_result_if_configured(session2, message.bot, sid)
+                    if sent:
+                        notifications_sent += 1
+                except Exception:
+                    continue
+    except Exception:
+        notifications_sent = notifications_sent
+
+    res = orch_res.result
     await message.answer(
         "\n".join(
             [
@@ -889,6 +920,7 @@ async def cmd_orchestrate_mock_result(message: Message, sessionmaker: async_sess
                 f"skipped_signals: {res.skipped_signals}",
                 f"created_failure_reviews: {res.created_failure_reviews}",
                 f"processed_signal_ids: {res.processed_signal_ids}",
+                f"notifications_sent_count: {notifications_sent}",
             ]
         )
     )
