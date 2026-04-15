@@ -66,7 +66,10 @@ class SignalRepository:
         selection: str,
         is_live: bool,
     ) -> Signal | None:
-        """Find an existing similar Signal by exact fields (no fuzzy matching)."""
+        """Best-effort exact duplicate lookup (no unique constraints, no fuzzy matching).
+
+        Returns the first matching row or None.
+        """
         stmt = (
             select(Signal)
             .where(Signal.sport == sport)
@@ -80,5 +83,5 @@ class SignalRepository:
         if event_external_id is not None:
             stmt = stmt.where(Signal.event_external_id == event_external_id)
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
