@@ -13,9 +13,11 @@ from app.core.enums import BetResult, EntryStatus
 from app.core.config import get_settings
 from app.schemas.entry import EntryCreate
 from app.schemas.settlement import SettlementCreate
+from app.schemas.candidate_filter import CandidateFilterConfig
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
+from app.services.candidate_filter_service import CandidateFilterService
 from app.services.entry_service import EntryService
 from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
@@ -26,6 +28,8 @@ from app.schemas.event_result import EventResultInput
 from app.services.notification_service import NotificationService
 from app.services.balance_service import BalanceService
 from app.services.period_report_service import PeriodReportService
+from app.services.orchestration_service import OrchestrationService
+from app.providers.mock_candidate_provider import MockCandidateProvider
 
 
 router = Router(name="debug")
@@ -827,3 +831,64 @@ async def cmd_period_report_rub(message: Message, sessionmaker: async_sessionmak
             )
 
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("orchestrate_mock_signal"))
+async def cmd_orchestrate_mock_signal(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    candidates = await MockCandidateProvider().fetch_candidates()
+    config = CandidateFilterConfig.default_for_russian_manual_betting()
+    filtered = CandidateFilterService().filter_candidates(candidates, config)
+    if not filtered.accepted_candidates:
+        await message.answer("candidate skipped")
+        return
+
+    candidate = filtered.accepted_candidates[0]
+
+    async with sessionmaker() as session:
+        signal_id = await OrchestrationService().create_signal_and_notify(session, message.bot, candidate)
+        await session.commit()
+
+    if signal_id is None:
+        await message.answer("candidate skipped")
+        return
+    await message.answer(f"created signal id: {signal_id}")
+
+
+@router.message(Command("orchestrate_mock_result"))
+async def cmd_orchestrate_mock_result(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 4:
+        await message.answer("Usage: /orchestrate_mock_result <sport> <event_external_id> <winner_selection>")
+        return
+    try:
+        sport = _parse_sport(parts[1])
+        event_external_id = parts[2].strip()
+        winner_selection = " ".join(parts[3:]).strip()
+        data = EventResultInput(event_external_id=event_external_id, sport=sport, winner_selection=winner_selection)
+    except Exception:
+        await message.answer("Example: /orchestrate_mock_result CS2 cs2_10001 Team Spirit")
+        return
+
+    async with sessionmaker() as session:
+        res = await OrchestrationService().process_event_result_and_notify(session, message.bot, data)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"processed_signal_ids: {res.processed_signal_ids}",
+            ]
+        )
+    )

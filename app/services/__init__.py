@@ -11,6 +11,7 @@ from app.services.failure_auto_review_service import FailureAutoReviewService
 from app.services.failure_review_service import FailureReviewService
 from app.services.ingestion_service import IngestionService
 from app.services.notification_service import NotificationService
+from app.services.orchestration_service import OrchestrationService
 from app.services.period_report_service import PeriodReportService
 from app.services.result_ingestion_service import ResultIngestionService
 from app.services.signal_service import SignalService
@@ -31,6 +32,7 @@ __all__ = [
     "FailureReviewService",
     "IngestionService",
     "NotificationService",
+    "OrchestrationService",
     "PeriodReportService",
     "ResultIngestionService",
     "SignalService",

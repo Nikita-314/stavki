@@ -16,6 +16,10 @@ class IngestionService:
     def __init__(self, signal_service: SignalService | None = None) -> None:
         self._signal_service = signal_service or SignalService()
 
+    def candidate_to_bundle(self, candidate: ProviderSignalCandidate) -> SignalCreateBundle:
+        """Public helper: map provider candidate to SignalCreateBundle (no side effects)."""
+        return self._candidate_to_bundle(candidate)
+
     async def ingest_candidates(
         self, session: AsyncSession, candidates: list[ProviderSignalCandidate]
     ) -> ProviderBatchIngestResult:
