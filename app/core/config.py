@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     database_url: str
     debug: bool = False
     admin_user_ids: Annotated[list[int], BeforeValidator(_parse_admin_user_ids)] = []
+    signal_chat_id: int | None = None
+    result_chat_id: int | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

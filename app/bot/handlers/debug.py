@@ -23,6 +23,7 @@ from app.services.signal_quality_summary_service import SignalQualitySummaryServ
 from app.services.settlement_service import SettlementService
 from app.services.result_ingestion_service import ResultIngestionService
 from app.schemas.event_result import EventResultInput
+from app.services.notification_service import NotificationService
 
 
 router = Router(name="debug")
@@ -68,6 +69,10 @@ def _parse_sport(value: str):
     from app.core.enums import SportType
 
     return SportType(value.strip().upper())
+
+
+def _parse_int(value: str) -> int:
+    return int(value)
 
 
 @router.message(Command("debug"))
@@ -568,3 +573,60 @@ async def cmd_void_result(message: Message, sessionmaker: async_sessionmaker[Asy
             ]
         )
     )
+
+
+@router.message(Command("notify_signal"))
+async def cmd_notify_signal(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: /notify_signal <signal_id>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+    except Exception:
+        await message.answer("Example: /notify_signal 12")
+        return
+
+    settings = get_settings()
+    if settings.signal_chat_id is None:
+        await message.answer("SIGNAL_CHAT_ID is not set")
+        return
+
+    async with sessionmaker() as session:
+        report = await AnalyticsService().get_signal_report(session, signal_id)
+
+    await NotificationService().send_signal_notification(message.bot, settings.signal_chat_id, report)
+    await message.answer("signal notification sent")
+
+
+@router.message(Command("notify_result"))
+async def cmd_notify_result(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: /notify_result <signal_id>")
+        return
+    try:
+        signal_id = _parse_signal_id(parts[1])
+    except Exception:
+        await message.answer("Example: /notify_result 12")
+        return
+
+    settings = get_settings()
+    if settings.result_chat_id is None:
+        await message.answer("RESULT_CHAT_ID is not set")
+        return
+
+    async with sessionmaker() as session:
+        signal_report = await AnalyticsService().get_signal_report(session, signal_id)
+        quality_report = await SignalQualityService().build_signal_quality_report(session, signal_id)
+
+    await NotificationService().send_result_notification(message.bot, settings.result_chat_id, signal_report, quality_report)
+    await message.answer("result notification sent")
