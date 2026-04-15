@@ -22,7 +22,26 @@ class DemoCycleService:
         bot: Bot,
         *,
         sport: SportType | None = None,
+        scenario: str = "win",
     ) -> DemoCycleResult:
+        scenario_norm = (scenario or "").strip().lower()
+        if scenario_norm not in {"win", "lose", "void"}:
+            return DemoCycleResult(
+                scenario=scenario_norm or "unknown",
+                created_signal_id=None,
+                signal_notification_sent=False,
+                result_processed=False,
+                result_notification_sent_count=0,
+                total_signals_found=0,
+                settled_signals=0,
+                skipped_signals=0,
+                created_failure_reviews=0,
+                processed_signal_ids=[],
+                balance_mode_unit_current=None,
+                balance_mode_rub_current=None,
+                message="unsupported scenario",
+            )
+
         # Stage 1: pick mock candidate
         candidates = await MockCandidateProvider().fetch_candidates()
         config = CandidateFilterConfig.default_for_russian_manual_betting()
@@ -34,6 +53,7 @@ class DemoCycleService:
 
         if not accepted:
             return DemoCycleResult(
+                scenario=scenario_norm,
                 created_signal_id=None,
                 signal_notification_sent=False,
                 result_processed=False,
@@ -56,6 +76,7 @@ class DemoCycleService:
             create_res = await orch.create_signal(session, candidate)
             if create_res.signal_id is None:
                 return DemoCycleResult(
+                    scenario=scenario_norm,
                     created_signal_id=None,
                     signal_notification_sent=False,
                     result_processed=False,
@@ -80,10 +101,58 @@ class DemoCycleService:
             signal_notification_sent = False
 
         # Stage 3: process result for the same event (commit)
+        winner_selection: str | None = None
+        is_void = False
+        if scenario_norm == "win":
+            winner_selection = candidate.market.selection
+        elif scenario_norm == "lose":
+            sel = (candidate.market.selection or "").strip().lower()
+            home = (candidate.match.home_team or "").strip()
+            away = (candidate.match.away_team or "").strip()
+            if not home or not away:
+                return DemoCycleResult(
+                    scenario=scenario_norm,
+                    created_signal_id=created_signal_id,
+                    signal_notification_sent=bool(signal_notification_sent),
+                    result_processed=False,
+                    result_notification_sent_count=0,
+                    total_signals_found=0,
+                    settled_signals=0,
+                    skipped_signals=0,
+                    created_failure_reviews=0,
+                    processed_signal_ids=[],
+                    balance_mode_unit_current=None,
+                    balance_mode_rub_current=None,
+                    message="unable to build lose scenario",
+                )
+            if home.strip().lower() != sel:
+                winner_selection = home
+            elif away.strip().lower() != sel:
+                winner_selection = away
+            else:
+                return DemoCycleResult(
+                    scenario=scenario_norm,
+                    created_signal_id=created_signal_id,
+                    signal_notification_sent=bool(signal_notification_sent),
+                    result_processed=False,
+                    result_notification_sent_count=0,
+                    total_signals_found=0,
+                    settled_signals=0,
+                    skipped_signals=0,
+                    created_failure_reviews=0,
+                    processed_signal_ids=[],
+                    balance_mode_unit_current=None,
+                    balance_mode_rub_current=None,
+                    message="unable to build lose scenario",
+                )
+        elif scenario_norm == "void":
+            is_void = True
+
         data = EventResultInput(
             event_external_id=candidate.match.external_event_id,
             sport=candidate.match.sport,
-            winner_selection=candidate.market.selection,
+            winner_selection=winner_selection,
+            is_void=is_void,
         )
 
         async with sessionmaker() as session3:
@@ -119,6 +188,7 @@ class DemoCycleService:
 
         r = proc_res.result
         return DemoCycleResult(
+            scenario=scenario_norm,
             created_signal_id=created_signal_id,
             signal_notification_sent=bool(signal_notification_sent),
             result_processed=True,

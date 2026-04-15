@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 
 class DemoCycleResult(BaseModel):
+    scenario: str
     created_signal_id: int | None
     signal_notification_sent: bool
     result_processed: bool

@@ -937,10 +937,11 @@ async def cmd_demo_cycle(message: Message, sessionmaker: async_sessionmaker[Asyn
         await _deny(message)
         return
 
-    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot)
+    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="win")
     await message.answer(
         "\n".join(
             [
+                f"scenario: {res.scenario}",
                 f"created_signal_id: {res.created_signal_id}",
                 f"signal_notification_sent: {_fmt_bool(res.signal_notification_sent)}",
                 f"result_processed: {_fmt_bool(res.result_processed)}",
@@ -973,10 +974,127 @@ async def cmd_demo_cycle_sport(message: Message, sessionmaker: async_sessionmake
         await message.answer("Example: /demo_cycle_sport CS2")
         return
 
-    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, sport=sport)
+    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, sport=sport, scenario="win")
     await message.answer(
         "\n".join(
             [
+                f"scenario: {res.scenario}",
+                f"created_signal_id: {res.created_signal_id}",
+                f"signal_notification_sent: {_fmt_bool(res.signal_notification_sent)}",
+                f"result_processed: {_fmt_bool(res.result_processed)}",
+                f"result_notification_sent_count: {res.result_notification_sent_count}",
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"balance_mode_unit_current: {res.balance_mode_unit_current}",
+                f"balance_mode_rub_current: {res.balance_mode_rub_current}",
+                f"message: {res.message}",
+            ]
+        )
+    )
+
+
+@router.message(Command("demo_cycle_win"))
+async def cmd_demo_cycle_win(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="win")
+    await message.answer(
+        "\n".join(
+            [
+                f"scenario: {res.scenario}",
+                f"created_signal_id: {res.created_signal_id}",
+                f"signal_notification_sent: {_fmt_bool(res.signal_notification_sent)}",
+                f"result_processed: {_fmt_bool(res.result_processed)}",
+                f"result_notification_sent_count: {res.result_notification_sent_count}",
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"balance_mode_unit_current: {res.balance_mode_unit_current}",
+                f"balance_mode_rub_current: {res.balance_mode_rub_current}",
+                f"message: {res.message}",
+            ]
+        )
+    )
+
+
+@router.message(Command("demo_cycle_lose"))
+async def cmd_demo_cycle_lose(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="lose")
+    await message.answer(
+        "\n".join(
+            [
+                f"scenario: {res.scenario}",
+                f"created_signal_id: {res.created_signal_id}",
+                f"signal_notification_sent: {_fmt_bool(res.signal_notification_sent)}",
+                f"result_processed: {_fmt_bool(res.result_processed)}",
+                f"result_notification_sent_count: {res.result_notification_sent_count}",
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"balance_mode_unit_current: {res.balance_mode_unit_current}",
+                f"balance_mode_rub_current: {res.balance_mode_rub_current}",
+                f"message: {res.message}",
+            ]
+        )
+    )
+
+
+@router.message(Command("demo_cycle_void"))
+async def cmd_demo_cycle_void(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="void")
+    await message.answer(
+        "\n".join(
+            [
+                f"scenario: {res.scenario}",
+                f"created_signal_id: {res.created_signal_id}",
+                f"signal_notification_sent: {_fmt_bool(res.signal_notification_sent)}",
+                f"result_processed: {_fmt_bool(res.result_processed)}",
+                f"result_notification_sent_count: {res.result_notification_sent_count}",
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"balance_mode_unit_current: {res.balance_mode_unit_current}",
+                f"balance_mode_rub_current: {res.balance_mode_rub_current}",
+                f"message: {res.message}",
+            ]
+        )
+    )
+
+
+@router.message(Command("demo_cycle_sport_scenario"))
+async def cmd_demo_cycle_sport_scenario(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer("Usage: /demo_cycle_sport_scenario <CS2|DOTA2|FOOTBALL> <win|lose|void>")
+        return
+    try:
+        sport = _parse_sport(parts[1])
+        scenario = parts[2].strip().lower()
+    except Exception:
+        await message.answer("Example: /demo_cycle_sport_scenario CS2 lose")
+        return
+
+    res = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, sport=sport, scenario=scenario)
+    await message.answer(
+        "\n".join(
+            [
+                f"scenario: {res.scenario}",
                 f"created_signal_id: {res.created_signal_id}",
                 f"signal_notification_sent: {_fmt_bool(res.signal_notification_sent)}",
                 f"result_processed: {_fmt_bool(res.result_processed)}",
