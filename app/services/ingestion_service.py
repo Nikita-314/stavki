@@ -7,7 +7,9 @@ from app.schemas.candidate_filter import CandidateFilterConfig
 from app.schemas.provider_models import ProviderBatchIngestResult, ProviderSignalCandidate
 from app.schemas.signal import PredictionLogCreate, SignalCreate, SignalCreateBundle
 from app.services.candidate_filter_service import CandidateFilterService
+from app.services.deduplication_service import DeduplicationService
 from app.services.signal_service import SignalService
+from app.db.repositories.signal_repository import SignalRepository
 
 
 class IngestionService:
@@ -29,6 +31,23 @@ class IngestionService:
         for candidate in candidates:
             try:
                 bundle = self._candidate_to_bundle(candidate)
+
+                # DB-level dedup check (exact match by key fields).
+                existing = await SignalRepository().find_existing_similar_signal(
+                    session,
+                    sport=bundle.signal.sport,
+                    bookmaker=bundle.signal.bookmaker,
+                    event_external_id=bundle.signal.event_external_id,
+                    home_team=bundle.signal.home_team,
+                    away_team=bundle.signal.away_team,
+                    market_type=bundle.signal.market_type,
+                    selection=bundle.signal.selection,
+                    is_live=bundle.signal.is_live,
+                )
+                if existing is not None:
+                    skipped += 1
+                    continue
+
                 signal = await self._signal_service.create_signal_with_prediction_log(session, bundle)
                 created_ids.append(int(signal.id))
             except (ValidationError, ValueError, TypeError):
@@ -56,6 +75,19 @@ class IngestionService:
         batch = CandidateFilterService().filter_candidates(candidates, config)
         # TODO: later extend ProviderBatchIngestResult with filter rejection stats if needed.
         return await self.ingest_candidates(session, batch.accepted_candidates)
+
+    async def ingest_candidates_with_filter_and_dedup(
+        self,
+        session: AsyncSession,
+        candidates: list[ProviderSignalCandidate],
+        config: CandidateFilterConfig | None = None,
+    ) -> ProviderBatchIngestResult:
+        """Filter, deduplicate in-batch, then ingest (no commit)."""
+        config = config or CandidateFilterConfig.default_for_russian_manual_betting()
+        filtered = CandidateFilterService().filter_candidates(candidates, config)
+        deduped = DeduplicationService().deduplicate_candidates(filtered.accepted_candidates)
+        # TODO: later extend ProviderBatchIngestResult with filter/dedup stats if needed.
+        return await self.ingest_candidates(session, deduped.unique_candidates)
 
     def _candidate_to_bundle(self, candidate: ProviderSignalCandidate) -> SignalCreateBundle:
         match = candidate.match

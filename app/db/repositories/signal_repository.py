@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db.models.prediction_log import PredictionLog
 from app.db.models.signal import Signal
-from app.core.enums import SignalStatus
+from app.core.enums import BookmakerType, SignalStatus, SportType
 from app.schemas.signal import PredictionLogCreate, SignalCreate
 
 
@@ -50,6 +50,35 @@ class SignalRepository:
                 selectinload(Signal.failure_reviews),
             )
         )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def find_existing_similar_signal(
+        self,
+        session: AsyncSession,
+        *,
+        sport: SportType,
+        bookmaker: BookmakerType,
+        event_external_id: str | None,
+        home_team: str,
+        away_team: str,
+        market_type: str,
+        selection: str,
+        is_live: bool,
+    ) -> Signal | None:
+        """Find an existing similar Signal by exact fields (no fuzzy matching)."""
+        stmt = (
+            select(Signal)
+            .where(Signal.sport == sport)
+            .where(Signal.bookmaker == bookmaker)
+            .where(Signal.market_type == market_type)
+            .where(Signal.selection == selection)
+            .where(Signal.is_live.is_(is_live))
+            .where(Signal.home_team == home_team)
+            .where(Signal.away_team == away_team)
+        )
+        if event_external_id is not None:
+            stmt = stmt.where(Signal.event_external_id == event_external_id)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
