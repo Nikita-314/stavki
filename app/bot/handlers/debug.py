@@ -985,6 +985,186 @@ async def cmd_latest_signals(message: Message, sessionmaker: async_sessionmaker[
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("latest_results"))
+async def cmd_latest_results(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    limit = 10
+    if len(parts) >= 2:
+        try:
+            limit = int(parts[1])
+        except Exception:
+            await message.answer("Usage: /latest_results [limit] (example: /latest_results 20)")
+            return
+    if limit <= 0:
+        await message.answer("limit must be > 0 (max 30)")
+        return
+    if limit > 30:
+        limit = 30
+
+    async with sessionmaker() as session:
+        signals = await SignalRepository().list_latest_settled_signals(session, limit=limit)
+
+        if not signals:
+            await message.answer("No settled signals found")
+            return
+
+        lines: list[str] = ["LATEST RESULTS", ""]
+        for s in signals:
+            sport = getattr(s.sport, "value", s.sport)
+            bookmaker = getattr(s.bookmaker, "value", s.bookmaker)
+            result = s.settlement.result.value if s.settlement is not None else "-"
+            pl = s.settlement.profit_loss if s.settlement is not None else None
+
+            quality_label = "-"
+            try:
+                qr = await SignalQualityService().build_signal_quality_report(session, int(s.id))
+                quality_label = qr.metrics.quality_label or "-"
+            except Exception:
+                quality_label = "-"
+
+            lines.append(
+                " | ".join(
+                    [
+                        f"#{s.id}",
+                        str(sport),
+                        str(bookmaker),
+                        s.match_name,
+                        s.market_type,
+                        s.selection,
+                        f"result={result}",
+                        f"pl={pl}",
+                        f"quality={quality_label}",
+                    ]
+                )
+            )
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("latest_failures"))
+async def cmd_latest_failures(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    limit = 10
+    if len(parts) >= 2:
+        try:
+            limit = int(parts[1])
+        except Exception:
+            await message.answer("Usage: /latest_failures [limit] (example: /latest_failures 10)")
+            return
+    if limit <= 0:
+        await message.answer("limit must be > 0 (max 30)")
+        return
+    if limit > 30:
+        limit = 30
+
+    async with sessionmaker() as session:
+        signals = await SignalRepository().list_latest_failed_signals(session, limit=limit)
+
+    if not signals:
+        await message.answer("No failed signals found")
+        return
+
+    lines: list[str] = ["LATEST FAILURES", ""]
+    for s in signals:
+        sport = getattr(s.sport, "value", s.sport)
+        bookmaker = getattr(s.bookmaker, "value", s.bookmaker)
+        result = s.settlement.result.value if s.settlement is not None else "-"
+
+        category = "-"
+        reason = "-"
+        if getattr(s, "failure_reviews", None):
+            r0 = s.failure_reviews[0]
+            category = getattr(r0.category, "value", r0.category) if r0.category is not None else "-"
+            reason = (r0.auto_reason or r0.manual_reason or "-")
+
+        lines.append(
+            " | ".join(
+                [
+                    f"#{s.id}",
+                    str(sport),
+                    str(bookmaker),
+                    s.match_name,
+                    s.market_type,
+                    s.selection,
+                    f"result={result}",
+                    f"category={category}",
+                    f"reason={reason}",
+                ]
+            )
+        )
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("quick_check"))
+async def cmd_quick_check(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        summary = await AnalyticsSummaryService().get_summary(session)
+        balance_unit = await BalanceService().get_balance_overview(session)
+        balance_rub = await BalanceService().get_realistic_balance_overview(session)
+        latest_ids = await SignalRepository().list_latest_signal_ids(session, limit=5)
+
+    k = summary.kpis
+    latest_ids_str = ", ".join(str(x) for x in latest_ids) if latest_ids else "-"
+
+    await message.answer(
+        "\n".join(
+            [
+                "QUICK CHECK",
+                f"- total_signals: {k.total_signals}",
+                f"- settled_signals: {k.settled_signals}",
+                f"- wins/losses/voids: {k.wins}/{k.losses}/{k.voids}",
+                f"- unit_balance: {balance_unit.current_balance}",
+                f"- rub_balance: {balance_rub.current_balance_rub}",
+                f"- latest_ids: {latest_ids_str}",
+            ]
+        )
+    )
+
+
+@router.message(Command("demo_smoke"))
+async def cmd_demo_smoke(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    demo = await DemoCycleService().run_mock_demo_cycle(sessionmaker, message.bot, scenario="win")
+
+    async with sessionmaker() as session:
+        summary = await AnalyticsSummaryService().get_summary(session)
+        bal_rub = await BalanceService().get_realistic_balance_overview(session)
+        qsum = await SignalQualitySummaryService().build_quality_summary(session)
+
+    await message.answer(
+        "\n".join(
+            [
+                "DEMO SMOKE",
+                f"- scenario: {demo.scenario}",
+                f"- created_signal_id: {demo.created_signal_id}",
+                f"- settled_signals: {summary.kpis.settled_signals}",
+                f"- notifications_sent_result: {demo.result_notification_sent_count}",
+                f"- current_balance_rub: {bal_rub.current_balance_rub}",
+                f"- avg_prediction_error: {qsum.avg_prediction_error}",
+                f"- overestimated_count: {qsum.overestimated_count}",
+                f"- underestimated_count: {qsum.underestimated_count}",
+                f"- message: {demo.message}",
+            ]
+        )
+    )
+
+
 @router.message(Command("system_status"))
 async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
