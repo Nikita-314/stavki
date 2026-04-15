@@ -3,8 +3,10 @@ from __future__ import annotations
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.schemas.candidate_filter import CandidateFilterConfig
 from app.schemas.provider_models import ProviderBatchIngestResult, ProviderSignalCandidate
 from app.schemas.signal import PredictionLogCreate, SignalCreate, SignalCreateBundle
+from app.services.candidate_filter_service import CandidateFilterService
 from app.services.signal_service import SignalService
 
 
@@ -39,6 +41,21 @@ class IngestionService:
             skipped_candidates=skipped,
             created_signal_ids=created_ids,
         )
+
+    async def ingest_candidates_with_filter(
+        self,
+        session: AsyncSession,
+        candidates: list[ProviderSignalCandidate],
+        config: CandidateFilterConfig | None = None,
+    ) -> ProviderBatchIngestResult:
+        """Filter candidates and ingest only accepted ones (no commit).
+
+        If config is not provided, uses defaults for russian manual betting.
+        """
+        config = config or CandidateFilterConfig.default_for_russian_manual_betting()
+        batch = CandidateFilterService().filter_candidates(candidates, config)
+        # TODO: later extend ProviderBatchIngestResult with filter rejection stats if needed.
+        return await self.ingest_candidates(session, batch.accepted_candidates)
 
     def _candidate_to_bundle(self, candidate: ProviderSignalCandidate) -> SignalCreateBundle:
         match = candidate.match
