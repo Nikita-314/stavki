@@ -1812,10 +1812,15 @@ async def cmd_remote_status(message: Message, sessionmaker: async_sessionmaker[A
     async with sessionmaker() as session:
         summary = await AnalyticsSummaryService().get_summary(session)
         balance = await BalanceService().get_realistic_balance_overview(session)
+        balance_unit = await BalanceService().get_balance_overview(session)
+        snapshots = await BalanceService().list_balance_history(session)
+        qsum = await SignalQualitySummaryService().build_quality_summary(session)
         sanity = await SanityCheckService().run_sanity_check(session)
         latest_ids = await SignalRepository().list_latest_signal_ids(session, limit=10)
 
     k = summary.kpis
+    snapshots_count = len(snapshots)
+    latest_snapshot_label = snapshots[0].label if snapshots else None
     await message.answer(
         "\n".join(
             [
@@ -1824,8 +1829,198 @@ async def cmd_remote_status(message: Message, sessionmaker: async_sessionmaker[A
                 f"- settled_signals: {k.settled_signals}",
                 f"- wins/losses/voids: {k.wins}/{k.losses}/{k.voids}",
                 f"- current_balance_rub: {balance.current_balance_rub}",
+                f"- current_balance_unit: {balance_unit.current_balance}",
+                f"- total_profit_loss_rub: {balance.total_profit_loss_rub}",
+                f"- snapshots_count: {snapshots_count}",
+                f"- latest_snapshot_label: {latest_snapshot_label}",
+                f"- avg_prediction_error: {qsum.avg_prediction_error}",
+                f"- overestimated_count: {qsum.overestimated_count}",
+                f"- underestimated_count: {qsum.underestimated_count}",
                 f"- sanity_issues_count: {sanity.issues_count}",
                 f"- latest_signal_ids: {latest_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("server_checklist"))
+async def cmd_server_checklist(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    s = get_settings()
+    await message.answer(
+        "\n".join(
+            [
+                "SERVER CHECKLIST",
+                f"- bot token configured: {_fmt_bool(bool(getattr(s, 'bot_token', '') or ''))}",
+                f"- database url configured: {_fmt_bool(bool(getattr(s, 'database_url', '') or ''))}",
+                f"- signal chat id configured: {_fmt_bool(getattr(s, 'signal_chat_id', None) is not None)}",
+                f"- result chat id configured: {_fmt_bool(getattr(s, 'result_chat_id', None) is not None)}",
+                f"- odds provider base url configured: {_fmt_bool(bool(getattr(s, 'odds_provider_base_url', None)))}",
+                f"- odds provider sport configured: {_fmt_bool(bool(getattr(s, 'odds_provider_sport', None)))}",
+                f"- odds provider markets configured: {_fmt_bool(bool(getattr(s, 'odds_provider_markets', None)))}",
+                f"- admin ids configured: {_fmt_bool(bool(getattr(s, 'admin_user_ids', []) or []))}",
+                f"- provider timeout seconds: {getattr(s, 'odds_provider_timeout_seconds', None)}",
+                f"- virtual flat stake rub: {getattr(s, 'virtual_flat_stake_rub', None)}",
+                f"- virtual start balance rub: {getattr(s, 'virtual_start_balance_rub', None)}",
+            ]
+        )
+    )
+
+
+@router.message(Command("remote_flow_demo"))
+async def cmd_remote_flow_demo(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    config = _build_provider_client_config_from_settings()
+    if config is None:
+        await message.answer("REMOTE FLOW DEMO\n- error: ODDS_PROVIDER_BASE_URL is not set")
+        return
+
+    parts = _parse_required_parts(
+        message,
+        min_parts=4,
+        example="/remote_flow_demo FOOTBALL football_30001 Зенит",
+    )
+    if not parts:
+        await message.answer(
+            "\n".join(
+                [
+                    "Usage: /remote_flow_demo <sport> <event_external_id> <winner_selection>",
+                    "Examples:",
+                    "- /remote_flow_demo FOOTBALL football_30001 Зенит",
+                    "- /remote_flow_demo CS2 cs2_10001 Team Spirit",
+                ]
+            )
+        )
+        return
+
+    try:
+        sport = _parse_sport(parts[1])
+    except Exception:
+        await message.answer("REMOTE FLOW DEMO\n- error: invalid sport (use FOOTBALL/CS2/DOTA2)")
+        return
+
+    event_external_id = parts[2]
+    winner_selection = _parse_winner_tail(message, event_external_id=event_external_id)
+    if not winner_selection:
+        await message.answer("REMOTE FLOW DEMO\n- error: winner_selection is required (it can contain spaces)")
+        return
+
+    smoke = await RemoteSmokeService().run_remote_smoke(sessionmaker, config=config)
+    if not smoke.fetch_ok:
+        await message.answer(
+            "\n".join(
+                [
+                    "REMOTE FLOW DEMO",
+                    f"- smoke_fetch_ok: false",
+                    f"- endpoint: {smoke.endpoint}",
+                    f"- message: {smoke.message}",
+                ]
+            )
+        )
+        return
+
+    if not smoke.created_signal_ids:
+        await message.answer(
+            "\n".join(
+                [
+                    "REMOTE FLOW DEMO",
+                    f"- smoke_created_signal_ids: {smoke.created_signal_ids}",
+                    f"- message: no new signals created",
+                ]
+            )
+        )
+        return
+
+    settle = await RemoteSmokeService().settle_latest_remote_signal(
+        sessionmaker,
+        winner_selection=winner_selection,
+        sport=sport,
+        event_external_id=event_external_id,
+    )
+
+    async with sessionmaker() as session:
+        summary = await AnalyticsSummaryService().get_summary(session)
+        balance = await BalanceService().get_realistic_balance_overview(session)
+        qsum = await SignalQualitySummaryService().build_quality_summary(session)
+        sanity = await SanityCheckService().run_sanity_check(session)
+
+    k = summary.kpis
+    await message.answer(
+        "\n".join(
+            [
+                "REMOTE FLOW DEMO",
+                f"- smoke_created_signal_ids: {smoke.created_signal_ids}",
+                f"- settle_processed_signal_ids: {settle.processed_signal_ids}",
+                f"- total_signals: {k.total_signals}",
+                f"- settled_signals: {k.settled_signals}",
+                f"- wins/losses/voids: {k.wins}/{k.losses}/{k.voids}",
+                f"- current_balance_rub: {balance.current_balance_rub}",
+                f"- avg_prediction_error: {qsum.avg_prediction_error}",
+                f"- overestimated_count: {qsum.overestimated_count}",
+                f"- underestimated_count: {qsum.underestimated_count}",
+                f"- sanity_issues_count: {sanity.issues_count}",
+            ]
+        )
+    )
+
+
+@router.message(Command("debug_help"))
+async def cmd_debug_help(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    await message.answer(
+        "\n".join(
+            [
+                "DEBUG HELP",
+                "",
+                "BASIC",
+                "- /debug",
+                "- /system_status",
+                "- /quick_check",
+                "",
+                "DEMO",
+                "- /demo_cycle_win",
+                "- /demo_cycle_lose",
+                "- /demo_cycle_void",
+                "- /demo_smoke",
+                "",
+                "REMOTE",
+                "- /odds_http_url",
+                "- /odds_http_preview",
+                "- /odds_http_ingest",
+                "- /remote_smoke",
+                "- /remote_settle <sport> <event_external_id> <winner_selection>",
+                "- /remote_flow_demo <sport> <event_external_id> <winner_selection>",
+                "- /remote_status",
+                "",
+                "DATA",
+                "- /latest_signals",
+                "- /latest_results",
+                "- /latest_failures",
+                "- /signal_report <id>",
+                "- /signal_quality <id>",
+                "- /quality_summary",
+                "",
+                "BALANCE",
+                "- /balance",
+                "- /balance_rub",
+                "- /period_report",
+                "- /period_report_rub",
+                "- /reset_balance <amount> [label...]",
+                "- /balance_history",
+                "",
+                "CHECKS",
+                "- /sanity_check",
+                "- /regression_pack",
+                "- /server_checklist",
             ]
         )
     )

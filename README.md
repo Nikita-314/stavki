@@ -57,3 +57,32 @@ alembic upgrade head
 alembic revision --autogenerate -m "describe change"
 ```
 
+### Server manual run (screen)
+
+См. `docs/server_runbook.md`.
+
+Минимально (внутри screen):
+
+```bash
+source .venv/bin/activate
+alembic upgrade head
+python3 -m app.main
+```
+
+### Debug commands for remote testing
+
+- **URL / preview / ingest**
+  - `/odds_http_url`
+  - `/odds_http_preview`
+  - `/odds_http_ingest`
+- **Smoke (fetch → preview → ingest → sanity/summary/balance)**
+  - `/remote_smoke`
+- **Settle remote event**
+  - `/remote_settle <sport> <event_external_id> <winner_selection>`
+- **One-button flow**
+  - `/remote_flow_demo <sport> <event_external_id> <winner_selection>`
+- **Post-run status**
+  - `/remote_status`
+  - `/sanity_check`
+  - `/balance_rub`
+
