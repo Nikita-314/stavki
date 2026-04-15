@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
+from app.services.signal_quality_service import SignalQualityService
 
 
 router = Router(name="debug")
@@ -159,3 +160,49 @@ async def cmd_signal_report(message: Message, sessionmaker: async_sessionmaker[A
         )
     )
 
+
+@router.message(Command("signal_quality"))
+async def cmd_signal_quality(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: /signal_quality <signal_id>")
+        return
+    try:
+        signal_id = int(parts[1])
+    except ValueError:
+        await message.answer("signal_id must be an integer. Example: /signal_quality 5")
+        return
+
+    try:
+        async with sessionmaker() as session:
+            q = await SignalQualityService().build_signal_quality_report(session, signal_id)
+    except ValueError as e:
+        await message.answer(str(e))
+        return
+
+    m = q.metrics
+    await message.answer(
+        "\n".join(
+            [
+                f"signal_id: {q.signal_id}",
+                f"match_name: {q.match_name}",
+                f"market_type: {q.market_type}",
+                f"selection: {q.selection}",
+                f"model: {q.model_name}/{q.model_version_name}",
+                f"predicted_prob: {_fmt_decimal(m.predicted_prob)}",
+                f"implied_prob: {_fmt_decimal(m.implied_prob)}",
+                f"actual_outcome: {m.actual_outcome}",
+                f"prediction_error: {_fmt_decimal(m.prediction_error)}",
+                f"edge: {_fmt_decimal(m.edge)}",
+                f"value_direction: {m.value_direction}",
+                f"calibration_bucket: {m.calibration_bucket}",
+                f"is_overestimated: {m.is_overestimated}",
+                f"is_underestimated: {m.is_underestimated}",
+                f"quality_label: {m.quality_label}",
+            ]
+        )
+    )
