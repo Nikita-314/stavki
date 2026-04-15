@@ -25,6 +25,7 @@ from app.services.result_ingestion_service import ResultIngestionService
 from app.schemas.event_result import EventResultInput
 from app.services.notification_service import NotificationService
 from app.services.balance_service import BalanceService
+from app.services.period_report_service import PeriodReportService
 
 
 router = Router(name="debug")
@@ -707,4 +708,48 @@ async def cmd_balance_history(message: Message, sessionmaker: async_sessionmaker
     lines = [f"snapshots: {len(items)} (showing {len(shown)})"]
     for it in shown:
         lines.append(f"- id={it.snapshot_id} | base_amount={it.base_amount} | label={it.label} | created_at={it.created_at}")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("period_report"))
+async def cmd_period_report(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        report = await PeriodReportService().get_period_report(session)
+
+    o = report.overview
+
+    lines: list[str] = [
+        f"period_started_at: {o.period_started_at}",
+        f"period_label: {o.period_label}",
+        f"start_balance: {o.start_balance}",
+        f"total_profit_loss: {o.total_profit_loss}",
+        f"current_balance: {o.current_balance}",
+        f"settled_signals_count: {o.settled_signals_count}",
+        f"wins/losses/voids: {o.wins}/{o.losses}/{o.voids}",
+    ]
+
+    top_sport = report.by_sport[:5]
+    if top_sport:
+        lines.append("")
+        lines.append("top 5 by_sport:")
+        for it in top_sport:
+            lines.append(
+                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
+                f"pl={it.total_profit_loss} avg={it.avg_profit_loss}"
+            )
+
+    top_market = report.by_market_type[:5]
+    if top_market:
+        lines.append("")
+        lines.append("top 5 by_market_type:")
+        for it in top_market:
+            lines.append(
+                f"- {it.key}: cnt={it.settled_signals_count} w/l/v={it.wins}/{it.losses}/{it.voids} "
+                f"pl={it.total_profit_loss} avg={it.avg_profit_loss}"
+            )
+
     await message.answer("\n".join(lines))
