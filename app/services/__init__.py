@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.services.balance_service import BalanceService
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
@@ -18,6 +19,7 @@ from app.services.settlement_service import SettlementService
 from app.services.training_dataset_service import TrainingDatasetService
 
 __all__ = [
+    "BalanceService",
     "AnalyticsService",
     "AnalyticsSummaryService",
     "BootstrapService",

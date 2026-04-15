@@ -24,6 +24,7 @@ from app.services.settlement_service import SettlementService
 from app.services.result_ingestion_service import ResultIngestionService
 from app.schemas.event_result import EventResultInput
 from app.services.notification_service import NotificationService
+from app.services.balance_service import BalanceService
 
 
 router = Router(name="debug")
@@ -630,3 +631,80 @@ async def cmd_notify_result(message: Message, sessionmaker: async_sessionmaker[A
 
     await NotificationService().send_result_notification(message.bot, settings.result_chat_id, signal_report, quality_report)
     await message.answer("result notification sent")
+
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        overview = await BalanceService().get_balance_overview(session)
+
+    await message.answer(
+        "\n".join(
+            [
+                f"base_amount: {overview.base_amount}",
+                f"base_snapshot_at: {overview.base_snapshot_at}",
+                f"base_label: {overview.base_label}",
+                f"total_profit_loss_since_base: {overview.total_profit_loss_since_base}",
+                f"current_balance: {overview.current_balance}",
+                f"settled_signals_count: {overview.settled_signals_count}",
+                f"wins/losses/voids: {overview.wins}/{overview.losses}/{overview.voids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("reset_balance"))
+async def cmd_reset_balance(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: /reset_balance <amount> [label...]")
+        return
+
+    try:
+        amount = _parse_decimal(parts[1])
+    except Exception:
+        await message.answer("Example: /reset_balance 50000 april test")
+        return
+
+    label = " ".join(parts[2:]).strip() if len(parts) > 2 else None
+    if label == "":
+        label = None
+
+    async with sessionmaker() as session:
+        snapshot = await BalanceService().reset_balance(session, amount, label=label)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "snapshot created",
+                f"amount: {snapshot.base_amount}",
+                f"label: {snapshot.label}",
+                f"created_at: {snapshot.created_at}",
+            ]
+        )
+    )
+
+
+@router.message(Command("balance_history"))
+async def cmd_balance_history(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        items = await BalanceService().list_balance_history(session)
+
+    shown = items[:10]
+    lines = [f"snapshots: {len(items)} (showing {len(shown)})"]
+    for it in shown:
+        lines.append(f"- id={it.snapshot_id} | base_amount={it.base_amount} | label={it.label} | created_at={it.created_at}")
+    await message.answer("\n".join(lines))
