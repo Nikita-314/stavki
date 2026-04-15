@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -37,6 +38,8 @@ from app.services.sanity_check_service import SanityCheckService
 from app.providers.json_candidate_provider import JsonCandidateProvider
 from app.services.ingestion_service import IngestionService
 from app.providers.generic_odds_adapter import GenericOddsAdapter
+from app.services.http_fetch_service import HttpFetchService
+from app.services.adapter_ingestion_service import AdapterIngestionService
 
 
 router = Router(name="debug")
@@ -945,6 +948,14 @@ def _parse_tail_arg(message: Message) -> str | None:
     return parts[1].strip()
 
 
+def _require_url_or_settings_default(message: Message) -> str | None:
+    url = _parse_tail_arg(message)
+    if url:
+        return url
+    settings = get_settings()
+    return settings.provider_test_url
+
+
 @router.message(Command("sanity_check"))
 async def cmd_sanity_check(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -1138,6 +1149,205 @@ async def cmd_adapter_ingest(message: Message, sessionmaker: async_sessionmaker[
         "\n".join(
             [
                 "ADAPTER INGEST",
+                f"- source_name: {adapter_res.source_name}",
+                f"- total_events: {adapter_res.total_events}",
+                f"- total_markets: {adapter_res.total_markets}",
+                f"- created_candidates: {adapter_res.created_candidates}",
+                f"- skipped_items: {adapter_res.skipped_items}",
+                f"- ingested_created_signals: {ing.created_signals}",
+                f"- ingested_skipped_candidates: {ing.skipped_candidates}",
+                f"- created_signal_ids: {ing.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("remote_preview"))
+async def cmd_remote_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    url = _parse_tail_arg(message)
+    if not url:
+        await message.answer("Usage: /remote_preview <url>")
+        return
+
+    settings = get_settings()
+    fetch_res = await asyncio.to_thread(
+        HttpFetchService().fetch_json,
+        url,
+        int(settings.provider_test_timeout_seconds),
+    )
+    if not fetch_res.ok:
+        await message.answer(f"REMOTE PREVIEW\n- url: {url}\n- ok: false\n- error: {fetch_res.error}")
+        return
+    if not isinstance(fetch_res.payload, dict):
+        await message.answer("REMOTE PREVIEW\n- ok: false\n- error: adapter expects JSON object payload")
+        return
+
+    adapter_res = AdapterIngestionService().preview_payload(fetch_res.payload)
+    shown = adapter_res.candidates[:5]
+
+    lines = [
+        "REMOTE PREVIEW",
+        f"- url: {url}",
+        f"- ok: true",
+        f"- source_name: {adapter_res.source_name}",
+        f"- total_events: {adapter_res.total_events}",
+        f"- total_markets: {adapter_res.total_markets}",
+        f"- created_candidates: {adapter_res.created_candidates}",
+        f"- skipped_items: {adapter_res.skipped_items}",
+        "",
+        "candidates (first 5):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("remote_ingest"))
+async def cmd_remote_ingest(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    url = _parse_tail_arg(message)
+    if not url:
+        await message.answer("Usage: /remote_ingest <url>")
+        return
+
+    settings = get_settings()
+    fetch_res = await asyncio.to_thread(
+        HttpFetchService().fetch_json,
+        url,
+        int(settings.provider_test_timeout_seconds),
+    )
+    if not fetch_res.ok:
+        await message.answer(f"REMOTE INGEST\n- url: {url}\n- error: {fetch_res.error}")
+        return
+    if not isinstance(fetch_res.payload, dict):
+        await message.answer("REMOTE INGEST\n- error: adapter expects JSON object payload")
+        return
+
+    async with sessionmaker() as session:
+        adapter_res, ing = await AdapterIngestionService().ingest_payload(session, fetch_res.payload)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "REMOTE INGEST",
+                f"- url: {url}",
+                f"- source_name: {adapter_res.source_name}",
+                f"- total_events: {adapter_res.total_events}",
+                f"- total_markets: {adapter_res.total_markets}",
+                f"- created_candidates: {adapter_res.created_candidates}",
+                f"- skipped_items: {adapter_res.skipped_items}",
+                f"- ingested_created_signals: {ing.created_signals}",
+                f"- ingested_skipped_candidates: {ing.skipped_candidates}",
+                f"- created_signal_ids: {ing.created_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("remote_preview_default"))
+async def cmd_remote_preview_default(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    url = get_settings().provider_test_url
+    if not url:
+        await message.answer("PROVIDER_TEST_URL is not set")
+        return
+
+    # Reuse /remote_preview logic by calling fetch+preview inline
+    settings = get_settings()
+    fetch_res = await asyncio.to_thread(HttpFetchService().fetch_json, url, int(settings.provider_test_timeout_seconds))
+    if not fetch_res.ok:
+        await message.answer(f"REMOTE PREVIEW\n- url: {url}\n- ok: false\n- error: {fetch_res.error}")
+        return
+    if not isinstance(fetch_res.payload, dict):
+        await message.answer("REMOTE PREVIEW\n- ok: false\n- error: adapter expects JSON object payload")
+        return
+    adapter_res = AdapterIngestionService().preview_payload(fetch_res.payload)
+    shown = adapter_res.candidates[:5]
+    lines = [
+        "REMOTE PREVIEW",
+        f"- url: {url}",
+        f"- ok: true",
+        f"- source_name: {adapter_res.source_name}",
+        f"- total_events: {adapter_res.total_events}",
+        f"- total_markets: {adapter_res.total_markets}",
+        f"- created_candidates: {adapter_res.created_candidates}",
+        f"- skipped_items: {adapter_res.skipped_items}",
+        "",
+        "candidates (first 5):",
+    ]
+    if not shown:
+        lines.append("- none")
+    else:
+        for c in shown:
+            lines.append(
+                " | ".join(
+                    [
+                        str(getattr(c.match.sport, "value", c.match.sport)),
+                        str(getattr(c.market.bookmaker, "value", c.market.bookmaker)),
+                        c.match.match_name,
+                        c.market.market_type,
+                        c.market.selection,
+                        f"odds={c.market.odds_value}",
+                    ]
+                )
+            )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("remote_ingest_default"))
+async def cmd_remote_ingest_default(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    url = get_settings().provider_test_url
+    if not url:
+        await message.answer("PROVIDER_TEST_URL is not set")
+        return
+
+    settings = get_settings()
+    fetch_res = await asyncio.to_thread(HttpFetchService().fetch_json, url, int(settings.provider_test_timeout_seconds))
+    if not fetch_res.ok:
+        await message.answer(f"REMOTE INGEST\n- url: {url}\n- error: {fetch_res.error}")
+        return
+    if not isinstance(fetch_res.payload, dict):
+        await message.answer("REMOTE INGEST\n- error: adapter expects JSON object payload")
+        return
+
+    async with sessionmaker() as session:
+        adapter_res, ing = await AdapterIngestionService().ingest_payload(session, fetch_res.payload)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                "REMOTE INGEST",
+                f"- url: {url}",
                 f"- source_name: {adapter_res.source_name}",
                 f"- total_events: {adapter_res.total_events}",
                 f"- total_markets: {adapter_res.total_markets}",

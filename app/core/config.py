@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     result_chat_id: int | None = None
     virtual_flat_stake_rub: Decimal = Decimal("1000.00")
     virtual_start_balance_rub: Decimal = Decimal("50000.00")
+    provider_test_url: str | None = None
+    provider_test_timeout_seconds: int = 20
 
     model_config = SettingsConfigDict(
         env_file=".env",

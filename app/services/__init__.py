@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.balance_service import BalanceService
+from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
@@ -11,6 +12,7 @@ from app.services.entry_service import EntryService
 from app.services.failure_auto_review_service import FailureAutoReviewService
 from app.services.failure_review_service import FailureReviewService
 from app.services.ingestion_service import IngestionService
+from app.services.http_fetch_service import HttpFetchService
 from app.services.notification_service import NotificationService
 from app.services.orchestration_service import OrchestrationService
 from app.services.period_report_service import PeriodReportService
@@ -24,6 +26,7 @@ from app.services.training_dataset_service import TrainingDatasetService
 
 __all__ = [
     "BalanceService",
+    "AdapterIngestionService",
     "AnalyticsService",
     "AnalyticsSummaryService",
     "BootstrapService",
@@ -34,6 +37,7 @@ __all__ = [
     "FailureAutoReviewService",
     "FailureReviewService",
     "IngestionService",
+    "HttpFetchService",
     "NotificationService",
     "OrchestrationService",
     "PeriodReportService",
