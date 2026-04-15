@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db.models.prediction_log import PredictionLog
 from app.db.models.signal import Signal
+from app.db.models.settlement import Settlement
 from app.core.enums import BookmakerType, SignalStatus, SportType
 from app.schemas.signal import PredictionLogCreate, SignalCreate
 
@@ -84,4 +85,22 @@ class SignalRepository:
             stmt = stmt.where(Signal.event_external_id == event_external_id)
         result = await session.execute(stmt)
         return result.scalars().first()
+
+    async def list_unsettled_by_event_external_id(
+        self,
+        session: AsyncSession,
+        event_external_id: str,
+        sport: SportType,
+    ) -> list[Signal]:
+        """List signals for an event that do not have a Settlement yet."""
+        stmt = (
+            select(Signal)
+            .outerjoin(Settlement, Settlement.signal_id == Signal.id)
+            .where(Signal.event_external_id == event_external_id)
+            .where(Signal.sport == sport)
+            .where(Settlement.id.is_(None))
+            .order_by(Signal.id.asc())
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
 

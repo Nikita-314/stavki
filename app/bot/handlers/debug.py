@@ -21,6 +21,8 @@ from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
 from app.services.settlement_service import SettlementService
+from app.services.result_ingestion_service import ResultIngestionService
+from app.schemas.event_result import EventResultInput
 
 
 router = Router(name="debug")
@@ -59,6 +61,13 @@ def _parse_decimal(value: str) -> Decimal:
 
 def _fmt_enum(v: object) -> str:
     return getattr(v, "value", str(v))
+
+
+def _parse_sport(value: str):
+    # SportType is a str Enum: accept "CS2", "DOTA2", "FOOTBALL" (case-insensitive).
+    from app.core.enums import SportType
+
+    return SportType(value.strip().upper())
 
 
 @router.message(Command("debug"))
@@ -488,3 +497,74 @@ async def cmd_quality_summary(message: Message, sessionmaker: async_sessionmaker
         )
 
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("ingest_result"))
+async def cmd_ingest_result(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 4:
+        await message.answer("Usage: /ingest_result <sport> <event_external_id> <winner_selection>")
+        return
+    try:
+        sport = _parse_sport(parts[1])
+        event_external_id = parts[2].strip()
+        winner_selection = (message.text or "").split(None, 3)[3].strip()
+        data = EventResultInput(event_external_id=event_external_id, sport=sport, winner_selection=winner_selection)
+    except Exception:
+        await message.answer("Examples: /ingest_result CS2 cs2_10001 Team Spirit | /ingest_result FOOTBALL football_30001 Зенит")
+        return
+
+    async with sessionmaker() as session:
+        res = await ResultIngestionService().process_event_result(session, data)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"processed_signal_ids: {res.processed_signal_ids}",
+            ]
+        )
+    )
+
+
+@router.message(Command("void_result"))
+async def cmd_void_result(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer("Usage: /void_result <sport> <event_external_id>")
+        return
+    try:
+        sport = _parse_sport(parts[1])
+        event_external_id = parts[2].strip()
+        data = EventResultInput(event_external_id=event_external_id, sport=sport, is_void=True)
+    except Exception:
+        await message.answer("Example: /void_result CS2 cs2_10001")
+        return
+
+    async with sessionmaker() as session:
+        res = await ResultIngestionService().process_event_result(session, data)
+        await session.commit()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"total_signals_found: {res.total_signals_found}",
+                f"settled_signals: {res.settled_signals}",
+                f"skipped_signals: {res.skipped_signals}",
+                f"created_failure_reviews: {res.created_failure_reviews}",
+                f"processed_signal_ids: {res.processed_signal_ids}",
+            ]
+        )
+    )
