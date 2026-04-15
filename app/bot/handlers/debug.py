@@ -5,10 +5,10 @@ from decimal import Decimal
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.keyboards.debug import get_debug_keyboard
 from app.core.config import get_settings
-from app.db.session import create_engine, create_sessionmaker
 from app.services.analytics_service import AnalyticsService
 from app.services.analytics_summary_service import AnalyticsSummaryService
 from app.services.bootstrap_service import BootstrapService
@@ -61,20 +61,14 @@ async def show_mock_candidates(message: Message) -> None:
 
 
 @router.message(lambda m: (m.text or "").strip() in {"Run mock ingestion", "/run_mock_ingestion"})
-async def run_mock_ingestion(message: Message) -> None:
+async def run_mock_ingestion(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
 
-    settings = get_settings()
-    engine = create_engine(settings.database_url, echo=settings.debug)
-    session_maker = create_sessionmaker(engine)
-
-    async with session_maker() as session:
+    async with sessionmaker() as session:
         result = await BootstrapService().run_mock_ingestion(session)
         await session.commit()
-
-    await engine.dispose()
 
     await message.answer(
         "\n".join(
@@ -89,19 +83,13 @@ async def run_mock_ingestion(message: Message) -> None:
 
 
 @router.message(lambda m: (m.text or "").strip() in {"Summary", "/summary"})
-async def show_summary(message: Message) -> None:
+async def show_summary(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
 
-    settings = get_settings()
-    engine = create_engine(settings.database_url, echo=settings.debug)
-    session_maker = create_sessionmaker(engine)
-
-    async with session_maker() as session:
+    async with sessionmaker() as session:
         report = await AnalyticsSummaryService().get_summary(session)
-
-    await engine.dispose()
 
     k = report.kpis
     await message.answer(
@@ -129,7 +117,7 @@ async def hint_signal_report(message: Message) -> None:
 
 
 @router.message(Command("signal_report"))
-async def cmd_signal_report(message: Message) -> None:
+async def cmd_signal_report(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
@@ -144,19 +132,12 @@ async def cmd_signal_report(message: Message) -> None:
         await message.answer("signal_id must be an integer. Example: /signal_report 5")
         return
 
-    settings = get_settings()
-    engine = create_engine(settings.database_url, echo=settings.debug)
-    session_maker = create_sessionmaker(engine)
-
     try:
-        async with session_maker() as session:
+        async with sessionmaker() as session:
             report = await AnalyticsService().get_signal_report(session, signal_id)
     except ValueError as e:
         await message.answer(str(e))
-        await engine.dispose()
         return
-
-    await engine.dispose()
 
     settlement_result = report.settlement.result if report.settlement is not None else None
     await message.answer(

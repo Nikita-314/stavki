@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 
 from app.core.config import get_settings
 from app.bot.handlers import debug_router
+from app.db.session import create_engine, create_sessionmaker
 
 
 async def main() -> None:
@@ -20,8 +21,14 @@ async def main() -> None:
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
 
+    engine = create_engine(settings.database_url, echo=settings.debug)
+    sessionmaker = create_sessionmaker(engine)
+
     dp.include_router(debug_router)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot, sessionmaker=sessionmaker)
+    finally:
+        await engine.dispose()
 
 
 if __name__ == "__main__":
