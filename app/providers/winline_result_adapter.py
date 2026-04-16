@@ -50,8 +50,11 @@ class WinlineResultAdapter:
         for item in results_raw:
             if not isinstance(item, dict):
                 continue
-            # TODO: replace this normalized passthrough with real result-level JSON paths
-            # discovered in DevTools for event id, status, winner, void flag, and settled time.
+            # TODO: event_external_id -> real result event id path; skip result if missing.
+            # TODO: winner_selection -> real winner side path or derive from result code/score.
+            # TODO: is_void -> real void/cancelled flag path or derive from status.
+            # TODO: settled_at -> real settled/finished timestamp path; leave None if absent.
+            # TODO: keep full raw item in raw_json for later winner/sport debugging.
             try:
                 results.append(WinlineRawResultItem.model_validate({**item, 'raw_json': item}))
             except (ValidationError, TypeError, ValueError):
@@ -85,8 +88,8 @@ class WinlineResultAdapter:
 
     def _extract_sport(self, item: WinlineRawResultItem) -> SportType | None:
         raw = item.raw_json or {}
-        # TODO: replace fallback keys below with the real sport JSON path from the Winline
-        # result payload after manual DevTools capture.
+        # TODO: sport -> replace fallback keys below with the real result sport path from DevTools.
+        # TODO: if sport is nested under event metadata, read that path here before mapping.
         value = raw.get('sport') or raw.get('sport_name') or raw.get('sport_slug') or raw.get('sport_key')
         if not isinstance(value, str):
             return None

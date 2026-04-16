@@ -76,8 +76,14 @@ class WinlineAdapter:
         for item in events_raw:
             if not isinstance(item, dict):
                 continue
-            # TODO: replace this normalized passthrough with real event-level JSON paths
-            # discovered in DevTools for id, sport, teams, start time, and live status.
+            # TODO: event_external_id -> real event id path; skip event if missing.
+            # TODO: sport -> real sport field path; fallback to parent event metadata if needed.
+            # TODO: tournament_name -> real league/tournament path; fallback from category node.
+            # TODO: match_name -> real event title path; or build from home_team + away_team.
+            # TODO: home_team -> real team1/home path; skip event if missing.
+            # TODO: away_team -> real team2/away path; skip event if missing.
+            # TODO: event_start_at -> real start time path; leave None if absent.
+            # TODO: is_live -> real live flag/status path; fallback from status if needed.
             try:
                 events.append(WinlineRawEventItem.model_validate({**item, 'raw_json': item}))
             except (ValidationError, TypeError, ValueError):
@@ -86,10 +92,13 @@ class WinlineAdapter:
         for item in markets_raw:
             if not isinstance(item, dict):
                 continue
-            # TODO: replace this normalized passthrough with real market-level JSON paths
-            # discovered in DevTools for market code, label, selection, and coefficient.
-            # TODO: normalize section/subsection/search_hint after the raw fields are mapped
-            # from provider market groups or tabs.
+            # TODO: market_type -> real provider market code path; fallback from label only if needed.
+            # TODO: market_label -> real market title path; fallback from market_type if needed.
+            # TODO: selection -> real outcome title path; skip market if missing.
+            # TODO: odds_value -> real coefficient/price path; skip market if not parseable.
+            # TODO: section_name -> real parent group/tab path; leave None if absent.
+            # TODO: subsection_name -> real subgroup path; leave None if absent.
+            # TODO: search_hint -> real searchable text path or build from teams + selection.
             try:
                 markets.append(WinlineRawMarketItem.model_validate({**item, 'raw_json': item}))
             except (ValidationError, TypeError, ValueError):
