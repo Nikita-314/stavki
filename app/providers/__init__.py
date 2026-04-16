@@ -7,6 +7,8 @@ from app.providers.json_candidate_provider import JsonCandidateProvider
 from app.providers.mock_candidate_provider import MockCandidateProvider
 from app.providers.odds_http_client import OddsHttpClient
 from app.providers.odds_style_adapter import OddsStyleAdapter
+from app.providers.winline_adapter import WinlineAdapter
+from app.providers.winline_result_adapter import WinlineResultAdapter
 
 __all__ = [
     "BaseCandidateProvider",
@@ -16,5 +18,6 @@ __all__ = [
     "MockCandidateProvider",
     "OddsHttpClient",
     "OddsStyleAdapter",
+    "WinlineAdapter",
+    "WinlineResultAdapter",
 ]
-

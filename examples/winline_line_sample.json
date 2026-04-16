@@ -1,0 +1,67 @@
+{
+  "source_name": "winline",
+  "events": [
+    {
+      "event_external_id": "winline_football_event_001",
+      "sport": "football",
+      "tournament_name": "RPL",
+      "match_name": "Zenit vs Spartak",
+      "home_team": "Zenit",
+      "away_team": "Spartak",
+      "event_start_at": "2026-04-20T18:00:00Z",
+      "is_live": false,
+      "raw_provider_group": "prematch_list",
+      "raw_event_kind": "match"
+    },
+    {
+      "event_external_id": "winline_cs2_event_002",
+      "sport": "cs2",
+      "tournament_name": "IEM Example",
+      "match_name": "Team Spirit vs NAVI",
+      "home_team": "Team Spirit",
+      "away_team": "NAVI",
+      "event_start_at": "2026-04-20T20:30:00Z",
+      "is_live": true,
+      "raw_provider_group": "live_list",
+      "raw_event_kind": "match"
+    }
+  ],
+  "markets": [
+    {
+      "event_external_id": "winline_football_event_001",
+      "market_type": "1x2",
+      "market_label": "Full Time Result",
+      "selection": "Zenit",
+      "odds_value": "2.15",
+      "section_name": "Main",
+      "subsection_name": "Match Result",
+      "search_hint": "Zenit Spartak full time result",
+      "raw_provider_group": "main",
+      "raw_market_code": "1x2_home"
+    },
+    {
+      "event_external_id": "winline_football_event_001",
+      "market_type": "totals",
+      "market_label": "Total Goals 2.5",
+      "selection": "Over 2.5",
+      "odds_value": "1.92",
+      "section_name": "Totals",
+      "subsection_name": "Goals",
+      "search_hint": "Zenit Spartak total goals over 2.5",
+      "raw_provider_group": "totals",
+      "raw_market_code": "total_over_2_5"
+    },
+    {
+      "event_external_id": "winline_cs2_event_002",
+      "market_type": "match_winner",
+      "market_label": "Match Winner",
+      "selection": "Team Spirit",
+      "odds_value": "1.83",
+      "section_name": "Main",
+      "subsection_name": "Winner",
+      "search_hint": "Team Spirit NAVI match winner",
+      "raw_provider_group": "main",
+      "raw_market_code": "moneyline_home"
+    }
+  ]
+}

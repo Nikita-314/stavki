@@ -213,7 +213,8 @@ class OddsStyleAdapter(BaseProviderAdapter):
 
     def _map_sport(self, value: str) -> SportType | None:
         v = (value or "").strip().lower()
-        if v in {"soccer", "football"}:
+        # The Odds API uses sport keys like `soccer_epl`, `soccer_uefa_champs_league`.
+        if v in {"soccer", "football"} or v.startswith("soccer_"):
             return SportType.FOOTBALL
         if v in {"cs2", "counter_strike"}:
             return SportType.CS2
