@@ -275,7 +275,8 @@ class WinlineAdapter:
             return []
 
         label_source = template_label if self._clean_text(template_label) else str(market_type)
-        base_market_label = self._cleanup_market_label_text(label_source, market_param=market_param)
+        base_market_label = self._normalize_market_label(label_source, koef=market_param)
+        market_kind = self._derive_market_kind(base_market_label)
         section_name = self._map_section_name(id_tip_event)
 
         home_team, away_team = self._extract_teams(raw_event)
@@ -285,7 +286,7 @@ class WinlineAdapter:
             if idx >= len(odds):
                 continue
 
-            selection = self._cleanup_selection(selection_value)
+            selection = self._normalize_selection(selection_value)
             if not selection:
                 continue
 
@@ -314,6 +315,7 @@ class WinlineAdapter:
                     "outcome_index": idx,
                     "raw_selection": selection_value,
                     "raw_odds": odds[idx],
+                    "market_kind": market_kind,
                 },
             }
 
@@ -339,6 +341,28 @@ class WinlineAdapter:
             if sport is None:
                 skipped += 1
                 continue
+
+            raw_meta = market_item.raw_json if isinstance(market_item.raw_json, dict) else {}
+            market_kind = raw_meta.get("market_kind")
+            if not isinstance(market_kind, str):
+                market_kind = None
+
+            label = self._clean_text(market_item.market_label or market_item.market_type)
+            selection = self._clean_text(market_item.selection)
+            odds_value = market_item.odds_value
+
+            skip_reason = self._get_skip_reason(
+                market_label=label,
+                selection=selection,
+                market_kind=market_kind,
+                odds_value=odds_value,
+            )
+            if skip_reason is not None:
+                skipped += 1
+                continue
+
+            implied = self._calculate_implied_probability(odds_value)
+            min_odds = self._calculate_min_entry_odds(odds_value)
 
             try:
                 match = ProviderMatch(
@@ -366,9 +390,9 @@ class WinlineAdapter:
                     ProviderSignalCandidate(
                         match=match,
                         market=provider_market,
-                        min_entry_odds=market_item.odds_value,
+                        min_entry_odds=min_odds,
                         predicted_prob=None,
-                        implied_prob=None,
+                        implied_prob=implied,
                         edge=None,
                         model_name=None,
                         model_version_name=None,
@@ -377,6 +401,8 @@ class WinlineAdapter:
                             "raw_event_id": event_item.event_external_id,
                             "raw_market_type": market_item.market_type,
                             "adapter": "winline",
+                            "winline_market_kind": market_kind,
+                            "winline_filter": "supported",
                         },
                     )
                 )
@@ -392,6 +418,59 @@ class WinlineAdapter:
             skipped_items=skipped,
             candidates=candidates,
         )
+
+    def _is_supported_market(self, market_label: str, selection: str, market_kind: str | None) -> bool:
+        """First-stage allowlist: only known kinds with matching normalized selections."""
+        if market_kind is None:
+            return False
+        sel = self._clean_text(selection)
+        if market_kind == "MATCH_RESULT":
+            return sel in {"HOME", "DRAW", "AWAY"}
+        if market_kind == "TOTALS":
+            return sel in {"OVER", "UNDER"}
+        if market_kind == "HANDICAP":
+            return sel in {"HOME", "AWAY"}
+        if market_kind == "BTTS":
+            return sel in {"YES", "NO"}
+        return False
+
+    def _get_skip_reason(
+        self,
+        *,
+        market_label: str,
+        selection: str,
+        market_kind: str | None,
+        odds_value: Decimal,
+    ) -> str | None:
+        """Returns internal reason code when this market must not become a candidate; None if OK."""
+        if not self._clean_text(market_label):
+            return "empty_market_label"
+        if not self._clean_text(selection):
+            return "empty_selection"
+        try:
+            if odds_value <= Decimal("1"):
+                return "invalid_odds"
+        except Exception:
+            return "invalid_odds"
+        if market_kind is None:
+            return "unsupported_market_kind"
+        if not self._is_supported_market(market_label, selection, market_kind):
+            return "unsupported_selection"
+        return None
+
+    def _calculate_implied_probability(self, odds_value: Decimal) -> Decimal | None:
+        if odds_value is None:
+            return None
+        try:
+            if odds_value > 0:
+                return Decimal("1") / odds_value
+        except Exception:
+            return None
+        return None
+
+    def _calculate_min_entry_odds(self, odds_value: Decimal) -> Decimal:
+        """Hook for future min-entry rules; currently equals line odds."""
+        return odds_value
 
     def _map_section_name(self, id_tip_event: Any) -> str | None:
         if id_tip_event is None or id_tip_event == "":
@@ -410,32 +489,85 @@ class WinlineAdapter:
         }
         return mapping.get(key, "Main")
 
-    def _cleanup_market_label_text(self, raw: Any, *, market_param: Any) -> str:
-        """Replace-based cleanup for Winline freeTextR templates (signals-friendly, not full i18n)."""
+    def _normalize_market_label(self, raw: Any, *, koef: Any) -> str:
+        """Normalize freeTextR for signals: placeholders, [a] -> koef, RU tokens -> EN."""
         text = self._clean_text(raw)
         if not text:
-            text = "market"
+            return "market"
 
-        text = text.replace("Обе забьют (@NP@)", "Both Teams To Score")
-        text = text.replace("@1HT@ тотал [a]", "1st half total")
-        text = text.replace("@1HT@ исход 1X2", "1st half 1X2")
-        text = text.replace("@1HT@ фора [a]", "1st half handicap")
-        text = text.replace("Тотал [a] (@NP@)", "Total")
-        text = text.replace("Фора [a] (@NP@)", "Handicap")
-        text = text.replace("@1HT@", "1st half ")
-        text = text.replace("@NP@", "")
-        text = text.replace("[a]", "")
-        text = " ".join(text.split())
+        koef_str = ""
+        if koef not in (None, ""):
+            koef_str = self._clean_text(koef)
 
-        param = self._clean_text(market_param)
-        if param:
-            return f"{text} {param}".strip()
-        return text
+        # Full phrases (before generic [a] / placeholder handling)
+        if "Обе забьют (@NP@)" in text:
+            return "Both Teams To Score"
+        if "Тотал [a] (@NP@)" in text:
+            return "Total"
+        if "Фора [a] (@NP@)" in text:
+            return "Handicap"
 
-    def _cleanup_selection(self, value: Any) -> str:
-        """Trim; skip empty. Keeps typical Winline outcome strings (1/X/2, totals, yes/no, team names)."""
+        t = text.replace("@1HT@", "1H").replace("@2HT@", "2H").replace("@NP@", "")
+        if "[a]" in t:
+            t = t.replace("[a]", koef_str) if koef_str else t.replace("[a]", "")
+
+        t = " ".join(t.split())
+
+        # Russian market words -> English (order: longer / specific first)
+        t = t.replace("тотал", "Total").replace("Тотал", "Total")
+        t = t.replace("фора", "Handicap").replace("Фора", "Handicap")
+        # "@1HT@ исход 1X2" style -> "1H исход 1X2" already; drop redundant "исход"
+        t = t.replace(" исход ", " ").replace("исход ", "")
+        t = " ".join(t.split())
+
+        # Legacy patterns from older samples (still useful)
+        t = t.replace("1st half total", "1H Total").replace("1st half 1X2", "1H 1X2")
+        t = t.replace("1st half handicap", "1H Handicap")
+
+        t = " ".join(t.split())
+
+        # If template had no [a] but koef applies (e.g. "Тотал @NP@" + koef 2.5 -> "Total 2.5")
+        if koef_str and koef_str not in t:
+            t = f"{t} {koef_str}".strip()
+
+        t = " ".join(t.split())
+        return t if t else "market"
+
+    def _normalize_selection(self, value: Any) -> str:
+        """Map common outcome tokens; unknown values pass through (team names, etc.)."""
         s = self._clean_text(value)
-        return s
+        if not s:
+            return ""
+        key = s.strip().lower()
+        mapping = {
+            "1": "HOME",
+            "2": "AWAY",
+            "x": "DRAW",
+            "больше": "OVER",
+            "меньше": "UNDER",
+            "да": "YES",
+            "нет": "NO",
+        }
+        return mapping.get(key, s)
+
+    def _derive_market_kind(self, market_label: str) -> str | None:
+        """Optional taxonomy for filters / ML; stored only in raw_json."""
+        if not market_label:
+            return None
+        L = market_label.lower()
+        if "both teams" in L:
+            return "BTTS"
+        if "match winner" in L:
+            return "MATCH_RESULT"
+        if L.strip() == "победа":
+            return "MATCH_RESULT"
+        if "handicap" in L:
+            return "HANDICAP"
+        if "total" in L:
+            return "TOTALS"
+        if "1x2" in L:
+            return "MATCH_RESULT"
+        return None
 
     def _build_search_hint(
         self,
