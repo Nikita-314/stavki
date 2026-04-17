@@ -1,0 +1,144 @@
+{
+  "source_name": "winline",
+  "events": [
+    {
+      "id": 15398418,
+      "idSport": 1,
+      "idChampionship": 1,
+      "date": "2026-04-20T19:00:00.999Z",
+      "isLive": 0,
+      "members": [
+        "Кристал Пэлас",
+        "Вест Хэм"
+      ]
+    }
+  ],
+  "championships": [
+    {
+      "id": 1,
+      "name": "Unknown championship"
+    }
+  ],
+  "lines": [
+    {
+      "id": 1387681911,
+      "idEvent": 15398418,
+      "idTipMarket": 985,
+      "koef": "0.5",
+      "V": [1.35, 2.78],
+      "isLive": 0,
+      "freeTextR": "@1HT@ тотал [a]",
+      "R": ["Больше", "Меньше", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 7
+    },
+    {
+      "id": 1387681912,
+      "idEvent": 15398418,
+      "idTipMarket": 985,
+      "koef": "1.5",
+      "V": [2.55, 1.41],
+      "isLive": 0,
+      "freeTextR": "@1HT@ тотал [a]",
+      "R": ["Больше", "Меньше", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 7
+    },
+    {
+      "id": 1387681913,
+      "idEvent": 15398418,
+      "idTipMarket": 985,
+      "koef": "2.5",
+      "V": [5.85, 1.1],
+      "isLive": 0,
+      "freeTextR": "@1HT@ тотал [a]",
+      "R": ["Больше", "Меньше", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 7
+    },
+    {
+      "id": 1387681894,
+      "idEvent": 15398418,
+      "idTipMarket": 1073,
+      "koef": "1",
+      "V": [1.11, 4.9],
+      "isLive": 0,
+      "freeTextR": "Фора [a] (@NP@)",
+      "R": ["1", "2", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 3
+    },
+    {
+      "id": 1387681895,
+      "idEvent": 15398418,
+      "idTipMarket": 1073,
+      "koef": "1",
+      "V": [3.25, 1.29],
+      "isLive": 0,
+      "freeTextR": "Фора [a] (@NP@)",
+      "R": ["1", "2", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 3
+    },
+    {
+      "id": 1387681897,
+      "idEvent": 15398418,
+      "idTipMarket": 1049,
+      "koef": "1",
+      "V": [1.06, 6.5],
+      "isLive": 0,
+      "freeTextR": "Тотал [a] (@NP@)",
+      "R": ["Больше", "Меньше", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 4
+    },
+    {
+      "id": 1387681898,
+      "idEvent": 15398418,
+      "idTipMarket": 1049,
+      "koef": "2",
+      "V": [1.41, 2.72],
+      "isLive": 0,
+      "freeTextR": "Тотал [a] (@NP@)",
+      "R": ["Больше", "Меньше", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 4
+    },
+    {
+      "id": 1387681873,
+      "idEvent": 15398418,
+      "idTipMarket": 58,
+      "koef": "",
+      "V": [1.68, 2.17],
+      "isLive": 0,
+      "freeTextR": "Обе забьют (@NP@)",
+      "R": ["Да", "Нет", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 15
+    },
+    {
+      "id": 1387681881,
+      "idEvent": 15398418,
+      "idTipMarket": 2,
+      "koef": "",
+      "V": [2.8, 2.2, 3.75],
+      "isLive": 0,
+      "freeTextR": "@1HT@ исход 1X2",
+      "R": ["1", "X", "2", "", ""],
+      "countV": 3,
+      "idTipEvent": 5
+    },
+    {
+      "id": 1387681885,
+      "idEvent": 15398418,
+      "idTipMarket": 988,
+      "koef": "0",
+      "V": [1.61, 2.13],
+      "isLive": 0,
+      "freeTextR": "@1HT@ фора [a]",
+      "R": ["1", "2", "", "", ""],
+      "countV": 2,
+      "idTipEvent": 6
+    }
+  ]
+}

@@ -365,6 +365,13 @@ class WinlineRawLineBridgeService:
                 return "No", "fallback:index1_no"
 
         if market_type in {"total_goals", "handicap"}:
+            koef = str(line.get("koef", "")).strip().replace(",", ".")
+            if market_type == "total_goals" and raw:
+                if rl in {"больше", "over", "o", "тб", "b"} and koef:
+                    return f"Больше {koef}", "fallback:total_with_threshold"
+                if rl in {"меньше", "under", "u", "тм", "m"} and koef:
+                    return f"Меньше {koef}", "fallback:total_with_threshold"
+                return raw, "fallback:raw"
             if raw:
                 return raw, "fallback:raw"
             ft = str(line.get("freeTextR", "")).strip()
