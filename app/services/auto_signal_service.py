@@ -64,6 +64,8 @@ class AutoSignalService:
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         bot: Bot,
+        *,
+        dry_run: bool = False,
     ) -> AutoSignalCycleResult:
         settings = get_settings()
         runtime = SignalRuntimeSettingsService()
@@ -728,6 +730,72 @@ class AutoSignalService:
             enriched.append(new_cand)
         candidates_to_ingest = enriched
 
+        fb_pre = [
+            x
+            for x in candidates_before_filter
+            if getattr(getattr(x, "match", None), "sport", None) == SportType.FOOTBALL
+        ]
+        report_matches_found = len({(x.match.external_event_id, x.match.home_team, x.match.away_team) for x in fb_pre})
+        report_candidates = len(candidates_before_filter)
+        report_after_filter = int(post_send_filter_count)
+        report_after_integrity = int(post_integrity_count)
+
+        min_score = float(settings.football_min_signal_score or 60.0)
+        scored_sorted = sorted(
+            candidates_to_ingest,
+            key=lambda c: float(c.signal_score or 0),
+            reverse=True,
+        )
+        for rank, c in enumerate(scored_sorted, start=1):
+            logger.info(
+                "[FOOTBALL][SCORING] rank=%s match=%s market_type=%s score=%s min=%s",
+                rank,
+                c.match.match_name,
+                c.market.market_type,
+                float(c.signal_score or 0),
+                min_score,
+            )
+        finalists = [c for c in scored_sorted if float(c.signal_score or 0) >= min_score]
+        finalist_set = set(id(x) for x in finalists)
+        for c in finalists:
+            logger.info(
+                "[FOOTBALL][SCORING] finalist match=%s score=%s selected=yes",
+                c.match.match_name,
+                float(c.signal_score or 0),
+            )
+        for c in scored_sorted:
+            if id(c) not in finalist_set:
+                logger.info(
+                    "[FOOTBALL][SCORING] match=%s score=%s selected=no reason=below_min_score",
+                    c.match.match_name,
+                    float(c.signal_score or 0),
+                )
+
+        report_after_scoring = len(finalists)
+
+        def _pick_bet_text(cand: ProviderSignalCandidate) -> str:
+            from app.services.football_bet_formatter_service import FootballBetFormatterService
+
+            pres = FootballBetFormatterService().format_bet(
+                market_type=cand.market.market_type,
+                market_label=cand.market.market_label,
+                selection=cand.market.selection,
+                home_team=cand.match.home_team,
+                away_team=cand.match.away_team,
+                section_name=cand.market.section_name,
+                subsection_name=cand.market.subsection_name,
+            )
+            if pres.detail_label:
+                return f"{pres.main_label} ({pres.detail_label})"
+            return pres.main_label
+
+        best = finalists[0] if finalists else None
+        codes: list[str] = []
+        human_rs: list[str] = []
+        if best is not None:
+            codes = list((best.explanation_json or {}).get("football_scoring_reason_codes") or [])
+            human_rs = FootballSignalScoringService.humanize_reason_codes(codes)
+
         diagnostics.update(
             football_analytics_enabled=analytics_enabled,
             football_learning_enabled=learning_enabled,
@@ -737,12 +805,108 @@ class AutoSignalService:
             football_line_movement_available=False,
         )
 
+        if not finalists:
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="low_score",
+                note="no candidate passed football_min_signal_score",
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="dry_run_low_score" if dry_run else "low_score",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="low_score",
+                dry_run=dry_run,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=0,
+                report_final_signal="НЕТ",
+                report_rejection_code="low_score",
+                report_selected_reason_codes=codes,
+                report_human_reasons=human_rs,
+                report_dedup_skipped=0,
+            )
+
+        if dry_run:
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="dry_run_no_channel",
+                note="dry run: scoring path only, no DB / no channel",
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="dry_run_ok",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason=None,
+                dry_run=True,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=report_after_scoring,
+                report_final_signal="ДА",
+                report_selected_match=best.match.match_name,
+                report_selected_bet=_pick_bet_text(best),
+                report_selected_odds=str(best.market.odds_value),
+                report_selected_score=str(best.signal_score) if best.signal_score is not None else "",
+                report_selected_reason_codes=codes,
+                report_human_reasons=human_rs,
+                report_dedup_skipped=0,
+            )
+
+        candidates_to_ingest = finalists
+        relaxed_dedup = runtime_source_kind == "semi_live_manual"
+
         async with sessionmaker() as session:
             ingest_res = await IngestionService().ingest_candidates(
                 session,
                 candidates_to_ingest,
                 dedup_exclude_notes=("fallback_json", "manual_json", "demo"),
                 dedup_required_notes=(delivery_scope,),
+                dedup_relaxed_semi_manual=relaxed_dedup,
+                dedup_relaxed_minutes=int(settings.football_dedup_relaxed_interval_minutes or 30),
             )
             await session.commit()
 
@@ -758,6 +922,55 @@ class AutoSignalService:
             except Exception:
                 logger.exception("Auto signal notification failed for signal_id=%s", signal_id)
         logger.info("[FOOTBALL] messages sent: %s", notifications_sent_count)
+
+        if ingest_res.created_signals == 0 and finalists and int(ingest_res.skipped_candidates) > 0:
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="blocked_by_dedup",
+                note="candidates passed scoring but dedup skipped all",
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(ingest_res.skipped_candidates + omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="dedup_blocked",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_by_dedup",
+                dry_run=False,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=report_after_scoring,
+                report_final_signal="НЕТ",
+                report_rejection_code="blocked_by_dedup",
+                report_selected_match=best.match.match_name,
+                report_selected_bet=_pick_bet_text(best),
+                report_selected_odds=str(best.market.odds_value),
+                report_selected_score=str(best.signal_score) if best.signal_score is not None else "",
+                report_selected_reason_codes=codes,
+                report_human_reasons=human_rs,
+                report_dedup_skipped=int(ingest_res.skipped_candidates),
+            )
+
         diagnostics.update(
             final_signals_count=int(ingest_res.created_signals),
             messages_sent_count=notifications_sent_count,
@@ -792,6 +1005,20 @@ class AutoSignalService:
             last_live_http_status=fetch_res.status_code,
             fallback_used=fallback_used,
             fallback_source_name=fallback_source_name,
+            dry_run=False,
+            report_matches_found=report_matches_found,
+            report_candidates=report_candidates,
+            report_after_filter=report_after_filter,
+            report_after_integrity=report_after_integrity,
+            report_after_scoring=report_after_scoring,
+            report_final_signal="ДА" if ingest_res.created_signals else "НЕТ",
+            report_selected_match=best.match.match_name if best else None,
+            report_selected_bet=_pick_bet_text(best) if best else None,
+            report_selected_odds=str(best.market.odds_value) if best else None,
+            report_selected_score=str(best.signal_score) if best and best.signal_score is not None else None,
+            report_selected_reason_codes=codes,
+            report_human_reasons=human_rs,
+            report_dedup_skipped=int(ingest_res.skipped_candidates),
         )
 
     async def run_forever(

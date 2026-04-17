@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +12,9 @@ from app.services.candidate_filter_service import CandidateFilterService
 from app.services.deduplication_service import DeduplicationService
 from app.services.signal_service import SignalService
 from app.db.repositories.signal_repository import SignalRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionService:
@@ -27,6 +32,8 @@ class IngestionService:
         *,
         dedup_exclude_notes: tuple[str, ...] = (),
         dedup_required_notes: tuple[str, ...] = (),
+        dedup_relaxed_semi_manual: bool = False,
+        dedup_relaxed_minutes: int = 30,
     ) -> ProviderBatchIngestResult:
         """Ingest a batch of provider candidates into Signal + PredictionLog (no commit).
 
@@ -42,6 +49,7 @@ class IngestionService:
                 bundle = self._candidate_to_bundle(candidate)
 
                 # DB-level dedup check (exact match by key fields).
+                relaxed = bool(dedup_relaxed_semi_manual)
                 existing = await SignalRepository().find_existing_similar_signal(
                     session,
                     sport=bundle.signal.sport,
@@ -54,8 +62,17 @@ class IngestionService:
                     is_live=bundle.signal.is_live,
                     exclude_notes=dedup_exclude_notes,
                     required_notes=dedup_required_notes,
+                    relaxed_semi_manual=relaxed,
+                    candidate_odds=bundle.signal.odds_at_signal,
+                    candidate_event_start_at=bundle.signal.event_start_at,
+                    relaxed_interval_minutes=int(dedup_relaxed_minutes),
                 )
                 if existing is not None:
+                    logger.info(
+                        "[FOOTBALL][DEDUP] reason=duplicate_in_db existing_signal_id=%s decision=blocked relaxed=%s",
+                        existing.id,
+                        str(relaxed).lower(),
+                    )
                     skipped += 1
                     continue
 

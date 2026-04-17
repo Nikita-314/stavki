@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,6 +12,15 @@ from app.db.models.signal import Signal
 from app.db.models.settlement import Settlement
 from app.core.enums import BetResult, BookmakerType, SignalStatus, SportType
 from app.schemas.signal import PredictionLogCreate, SignalCreate
+
+
+def _normalize_event_start(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    v = value
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=timezone.utc)
+    return v.astimezone(timezone.utc).replace(second=0, microsecond=0)
 
 
 class SignalRepository:
@@ -68,10 +80,15 @@ class SignalRepository:
         is_live: bool,
         exclude_notes: tuple[str, ...] = (),
         required_notes: tuple[str, ...] = (),
+        relaxed_semi_manual: bool = False,
+        candidate_odds: Decimal | None = None,
+        candidate_event_start_at: datetime | None = None,
+        relaxed_interval_minutes: int = 30,
     ) -> Signal | None:
         """Best-effort exact duplicate lookup (no unique constraints, no fuzzy matching).
 
-        Returns the first matching row or None.
+        With relaxed_semi_manual, the newest similar row is ignored when odds, kickoff time,
+        or cooldown window justify a new signal (semi-live / manual JSON).
         """
         stmt = (
             select(Signal)
@@ -82,6 +99,8 @@ class SignalRepository:
             .where(Signal.is_live.is_(is_live))
             .where(Signal.home_team == home_team)
             .where(Signal.away_team == away_team)
+            .order_by(Signal.signaled_at.desc())
+            .limit(1)
         )
         if event_external_id is not None:
             stmt = stmt.where(Signal.event_external_id == event_external_id)
@@ -90,7 +109,30 @@ class SignalRepository:
         if exclude_notes:
             stmt = stmt.where(or_(Signal.notes.is_(None), ~Signal.notes.in_(list(exclude_notes))))
         result = await session.execute(stmt)
-        return result.scalars().first()
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            return None
+        if not relaxed_semi_manual:
+            return existing
+
+        if candidate_odds is not None:
+            try:
+                if abs(float(existing.odds_at_signal) - float(candidate_odds)) >= 0.01:
+                    return None
+            except Exception:
+                return None
+
+        if _normalize_event_start(existing.event_start_at) != _normalize_event_start(candidate_event_start_at):
+            return None
+
+        now = datetime.now(timezone.utc)
+        sig_at = existing.signaled_at
+        if sig_at.tzinfo is None:
+            sig_at = sig_at.replace(tzinfo=timezone.utc)
+        if (now - sig_at) >= timedelta(minutes=max(1, int(relaxed_interval_minutes))):
+            return None
+
+        return existing
 
     async def list_unsettled_by_event_external_id(
         self,

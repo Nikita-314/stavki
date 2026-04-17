@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AutoSignalCycleResult(BaseModel):
@@ -26,4 +26,19 @@ class AutoSignalCycleResult(BaseModel):
     fallback_used: bool = False
     fallback_source_name: str | None = None
     rejection_reason: str | None = None
+    dry_run: bool = False
+    report_matches_found: int | None = None
+    report_candidates: int | None = None
+    report_after_filter: int | None = None
+    report_after_integrity: int | None = None
+    report_after_scoring: int | None = None
+    report_final_signal: str | None = None
+    report_selected_match: str | None = None
+    report_selected_bet: str | None = None
+    report_selected_odds: str | None = None
+    report_selected_score: str | None = None
+    report_selected_reason_codes: list[str] = Field(default_factory=list)
+    report_human_reasons: list[str] = Field(default_factory=list)
+    report_rejection_code: str | None = None
+    report_dedup_skipped: int | None = None
 

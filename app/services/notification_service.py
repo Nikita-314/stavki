@@ -10,6 +10,7 @@ from app.core.constants import MAX_TELEGRAM_MESSAGE_LENGTH
 from app.schemas.analytics import SignalAnalyticsReport
 from app.schemas.signal_quality import SignalQualityReport
 from app.services.football_bet_formatter_service import FootballBetFormatterService
+from app.services.football_signal_scoring_service import FootballSignalScoringService
 
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,48 @@ class NotificationService:
             return None
         return None
 
+    def _football_analysis_lines(self, report: SignalAnalyticsReport) -> list[str]:
+        prediction_logs = report.prediction_logs or []
+        if not prediction_logs:
+            return []
+        pl0 = prediction_logs[0]
+        snap = pl0.feature_snapshot_json or {}
+        expl = pl0.explanation_json or {}
+        codes = list(expl.get("football_scoring_reason_codes") or [])
+        fs = snap.get("football_scoring") or {}
+        if not codes and fs.get("reason_codes"):
+            codes = list(fs.get("reason_codes") or [])
+        if not codes and not fs:
+            return []
+        try:
+            final = float(fs.get("final_score")) if fs.get("final_score") is not None else None
+        except (TypeError, ValueError):
+            final = None
+        if final is not None:
+            if final >= 75:
+                prio = "высокий"
+            elif final >= 60:
+                prio = "средний"
+            else:
+                prio = "низкий"
+        else:
+            prio = "—"
+        analytics = snap.get("football_analytics") or {}
+        is_live = bool(analytics.get("is_live")) or bool(getattr(report.signal, "is_live", False))
+        mode = "LIVE" if is_live else "PREMATCH"
+        human = FootballSignalScoringService.humanize_reason_codes(codes)
+        if not human:
+            return []
+        lines = [
+            "",
+            "🧠 Анализ:",
+            f"- Тип: {mode}",
+            f"- Приоритет: {prio}",
+            "- Причины:",
+            *human,
+        ]
+        return lines
+
     def format_signal_message(self, report: SignalAnalyticsReport) -> str:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
@@ -130,6 +173,7 @@ class NotificationService:
         )
         if bet_presentation.detail_label:
             lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
+        lines.extend(self._football_analysis_lines(report))
         return "\n".join(lines)
 
     def format_result_message(self, signal_report: SignalAnalyticsReport, quality_report: SignalQualityReport) -> str:

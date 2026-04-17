@@ -43,6 +43,7 @@ from app.providers.generic_odds_adapter import GenericOddsAdapter
 from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
+from app.schemas.auto_signal import AutoSignalCycleResult
 from app.services.auto_signal_service import AutoSignalService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
@@ -617,6 +618,49 @@ async def cmd_signal_dota(message: Message) -> None:
     )
 
 
+def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
+    m = res.report_matches_found
+    c = res.report_candidates
+    af = res.report_after_filter
+    ai = res.report_after_integrity
+    asc = res.report_after_scoring
+    fin = res.report_final_signal or "—"
+    lines = [
+        "⚽ Футбольный прогон завершён",
+        "",
+        f"📊 Матчей найдено: {m if m is not None else '—'}",
+        f"📊 Кандидатов: {c if c is not None else '—'}",
+        f"📊 После фильтра: {af if af is not None else '—'}",
+        f"📊 После integrity: {ai if ai is not None else '—'}",
+        f"📊 После аналитики (порог score): {asc if asc is not None else '—'}",
+        f"📊 Финальный сигнал: {fin}",
+        "",
+    ]
+    if fin == "ДА" and res.report_selected_match:
+        lines.extend(
+            [
+                "🎯 Выбран сигнал:",
+                f"Матч: {res.report_selected_match}",
+                f"Ставка: {res.report_selected_bet or '—'}",
+                f"Коэффициент: {res.report_selected_odds or '—'}",
+                f"Score: {res.report_selected_score or '—'}",
+                "Причины:",
+            ]
+        )
+        for r in res.report_human_reasons or []:
+            lines.append(r)
+    elif fin == "НЕТ":
+        lines.append("❌ Сигнал не выбран")
+        rc = res.report_rejection_code or res.rejection_reason or "unknown"
+        lines.append(f"Причина: {rc}")
+        if res.report_dedup_skipped:
+            lines.append(f"(dedup skipped: {res.report_dedup_skipped})")
+    if res.dry_run:
+        lines.extend(["", "ℹ️ Режим прогона: без записи в БД и без отправки в канал."])
+    lines.extend(["", f"Сообщение цикла: {res.message}"])
+    return "\n".join(lines)
+
+
 def _format_auto_signal_env_lines(settings: Settings, runtime: SignalRuntimeSettingsService) -> list[str]:
     provider_configured = bool(settings.odds_provider_base_url)
     signal_chat_configured = settings.signal_chat_id is not None
@@ -655,31 +699,16 @@ async def cmd_auto_signal_status(message: Message) -> None:
     await message.answer("\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 
-@router.message(_text_is("⚽ Футбольный прогон", "Запустить цикл"))
+@router.message(_text_is("⚽ Прогон", "⚽ Футбольный прогон", "Запустить цикл"))
 @router.message(Command("auto_signal_run_once"))
 async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
 
-    res = await AutoSignalService().run_single_cycle(sessionmaker, message.bot)
+    res = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=True)
     await message.answer(
-        "\n".join(
-            [
-                "⚽ Футбольный прогон",
-                f"- provider: {res.source_name or '—'}",
-                f"- endpoint: {res.endpoint or '—'}",
-                f"- live auth: {res.live_auth_status or '—'}",
-                f"- http status: {res.last_live_http_status if res.last_live_http_status is not None else '—'}",
-                f"- effective source: {SignalRuntimeDiagnosticsService().get_state().get('source_mode') or '—'}",
-                f"- raw events: {res.raw_events_count}",
-                f"- candidates: {res.candidates_after_filter_count}",
-                f"- after football filter: {SignalRuntimeDiagnosticsService().get_state().get('football_after_filter_count') or 0}",
-                f"- final signals: {res.created_signals_count}",
-                f"- отправлено: {res.notifications_sent_count}",
-                f"- ошибка: {res.message if not res.fetch_ok and not res.fallback_used else (res.rejection_reason or ('preview_only включён' if res.preview_only else '—'))}",
-            ]
-        ),
+        _format_football_prog_run_report(res),
         reply_markup=get_signal_control_keyboard(),
     )
 
@@ -3332,7 +3361,7 @@ async def handle_winline_manual_json_document(message: Message, bot: Bot) -> Non
         await message.answer(
             "Что дальше можно сделать:\n"
             "- /winline_runtime_source — проверить текущий runtime source\n"
-            "- ⚽ Футбольный прогон — выполнить football cycle\n"
+            "- ⚽ Прогон — тестовый прогон (без БД и без канала)\n"
             "- /winline_clear_uploaded_line — убрать runtime uploaded line JSON",
             reply_markup=get_winline_manual_flow_keyboard(),
         )

@@ -31,9 +31,9 @@ def get_signal_control_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
-            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="⚽ Футбольный прогон")],
-            [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Стоп")],
-            [KeyboardButton(text="📊 Статус сигналов")],
+            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="▶️ Старт")],
+            [KeyboardButton(text="⏸ Стоп"), KeyboardButton(text="📊 Статус сигналов")],
+            [KeyboardButton(text="⚽ Прогон")],
         ],
         resize_keyboard=True,
         selective=True,

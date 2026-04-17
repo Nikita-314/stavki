@@ -26,6 +26,35 @@ class FootballSignalScoreBreakdown:
 class FootballSignalScoringService:
     """Transparent rule-based score; no ML claims."""
 
+    @staticmethod
+    def humanize_reason_codes(codes: list[str]) -> list[str]:
+        """Map internal reason_codes to short Russian lines for Telegram (no fake reasons)."""
+        mapping = {
+            "core_market_family": "• сильный базовый рынок",
+            "combo_market_family": "• комбинированный рынок",
+            "non_core_market_penalty": "• нишевый рынок (пониженный приоритет)",
+            "corners_cards_like_penalty": "• углы / карточки / спецрынок",
+            "near_prematch_bonus": "• матч скоро начнётся",
+            "mid_horizon_neutral": "• средний горизонт до старта",
+            "far_prematch_penalty": "• далеко до старта",
+            "too_far_strong_penalty": "• слишком далеко по времени",
+            "timing_unknown": "• время старта неизвестно",
+            "prematch_started_or_clock_skew": "• старт/часы: возможное расхождение",
+            "live_bonus": "• приоритет LIVE",
+            "red_card_home_observed": "• зафиксирована красная карточка (хозяева)",
+            "red_card_away_observed": "• зафиксирована красная карточка (гости)",
+            "live_strength_signal_present": "• live-сила по счёту (ограниченная эвристика)",
+            "model_prob_and_edge_present": "• есть оценка модели и edge",
+            "implied_prob_only": "• оценка вероятности по коэффициенту",
+        }
+        lines: list[str] = []
+        for code in codes or []:
+            if code.startswith("learning_factor:"):
+                lines.append("• корректировка по истории сигналов")
+                continue
+            lines.append(mapping.get(code, f"• {code}"))
+        return lines
+
     def score(
         self,
         *,
