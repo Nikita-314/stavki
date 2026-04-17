@@ -2514,3 +2514,51 @@ Traceback (most recent call last):
   File "/root/stavki/app/main.py", line 10, in <module>
     from app.core.config import get_settings
 ModuleNotFoundError: No module named 'app'
+Traceback (most recent call last):
+  File "/root/stavki/app/main.py", line 10, in <module>
+    from app.core.config import get_settings
+ModuleNotFoundError: No module named 'app'
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/root/stavki/app/main.py", line 76, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.10/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/usr/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+    return future.result()
+  File "/root/stavki/app/main.py", line 58, in main
+    engine = create_engine(settings.database_url, echo=settings.debug)
+  File "/root/stavki/app/db/session.py", line 7, in create_engine
+    return create_async_engine(database_url, echo=echo, pool_pre_ping=True)
+  File "/usr/local/lib/python3.10/dist-packages/sqlalchemy/ext/asyncio/engine.py", line 120, in create_async_engine
+    sync_engine = _create_engine(url, **kw)
+  File "<string>", line 2, in create_engine
+  File "/usr/local/lib/python3.10/dist-packages/sqlalchemy/util/deprecations.py", line 281, in warned
+    return fn(*args, **kwargs)  # type: ignore[no-any-return]
+  File "/usr/local/lib/python3.10/dist-packages/sqlalchemy/engine/create.py", line 617, in create_engine
+    dbapi = dbapi_meth(**dbapi_args)
+  File "/usr/local/lib/python3.10/dist-packages/sqlalchemy/dialects/postgresql/asyncpg.py", line 1094, in import_dbapi
+    return AsyncAdapt_asyncpg_dbapi(__import__("asyncpg"))
+ModuleNotFoundError: No module named 'asyncpg'
+2026-04-17 11:03:09,844 ERROR asyncio: Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x7f973aa7e740>
+2026-04-17 11:03:09,845 ERROR asyncio: Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x7f973ac77be0>, 229047.214199268)])']
+connector: <aiohttp.connector.TCPConnector object at 0x7f973aa7e1a0>
+2026-04-17 11:04:46,474 INFO aiogram.dispatcher: Start polling
+2026-04-17 11:04:46,574 INFO aiogram.dispatcher: Run polling for bot @admiewnlesstavki_bot id=8752474451 - 'stavki_admin'
+2026-04-17 11:04:46,801 INFO aiogram.event: Update id=748608502 is handled. Duration 163 ms by bot id=8752474451
+2026-04-17 11:04:46,808 INFO aiogram.event: Update id=748608504 is handled. Duration 156 ms by bot id=8752474451
+2026-04-17 11:04:46,810 INFO aiogram.event: Update id=748608501 is handled. Duration 190 ms by bot id=8752474451
+2026-04-17 11:04:46,833 INFO aiogram.event: Update id=748608503 is handled. Duration 182 ms by bot id=8752474451
+2026-04-17 11:04:46,861 INFO aiogram.event: Update id=748608505 is handled. Duration 197 ms by bot id=8752474451
+2026-04-17 11:04:46,874 INFO app.services.auto_signal_service: Auto signal cycle: endpoint=https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&dateFormat=iso&apiKey=3e57630fa85ebb1ebe0e491409b120f4 fetch_ok=False preview_candidates=0 created=0 skipped=0 notifications=0 preview_only=False message=http_error: Unauthorized
+2026-04-17 11:05:11,744 INFO aiogram.event: Update id=748608506 is handled. Duration 1021 ms by bot id=8752474451
+2026-04-17 11:05:47,235 INFO app.services.auto_signal_service: Auto signal cycle: endpoint=https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&dateFormat=iso&apiKey=3e57630fa85ebb1ebe0e491409b120f4 fetch_ok=False preview_candidates=0 created=0 skipped=0 notifications=0 preview_only=False message=http_error: Unauthorized
+2026-04-17 11:06:47,577 INFO app.services.auto_signal_service: Auto signal cycle: endpoint=https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&dateFormat=iso&apiKey=3e57630fa85ebb1ebe0e491409b120f4 fetch_ok=False preview_candidates=0 created=0 skipped=0 notifications=0 preview_only=False message=http_error: Unauthorized
+2026-04-17 11:07:47,907 INFO app.services.auto_signal_service: Auto signal cycle: endpoint=https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&dateFormat=iso&apiKey=3e57630fa85ebb1ebe0e491409b120f4 fetch_ok=False preview_candidates=0 created=0 skipped=0 notifications=0 preview_only=False message=http_error: Unauthorized
+2026-04-17 11:08:48,267 INFO app.services.auto_signal_service: Auto signal cycle: endpoint=https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&dateFormat=iso&apiKey=3e57630fa85ebb1ebe0e491409b120f4 fetch_ok=False preview_candidates=0 created=0 skipped=0 notifications=0 preview_only=False message=http_error: Unauthorized
+2026-04-17 11:09:48,599 INFO app.services.auto_signal_service: Auto signal cycle: endpoint=https://api.the-odds-api.com/v4/sports/soccer_epl/odds?regions=uk&markets=h2h&oddsFormat=decimal&dateFormat=iso&apiKey=3e57630fa85ebb1ebe0e491409b120f4 fetch_ok=False preview_candidates=0 created=0 skipped=0 notifications=0 preview_only=False message=http_error: Unauthorized

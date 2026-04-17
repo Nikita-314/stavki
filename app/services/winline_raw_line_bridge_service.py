@@ -11,6 +11,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from app.services.winline_mapping_rules import (
+    WINLINE_LINE_MARKET_TYPE_RULES,
+    WINLINE_SECTION_RULES,
+    WINLINE_SELECTION_RULES,
+)
+
 
 class WinlineRawLineBridgeService:
     """Convert raw Winline-ish JSON into ingestion-friendly normalized payload."""
@@ -169,10 +175,13 @@ class WinlineRawLineBridgeService:
             if event is None:
                 continue
 
-            market_type = self._map_market_type_from_raw(line)
+            market_type, market_type_source = self.resolve_line_market_type(line)
             market_label = self._normalize_market_label_from_raw(line, market_type)
-            section_name = self._map_section_name_from_raw(line, market_type)
-            subsection_name = market_label
+            section_name, subsection_name, section_source = self.resolve_line_section_names(
+                line=line,
+                market_type=market_type,
+                market_label=market_label,
+            )
 
             odds_values = self._as_list(line.get("V"))
             selections = self._as_list(line.get("R"))
@@ -185,7 +194,13 @@ class WinlineRawLineBridgeService:
             for idx in range(outcome_count):
                 raw_sel = selections[idx] if idx < len(selections) else None
                 raw_odds = odds_values[idx] if idx < len(odds_values) else None
-                selection = self._normalize_selection_from_raw(raw_sel, idx, line, event, market_type)
+                selection, selection_source = self.resolve_line_selection(
+                    raw_selection=raw_sel,
+                    idx=idx,
+                    line=line,
+                    event=event,
+                    market_type=market_type,
+                )
                 odds = self._safe_decimal(raw_odds)
                 if not selection or odds is None or odds <= Decimal("1"):
                     continue
@@ -204,6 +219,11 @@ class WinlineRawLineBridgeService:
                             market_label=market_label,
                             selection=selection,
                         ),
+                        "raw_mapping_debug": {
+                            "market_type_source": market_type_source,
+                            "selection_source": selection_source,
+                            "section_source": section_source,
+                        },
                     }
                 )
         return out
@@ -220,18 +240,25 @@ class WinlineRawLineBridgeService:
             return "dota2"
         return None
 
+    def resolve_line_market_type(self, line: dict[str, Any]) -> tuple[str, str]:
+        raw_id = str(line.get("idTipMarket", "")).strip()
+        raw_tip_event = str(line.get("idTipEvent", "")).strip()
+        raw_text = self._line_text_blob(line)
+        for rule in WINLINE_LINE_MARKET_TYPE_RULES:
+            ids = rule.get("id_tip_market")
+            if ids and raw_id in ids:
+                return str(rule["market_type"]), str(rule.get("source") or "rule:idTipMarket")
+            tip_events = rule.get("id_tip_event")
+            if tip_events and raw_tip_event in tip_events:
+                return str(rule["market_type"]), str(rule.get("source") or "rule:idTipEvent")
+            text_contains = rule.get("text_contains")
+            if text_contains and any(str(token).lower() in raw_text for token in text_contains):
+                return str(rule["market_type"]), str(rule.get("source") or "rule:text")
+        return self._map_market_type_from_raw(line), "fallback:heuristic"
+
     def _map_market_type_from_raw(self, line: dict[str, Any]) -> str:
         raw_id = str(line.get("idTipMarket", "")).strip()
-        raw_text = " ".join(
-            str(v)
-            for v in (
-                line.get("freeTextR"),
-                line.get("marketName"),
-                line.get("title"),
-                line.get("name"),
-            )
-            if v is not None
-        ).lower()
+        raw_text = self._line_text_blob(line)
 
         if raw_id in {"1", "17", "20"}:
             return "1x2"
@@ -254,6 +281,34 @@ class WinlineRawLineBridgeService:
             return "1x2"
         return "match_winner"
 
+    def resolve_line_section_names(
+        self,
+        *,
+        line: dict[str, Any],
+        market_type: str,
+        market_label: str,
+    ) -> tuple[str, str, str]:
+        raw_text = self._line_text_blob(line)
+        for rule in WINLINE_SECTION_RULES:
+            if rule.get("market_type") == market_type:
+                return (
+                    str(rule.get("section_name") or "Main"),
+                    str(rule.get("subsection_name") or market_label),
+                    str(rule.get("source") or "rule:market_type"),
+                )
+            text_contains = rule.get("text_contains")
+            if text_contains and any(str(token).lower() in raw_text for token in text_contains):
+                return (
+                    str(rule.get("section_name") or "Main"),
+                    str(rule.get("subsection_name") or market_label),
+                    str(rule.get("source") or "rule:text"),
+                )
+        free = (str(line.get("freeTextR", "")).strip() if line.get("freeTextR") is not None else "")
+        if free:
+            return free, market_label, "fallback:freeTextR"
+        section = self._map_section_name_from_raw(line, market_type)
+        return section, market_label, "fallback:heuristic"
+
     def _normalize_market_label_from_raw(self, line: dict[str, Any], market_type: str) -> str:
         free = (str(line.get("freeTextR", "")).strip() if line.get("freeTextR") is not None else "")
         if free:
@@ -267,52 +322,71 @@ class WinlineRawLineBridgeService:
         }
         return mapping.get(market_type, market_type)
 
-    def _normalize_selection_from_raw(
+    def resolve_line_selection(
         self,
+        *,
         raw_selection: Any,
         idx: int,
         line: dict[str, Any],
         event: dict[str, Any],
         market_type: str,
-    ) -> str:
+    ) -> tuple[str, str]:
         raw = (str(raw_selection).strip() if raw_selection is not None else "")
         rl = raw.lower()
         home = str(event.get("home_team", "")).strip()
         away = str(event.get("away_team", "")).strip()
 
+        for rule in WINLINE_SELECTION_RULES:
+            aliases = {str(x).lower() for x in (rule.get("aliases") or set())}
+            if rl and rl in aliases:
+                normalized = str(rule.get("normalized") or raw)
+                if normalized == "HOME":
+                    return home or normalized, str(rule.get("source") or "rule:selection")
+                if normalized == "AWAY":
+                    return away or normalized, str(rule.get("source") or "rule:selection")
+                if normalized == "DRAW":
+                    return "Draw", str(rule.get("source") or "rule:selection")
+                if normalized == "YES":
+                    return "Yes", str(rule.get("source") or "rule:selection")
+                if normalized == "NO":
+                    return "No", str(rule.get("source") or "rule:selection")
+                return normalized, str(rule.get("source") or "rule:selection")
+
         if market_type in {"1x2", "match_winner"}:
             if rl in {"1", "home", "п1"}:
-                return home
+                return home, "fallback:winner_home"
             if rl in {"2", "away", "п2"}:
-                return away
+                return away, "fallback:winner_away"
             if rl in {"x", "draw", "ничья"}:
-                return "Draw"
+                return "Draw", "fallback:winner_draw"
             if raw:
-                return raw
+                return raw, "fallback:raw"
             if idx == 0:
-                return home
+                return home, "fallback:index0"
             if idx == 1:
-                return "Draw" if market_type == "1x2" and len(self._as_list(line.get("R"))) >= 3 else away
+                if market_type == "1x2" and len(self._as_list(line.get("R"))) >= 3:
+                    return "Draw", "fallback:index1_draw"
+                return away, "fallback:index1_away"
             if idx == 2:
-                return away
+                return away, "fallback:index2_away"
 
         if market_type == "both_teams_to_score":
             if rl in {"yes", "да", "оба забьют: да"}:
-                return "Yes"
+                return "Yes", "fallback:btts_yes"
             if rl in {"no", "нет", "оба забьют: нет"}:
-                return "No"
+                return "No", "fallback:btts_no"
             if idx == 0:
-                return "Yes"
+                return "Yes", "fallback:index0_yes"
             if idx == 1:
-                return "No"
+                return "No", "fallback:index1_no"
 
         if market_type in {"total_goals", "handicap"}:
             if raw:
-                return raw
+                return raw, "fallback:raw"
             ft = str(line.get("freeTextR", "")).strip()
             if ft:
-                return ft
-        return raw
+                return ft, "fallback:freeTextR"
+        return raw, "fallback:raw"
 
     def _map_section_name_from_raw(self, line: dict[str, Any], market_type: str) -> str:
         free = (str(line.get("freeTextR", "")).strip() if line.get("freeTextR") is not None else "")
@@ -337,6 +411,19 @@ class WinlineRawLineBridgeService:
         home = str(event.get("home_team", "")).strip()
         away = str(event.get("away_team", "")).strip()
         return " ".join(x for x in [home, away, market_label, selection] if x).strip()
+
+    def _line_text_blob(self, line: dict[str, Any]) -> str:
+        return " ".join(
+            str(v)
+            for v in (
+                line.get("freeTextR"),
+                line.get("marketName"),
+                line.get("title"),
+                line.get("name"),
+                line.get("idTipEvent"),
+            )
+            if v is not None
+        ).lower()
 
     def _extract_members(self, members: Any) -> tuple[str, str]:
         if not isinstance(members, list) or len(members) < 2:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.winline_mapping_rules import WINLINE_RESULT_VOID_STATUS_RULES, WINLINE_RESULT_WINNER_RULES
+
 
 class WinlineRawResultBridgeService:
     """Normalize already-normalized or raw Winline-ish result payloads."""
@@ -46,6 +48,10 @@ class WinlineRawResultBridgeService:
                     "winner_selection": winner,
                     "is_void": is_void,
                     "settled_at": self._extract_settled_at(row),
+                    "raw_mapping_debug": {
+                        "winner_source": "normalized",
+                        "void_source": "normalized",
+                    },
                 }
             )
         if not out:
@@ -102,8 +108,8 @@ class WinlineRawResultBridgeService:
         sport = self._extract_sport(row)
         if not event_id or not sport:
             return None
-        winner = self._extract_winner_selection(row)
-        is_void = self._extract_is_void(row)
+        winner, winner_source = self.resolve_result_winner(row)
+        is_void, void_source = self.resolve_result_is_void(row)
         if winner is None and not is_void:
             return None
         return {
@@ -112,6 +118,10 @@ class WinlineRawResultBridgeService:
             "winner_selection": winner,
             "is_void": is_void,
             "settled_at": self._extract_settled_at(row),
+            "raw_mapping_debug": {
+                "winner_source": winner_source,
+                "void_source": void_source,
+            },
         }
 
     def _extract_event_id(self, row: dict[str, Any]) -> str | None:
@@ -147,6 +157,10 @@ class WinlineRawResultBridgeService:
         return self._map_sport_from_raw(value)
 
     def _extract_winner_selection(self, row: dict[str, Any]) -> str | None:
+        winner, _src = self.resolve_result_winner(row)
+        return winner
+
+    def resolve_result_winner(self, row: dict[str, Any]) -> tuple[str | None, str]:
         value = self._first_value(
             row,
             "winner_selection",
@@ -157,12 +171,16 @@ class WinlineRawResultBridgeService:
             "win",
             "event_result",
         )
-        selection = self._normalize_selection(value)
+        selection, source = self._normalize_selection(value)
         if selection is None:
-            return None
-        return self._resolve_selection_for_settlement(row, selection)
+            return None, source
+        return self._resolve_selection_for_settlement(row, selection), source
 
     def _extract_is_void(self, row: dict[str, Any]) -> bool:
+        value, _src = self.resolve_result_is_void(row)
+        return value
+
+    def resolve_result_is_void(self, row: dict[str, Any]) -> tuple[bool, str]:
         bool_value = self._first_value(
             row,
             "is_void",
@@ -174,26 +192,22 @@ class WinlineRawResultBridgeService:
             "annulled",
         )
         if isinstance(bool_value, bool):
-            return bool_value
+            return bool_value, "direct:boolean"
         if isinstance(bool_value, (int, float)):
-            return bool(bool_value)
+            return bool(bool_value), "direct:number"
         if isinstance(bool_value, str):
             if bool_value.strip().lower() in {"true", "1", "yes", "да"}:
-                return True
+                return True, "direct:string"
 
         status = self._first_value(row, "status", "result_status", "event.status")
         if status is None:
-            return False
+            return False, "default:false"
         st = str(status).strip().lower()
-        return st in {
-            "void",
-            "cancelled",
-            "canceled",
-            "refund",
-            "returned",
-            "annulled",
-            "return",
-        }
+        for rule in WINLINE_RESULT_VOID_STATUS_RULES:
+            aliases = {str(x).lower() for x in (rule.get("aliases") or set())}
+            if st in aliases:
+                return bool(rule.get("is_void")), str(rule.get("source") or "rule:status")
+        return False, "fallback:status_non_void"
 
     def _extract_settled_at(self, row: dict[str, Any]) -> str | None:
         value = self._first_value(
@@ -211,35 +225,20 @@ class WinlineRawResultBridgeService:
         text = str(value).strip()
         return text or None
 
-    def _normalize_selection(self, value: Any) -> str | None:
+    def _normalize_selection(self, value: Any) -> tuple[str | None, str]:
         if value is None:
-            return None
+            return None, "none"
         if isinstance(value, dict):
             value = value.get("value") or value.get("name") or value.get("label")
         text = str(value).strip()
         if not text:
-            return None
+            return None, "empty"
         key = text.lower()
-        mapping = {
-            "1": "HOME",
-            "home": "HOME",
-            "п1": "HOME",
-            "2": "AWAY",
-            "away": "AWAY",
-            "п2": "AWAY",
-            "x": "DRAW",
-            "draw": "DRAW",
-            "ничья": "DRAW",
-            "yes": "YES",
-            "да": "YES",
-            "no": "NO",
-            "нет": "NO",
-            "over": "OVER",
-            "больше": "OVER",
-            "under": "UNDER",
-            "меньше": "UNDER",
-        }
-        return mapping.get(key, text)
+        for rule in WINLINE_RESULT_WINNER_RULES:
+            aliases = {str(x).lower() for x in (rule.get("aliases") or set())}
+            if key in aliases:
+                return str(rule.get("normalized") or text), str(rule.get("source") or "rule:winner")
+        return text, "fallback:text"
 
     def _map_sport_from_raw(self, value: Any) -> str | None:
         if value is None:

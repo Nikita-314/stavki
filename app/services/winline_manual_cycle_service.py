@@ -173,6 +173,15 @@ class WinlineManualCycleService:
 
         out["final_signals_ready"] = sum(1 for p in previews if p.has_signal)
         out["sendable_previews"] = sum(1 for p in previews if p.has_signal and p.signal is not None)
+        out["sample_market_mappings"] = [
+            {
+                "idTipMarket": (row.get("raw_json") or {}).get("idTipMarket"),
+                "market_type": row.get("market_type"),
+                "selection": row.get("selection"),
+                "mapping_debug": row.get("raw_mapping_debug") or {},
+            }
+            for row in (normalized.get("markets") or [])[:3]
+        ]
         return out
 
     async def ingest_manual_line(self, sessionmaker: async_sessionmaker[AsyncSession]) -> dict[str, Any]:
@@ -217,7 +226,29 @@ class WinlineManualCycleService:
             }
 
     def preview_manual_result(self) -> dict[str, Any]:
-        return {"result_preview": self._manual.preview_result_payload()}
+        out = {"result_preview": self._manual.preview_result_payload()}
+        raw, err = self._manual.load_result_payload()
+        if raw is None or err:
+            return out
+        try:
+            normalized = self._result_bridge.normalize_raw_winline_result_payload(raw)
+        except Exception:
+            return out
+        out["sample_result_mappings"] = [
+            {
+                "winner_raw": (raw_row.get("winner") if isinstance(raw_row, dict) else None),
+                "status_raw": (
+                    raw_row.get("status") or raw_row.get("result_status")
+                    if isinstance(raw_row, dict)
+                    else None
+                ),
+                "winner_selection": row.get("winner_selection"),
+                "is_void": row.get("is_void"),
+                "mapping_debug": row.get("raw_mapping_debug") or {},
+            }
+            for raw_row, row in zip(self._result_bridge._extract_raw_result_rows(raw)[:3], (normalized.get("results") or [])[:3])
+        ]
+        return out
 
     async def process_manual_result(self, sessionmaker: async_sessionmaker[AsyncSession]) -> dict[str, Any]:
         raw, load_err = self._manual.load_result_payload()

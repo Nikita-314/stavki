@@ -90,6 +90,15 @@ def _format_manual_line_preview_lines() -> list[str]:
     err = lp.get("error") or pv.get("error")
     if err:
         lines.append(f"- ошибка: {err}")
+    samples = pv.get("sample_market_mappings") or []
+    if samples:
+        lines.append("sample market mappings:")
+        for s in samples[:3]:
+            dbg = s.get("mapping_debug") or {}
+            lines.append(
+                f"- idTipMarket={s.get('idTipMarket')} -> market_type={s.get('market_type')} | "
+                f"selection={s.get('selection')} | src={dbg.get('market_type_source')}"
+            )
     return lines
 
 
@@ -112,6 +121,16 @@ def _format_manual_result_preview_lines() -> list[str]:
     ]
     if rp.get("error"):
         lines.append(f"- ошибка: {rp['error']}")
+    samples = pr.get("sample_result_mappings") or []
+    if samples:
+        lines.append("sample result mappings:")
+        for s in samples[:3]:
+            dbg = s.get("mapping_debug") or {}
+            lines.append(
+                f"- winner={s.get('winner_raw')} -> {s.get('winner_selection')} | "
+                f"src={dbg.get('winner_source')} | status={s.get('status_raw')} -> "
+                f"is_void={s.get('is_void')} ({dbg.get('void_source')})"
+            )
     return lines
 
 
@@ -2939,6 +2958,8 @@ async def cmd_winline_manual_file_status(message: Message) -> None:
             f"- result keys: {', '.join(st.get('result_keys') or []) or '—'}",
             f"- result shape: {(r.get('result_preview_meta') or {}).get('detected_shape') or '—'}",
             f"- result processible: {_fmt_yes_no(bool(r.get('result_ready_for_process')))}",
+            "- line mapping rules: active",
+            "- result mapping rules: active",
             f"- line ready for preview: {_fmt_yes_no(bool(r.get('line_ready_for_preview')))}",
             f"- line ready for ingest: {_fmt_yes_no(bool(r.get('line_ready_for_ingest')))}",
             f"- result ready for preview: {_fmt_yes_no(bool(r.get('result_ready_for_preview')))}",
