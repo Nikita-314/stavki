@@ -71,6 +71,18 @@ class NotificationService:
                 return "🧪 Режим: fallback JSON"
         return None
 
+    def _source_line(self, report: SignalAnalyticsReport) -> str:
+        notes = (report.signal.notes or "").strip().lower()
+        if notes == "football_manual_auto":
+            return "📡 Источник: Winline JSON"
+        prediction_logs = report.prediction_logs or []
+        if prediction_logs:
+            snapshot = prediction_logs[0].feature_snapshot_json or {}
+            kind = str(snapshot.get("runtime_source_kind") or "").strip().lower()
+            if kind == "semi_live_manual":
+                return "📡 Источник: Winline JSON"
+        return "📡 Источник: live"
+
     def _reason_line(self, report: SignalAnalyticsReport) -> str | None:
         prediction_logs = report.prediction_logs or []
         if not prediction_logs:
@@ -113,7 +125,7 @@ class NotificationService:
                 f"🎯 Ставка: {bet_presentation.main_label}",
                 f"💰 Коэффициент: {odds}",
                 f"🏢 Букмекер: {bookmaker}",
-                "📡 Источник: live",
+                self._source_line(report),
             ]
         )
         if bet_presentation.detail_label:

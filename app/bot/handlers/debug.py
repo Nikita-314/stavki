@@ -195,6 +195,8 @@ def _format_signal_runtime_status_lines() -> list[str]:
     live_auth_status = diag.get("live_auth_status") or "—"
     live_http_status = diag.get("last_live_http_status")
     live_http_status_text = str(live_http_status) if live_http_status is not None else "—"
+    fallback_source_available = _fmt_yes_no(bool(diag.get("fallback_source_available")))
+    manual_fallback_allowed = _fmt_yes_no(bool(diag.get("manual_production_fallback_allowed")))
     source_mode = diag.get("source_mode") or "—"
     last_fetch = diag.get("last_fetch_status") or "—"
     if last_fetch == "fallback_manual_payload" and diag.get("last_error"):
@@ -211,6 +213,8 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🌐 Live provider: {live_provider}",
         f"🔐 Live auth: {live_auth_status}",
         f"📶 Live HTTP status: {live_http_status_text}",
+        f"📦 Fallback source available: {fallback_source_available}",
+        f"🛠 Manual production fallback: {manual_fallback_allowed}",
         f"🧭 Source mode: {source_mode}",
         f"📥 Последний fetch: {last_fetch}",
         f"📊 Raw events: {diag.get('raw_events_count') or 0}",
@@ -589,6 +593,8 @@ async def cmd_auto_signal_status(message: Message) -> None:
                 f"- Live provider: {diag.get('live_provider_name') or diag.get('football_source') or '—'}",
                 f"- Live auth status: {diag.get('live_auth_status') or '—'}",
                 f"- Last live HTTP status: {diag.get('last_live_http_status') if diag.get('last_live_http_status') is not None else '—'}",
+                f"- Fallback source available: {_fmt_yes_no(bool(diag.get('fallback_source_available')))}",
+                f"- Manual production fallback allowed: {_fmt_yes_no(bool(diag.get('manual_production_fallback_allowed')))}",
                 f"- Source mode last run: {diag.get('source_mode') or '—'}",
                 f"- Delivery block reason: {diag.get('last_delivery_reason') or diag.get('note') or '—'}",
                 f"- Последний fetch: {diag.get('last_fetch_status') or '—'}",
@@ -614,8 +620,10 @@ async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_session
                 f"- endpoint: {res.endpoint or '—'}",
                 f"- live auth: {res.live_auth_status or '—'}",
                 f"- http status: {res.last_live_http_status if res.last_live_http_status is not None else '—'}",
+                f"- effective source: {SignalRuntimeDiagnosticsService().get_state().get('source_mode') or '—'}",
                 f"- raw events: {res.raw_events_count}",
                 f"- candidates: {res.candidates_after_filter_count}",
+                f"- after football filter: {SignalRuntimeDiagnosticsService().get_state().get('football_after_filter_count') or 0}",
                 f"- final signals: {res.created_signals_count}",
                 f"- отправлено: {res.notifications_sent_count}",
                 f"- ошибка: {res.message if not res.fetch_ok and not res.fallback_used else (res.rejection_reason or ('preview_only включён' if res.preview_only else '—'))}",

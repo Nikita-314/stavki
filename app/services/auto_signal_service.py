@@ -40,7 +40,7 @@ class AutoSignalService:
         if auth_status == "no_key":
             return "no_key"
         if auth_status == "out_of_usage_credits":
-            return "unauthorized: usage quota has been reached"
+            return "unauthorized_quota"
         if auth_status == "unauthorized":
             return "unauthorized"
         if auth_status == "http_error":
@@ -74,6 +74,8 @@ class AutoSignalService:
             last_live_http_status=None,
             last_live_endpoint=None,
             last_live_error_body=None,
+            fallback_source_available=False,
+            manual_production_fallback_allowed=bool(settings.football_allow_manual_production_fallback),
             source_mode="unknown",
             preview_only=bool(settings.auto_signal_preview_only),
             fallback_used=False,
@@ -222,7 +224,54 @@ class AutoSignalService:
             logger.info("[FOOTBALL] fetch source=%s failed: %s", source_name, err)
             if "Unauthorized" in err or "provider_not_configured" in err or "fetch_error" in err:
                 fallback = self._build_manual_football_fallback_preview()
+                fallback_available = fallback is not None
+                diagnostics.update(fallback_source_available=fallback_available)
+                if fallback_available and settings.football_allow_manual_production_fallback:
+                    preview = fallback["preview"]
+                    payload = fallback["payload"]
+                    fallback_used = True
+                    fallback_source_name = "manual_winline_json"
+                    source_kind = "semi_live_manual"
+                    diagnostics.update(
+                        last_fetch_status="manual_production_fallback",
+                        fallback_used=True,
+                        source_mode="semi_live_manual",
+                        last_delivery_reason=None,
+                        note="temporary production fallback enabled: Winline JSON",
+                    )
+                    logger.info(
+                        "[FOOTBALL] live source unavailable; temporary production fallback source=%s",
+                        fallback_source_name,
+                    )
+                elif fallback_available:
+                    diagnostics.update(
+                        source_mode="blocked",
+                        last_delivery_reason=f"live_unavailable_manual_fallback_disabled: {live_auth_status}",
+                        note="manual production fallback disabled",
+                    )
+                    return AutoSignalCycleResult(
+                        endpoint=fetch_res.endpoint,
+                        fetch_ok=False,
+                        preview_candidates=0,
+                        preview_skipped_items=0,
+                        created_signal_ids=[],
+                        created_signals_count=0,
+                        skipped_candidates_count=0,
+                        notifications_sent_count=0,
+                        preview_only=False,
+                        message=err,
+                        runtime_paused=False,
+                        runtime_active_sports=active_sports,
+                        source_name=source_name,
+                        live_auth_status=live_auth_status,
+                        last_live_http_status=fetch_res.status_code,
+                        rejection_reason=f"live_unavailable_manual_fallback_disabled: {live_auth_status}",
+                    )
                 if fallback is None:
+                    diagnostics.update(
+                        source_mode="blocked",
+                        last_delivery_reason=f"live_unavailable_no_manual_fallback: {live_auth_status}",
+                    )
                     logger.info("[FOOTBALL] provider unauthorized and no football fallback payload available")
                     return AutoSignalCycleResult(
                         endpoint=fetch_res.endpoint,
@@ -240,22 +289,11 @@ class AutoSignalService:
                         source_name=source_name,
                         live_auth_status=live_auth_status,
                         last_live_http_status=fetch_res.status_code,
-                        rejection_reason="provider unauthorized",
+                        rejection_reason=f"live_unavailable_no_manual_fallback: {live_auth_status}",
                     )
-                preview = fallback["preview"]
-                payload = fallback["payload"]
-                fallback_used = True
-                fallback_source_name = "manual_winline_json"
-                source_kind = "fallback"
-                diagnostics.update(
-                    last_fetch_status="fallback_manual_payload",
-                    fallback_used=True,
-                    source_mode="fallback",
-                    last_delivery_reason="non_live_source_blocked",
-                    note=f"live provider unauthorized: {live_auth_status}",
-                )
                 logger.info("[FOOTBALL] fetch source=%s unauthorized; fallback source=%s", source_name, fallback_source_name)
             else:
+                diagnostics.update(source_mode="blocked", fallback_source_available=False)
                 return AutoSignalCycleResult(
                     endpoint=fetch_res.endpoint,
                     fetch_ok=False,
@@ -346,7 +384,7 @@ class AutoSignalService:
             )
             logger.info("[FOOTBALL] candidates after filter: 0 (%s)", reject_reason)
 
-        if source_kind != "live":
+        if source_kind not in {"live", "semi_live_manual"}:
             logger.info("[FOOTBALL][BLOCK] auto-send disabled for non-live source=%s", source_kind)
             block_reason = "non_live_source_blocked"
             if live_auth_status and live_auth_status != "ok":
@@ -417,33 +455,22 @@ class AutoSignalService:
                 rejection_reason="preview_only enabled",
             )
 
+        delivery_scope = "live_auto" if source_kind == "live" else "football_manual_auto"
+        runtime_source_kind = "live" if source_kind == "live" else "semi_live_manual"
         candidates_to_ingest = [
             c.model_copy(
                 update={
-                    "notes": "live_auto",
+                    "notes": delivery_scope,
                     "feature_snapshot_json": {
                         **(c.feature_snapshot_json or {}),
-                        "runtime_source_kind": "live",
-                        "delivery_scope": "live_auto",
+                        "runtime_source_kind": runtime_source_kind,
+                        "runtime_primary_source": source_name if source_kind == "live" else "manual_winline_json",
+                        "delivery_scope": delivery_scope,
                     },
                 }
             )
             for c in filtered_candidates
         ]
-        if fallback_used:
-            candidates_to_ingest = [
-                c.model_copy(
-                    update={
-                        "notes": "fallback_json",
-                        "feature_snapshot_json": {
-                            **(c.feature_snapshot_json or {}),
-                            "runtime_source_kind": "fallback_json",
-                            "runtime_primary_source": source_name,
-                        },
-                    }
-                )
-                for c in candidates_to_ingest
-            ]
         logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))
         if settings.football_debug_disable_filter:
             logger.info("[FOOTBALL][DEBUG] filter disabled, sending raw candidates")
@@ -506,7 +533,7 @@ class AutoSignalService:
                 session,
                 candidates_to_ingest,
                 dedup_exclude_notes=("fallback_json", "manual_json", "demo"),
-                dedup_required_notes=("live_auto",),
+                dedup_required_notes=(delivery_scope,),
             )
             await session.commit()
 

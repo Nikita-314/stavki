@@ -17,6 +17,8 @@ class SignalRuntimeDiagnosticsState:
     last_live_http_status: int | None = None
     last_live_endpoint: str | None = None
     last_live_error_body: str | None = None
+    fallback_source_available: bool = False
+    manual_production_fallback_allowed: bool = False
     source_mode: str | None = None
     last_fetch_status: str | None = None
     last_error: str | None = None
