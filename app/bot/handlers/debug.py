@@ -44,7 +44,7 @@ from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
 from app.schemas.auto_signal import AutoSignalCycleResult
-from app.services.auto_signal_service import AutoSignalService, _football_debug_summary_lines
+from app.services.auto_signal_service import AutoSignalService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.schemas.provider_client import ProviderClientConfig
@@ -618,50 +618,283 @@ async def cmd_signal_dota(message: Message) -> None:
     )
 
 
-def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
-    m = res.report_matches_found
-    c = res.report_candidates
-    af = res.report_after_filter
-    ai = res.report_after_integrity
-    asc = res.report_after_scoring
-    fin = res.report_final_signal or "—"
-    lines = [
-        "⚽ Футбольный прогон завершён",
-        "",
-        f"📊 Матчей найдено: {m if m is not None else '—'}",
-        f"📊 Кандидатов: {c if c is not None else '—'}",
-        f"📊 После фильтра: {af if af is not None else '—'}",
-        f"📊 После integrity: {ai if ai is not None else '—'}",
-        f"📊 После аналитики (порог score): {asc if asc is not None else '—'}",
-        f"📊 Финальный сигнал: {fin}",
-        "",
+def _prog_netloc(endpoint: str | None) -> str:
+    if not endpoint:
+        return "—"
+    try:
+        from urllib.parse import urlparse
+
+        netloc = urlparse(endpoint).netloc
+        return netloc or "—"
+    except Exception:
+        return "—"
+
+
+def _humanize_live_auth_short(code: str | None) -> str:
+    if not code or code == "—":
+        return "нет данных"
+    c = code.lower()
+    if c == "ok":
+        return "Ok"
+    if c in {"unauthorized_quota", "out_of_usage_credits"}:
+        return "квота Live API исчерпана"
+    if "quota" in c or "usage" in c:
+        return "квота Live API исчерпана"
+    if c == "no_key":
+        return "ключ API не задан"
+    if c == "unauthorized":
+        return "не авторизован"
+    if c == "http_error":
+        return "ошибка HTTP"
+    if c == "request_error":
+        return "ошибка запроса"
+    return code
+
+
+def _humanize_rejection_for_owner(raw: str | None) -> str:
+    if not raw:
+        return "нет данных"
+    s = raw.lower()
+    mapping = [
+        ("non_live_source_blocked", "источник не в режиме live — автоматическая отправка отключена"),
+        ("non_real_source_blocked", "источник не считается боевым"),
+        ("preview_only enabled", "включён режим только preview в настройках"),
+        ("paused", "контур на паузе"),
+        ("football_disabled", "футбол выключен в runtime"),
+        ("provider_not_configured", "Live API не настроен"),
+        ("low_score", "score ниже порога"),
+        ("dry_run_low_score", "score ниже порога"),
+        ("blocked_by_dedup", "уже есть похожий сигнал в базе"),
+        ("blocked_low_score", "score ниже порога"),
+        ("too_far_in_time", "матч слишком далеко по времени"),
+        ("football_send_filter_rejected_all", "все кандидаты отсеяны фильтром отправки"),
+        ("dropped_invalid_market_mapping", "ставка не прошла проверку целостности"),
+        ("dropped_invalid_total_scope", "несовпадение тотала по области действия"),
+        ("payload_is_not_dict", "ошибка формата данных провайдера"),
     ]
-    if fin == "ДА" and res.report_selected_match:
+    for needle, nice in mapping:
+        if needle.lower() in s:
+            return nice
+    return raw
+
+
+def _humanize_status_token(token: str | None) -> str:
+    if not token:
+        return ""
+    m = {
+        "blocked_low_score": "score ниже порога",
+        "blocked_send_filter": "рынок отсеян фильтром отправки",
+        "blocked_integrity": "ставка не прошла проверку целостности",
+        "blocked_too_far_in_time": "матч слишком далеко по времени",
+        "blocked_dedup": "похожий сигнал уже есть",
+        "blocked_unknown": "не удалось классифицировать причину",
+        "blocked_non_real_source": "источник не считается боевым",
+        "no_candidates": "нет подходящих кандидатов",
+        "selected": "выбран для отправки",
+    }
+    return m.get(token, token.replace("_", " "))
+
+
+def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
+    """Человекочитаемый отчёт для «⚽ Прогон». Без полных URL и сырых machine-кодов."""
+    settings = get_settings()
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    dbg = res.football_cycle_debug or {}
+
+    matches_found = res.report_matches_found
+    if matches_found is None:
+        mlist = dbg.get("matches") or []
+        matches_found = len(mlist) if mlist else 0
+
+    cand_total = res.report_candidates if res.report_candidates is not None else res.candidates_before_filter_count
+    after_filter = res.report_after_filter if res.report_after_filter is not None else diag.get("football_after_filter_count")
+    after_integrity = res.report_after_integrity if res.report_after_integrity is not None else diag.get("football_after_integrity_count")
+    after_score = res.report_after_scoring if res.report_after_scoring is not None else None
+
+    fin = (res.report_final_signal or "").strip() or "НЕТ"
+    signal_yes = fin == "ДА"
+
+    if res.preview_only:
+        mode_line = "Только preview (.env)"
+    elif res.runtime_paused:
+        mode_line = "Контур на паузе"
+    elif res.message == "football_disabled":
+        mode_line = "Футбол выключен"
+    elif res.message == "provider_not_configured":
+        mode_line = "Live API не настроен"
+    elif res.fetch_ok is False and res.message not in {"paused"}:
+        mode_line = "Ошибка загрузки данных"
+    elif bool(res.fallback_used):
+        mode_line = "Live API недоступен → использован Winline JSON"
+    elif (diag.get("source_mode") or "").lower() in {"semi_live_manual", "manual_example"}:
+        mode_line = "Winline JSON (semi-live)"
+    elif diag.get("source_mode") == "live":
+        mode_line = "Live API"
+    else:
+        mode_line = "Смешанный режим"
+
+    live_api_human = _humanize_live_auth_short(res.live_auth_status)
+
+    used_parts: list[str] = []
+    if bool(res.fallback_used):
+        used_parts.append(f"фолбэк {res.fallback_source_name or 'Winline JSON'}")
+    if diag.get("football_source"):
+        used_parts.append(str(diag["football_source"]))
+    elif res.source_name:
+        used_parts.append(str(res.source_name))
+    used_source = ", ".join(dict.fromkeys(used_parts)) if used_parts else (res.source_name or "—")
+
+    lines: list[str] = ["⚽ Футбольный прогон завершён", ""]
+
+    lines.extend(
+        [
+            "📡 Источник:",
+            f"• Режим: {mode_line}",
+            f"• Статус Live API: {live_api_human}",
+            f"• Фактически использованы данные: {used_source}",
+            "",
+            "📊 Сводка:",
+            f"• Матчей найдено: {matches_found}",
+            f"• Кандидатов всего: {cand_total}",
+            f"• После фильтра кандидатов: {after_filter if after_filter is not None else '—'}",
+            f"• После проверки целостности: {after_integrity if after_integrity is not None else '—'}",
+            f"• После порога score: {after_score if after_score is not None else '—'}",
+            "",
+            "🎯 Итог:",
+            f"• Финальный сигнал: {'Да' if signal_yes else 'Нет'}",
+        ]
+    )
+
+    chat_ok = settings.signal_chat_id is not None
+    if res.dry_run:
+        lines.append("• Отправка в канал сейчас: нет (тестовый прогон)")
+        if signal_yes:
+            lines.append(
+                "• В бою ушло бы в канал: "
+                + ("да — чат сигналов настроен" if chat_ok else "нет — не задан signal_chat_id")
+            )
+        else:
+            lines.append("• В бою ушло бы в канал: нет — сигнал не выбран")
+    else:
+        lines.append(f"• Отправлено в канал: {res.notifications_sent_count}")
+
+    raw_code = res.report_rejection_code or res.rejection_reason or res.message
+    primary_reason = _humanize_rejection_for_owner(raw_code)
+    if primary_reason == "нет данных" or not raw_code:
+        bh = dbg.get("bottleneck_hint")
+        if bh:
+            primary_reason = _humanize_status_token(str(bh))
+    lines.append(f"• Комментарий: {primary_reason}")
+
+    min_score = dbg.get("min_signal_score")
+    if min_score is not None:
+        lines.extend(["", f"📐 Порог score: {min_score}"])
+
+    status_counts = dbg.get("final_status_counts") or {}
+    total_m = sum(status_counts.values()) if status_counts else 0
+    if status_counts and total_m > 1:
+        lines.extend(["", "📎 Сводка по матчам:"])
+        for st, cnt in sorted(status_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]:
+            lines.append(f"• {_humanize_status_token(st)} — {cnt}")
+
+    top_rows = dbg.get("matches_top_for_message") or dbg.get("matches") or []
+    if top_rows and total_m <= 8:
+        lines.extend(["", "📎 Примеры (до 5):"])
+        for row in top_rows[:5]:
+            nm = row.get("match_name") or "—"
+            st = row.get("final_status")
+            sc = row.get("best_candidate_score")
+            hs = _humanize_status_token(st) if st else ""
+            if sc is not None and (st == "blocked_low_score" or "score" in hs.lower()):
+                lines.append(f"• {nm}: {hs} ({sc})")
+            else:
+                lines.append(f"• {nm}: {hs}")
+
+    sel_match = res.report_selected_match
+    sel_bet = res.report_selected_bet
+    sel_odds = res.report_selected_odds
+    sel_score = res.report_selected_score
+
+    selected_row = None
+    for row in dbg.get("matches") or []:
+        if row.get("final_status") == "selected":
+            selected_row = row
+            break
+
+    tournament_display = (selected_row or {}).get("tournament_name")
+    event_start_display = None
+    esa = (selected_row or {}).get("event_start_at")
+    if esa:
+        event_start_display = str(esa).replace("T", " ").replace("+00:00", " UTC")
+
+    lines.append("")
+
+    if signal_yes and sel_match:
         lines.extend(
             [
-                "🎯 Выбран сигнал:",
-                f"Матч: {res.report_selected_match}",
-                f"Ставка: {res.report_selected_bet or '—'}",
-                f"Коэффициент: {res.report_selected_odds or '—'}",
-                f"Score: {res.report_selected_score or '—'}",
-                "Причины:",
+                "🏆 Лучший кандидат:",
+                f"• Матч: {sel_match}",
+                f"• Турнир: {tournament_display or '—'}",
+                f"• Начало: {event_start_display or '—'}",
+                f"• Ставка: {sel_bet or '—'}",
+                f"• Коэффициент: {sel_odds or '—'}",
+                f"• Score: {sel_score or '—'}",
             ]
         )
-        for r in res.report_human_reasons or []:
-            lines.append(r)
-    elif fin == "НЕТ":
+        reasons = res.report_human_reasons or []
+        if reasons:
+            lines.append("• Причины (скоринг):")
+            for r in reasons[:6]:
+                lines.append(f"  — {r}")
+        if res.dry_run:
+            lines.extend(
+                [
+                    "",
+                    "ℹ️ Тестовый прогон: БД и канал не трогаем. При таких же данных в бою была бы выбрана эта ставка.",
+                ]
+            )
+    elif signal_yes:
+        lines.extend(["🏆 Финальный сигнал: да", "• Детали матча недоступны в отчёте — см. логи цикла.", ""])
+    elif not signal_yes:
         lines.append("❌ Сигнал не выбран")
-        rc = res.report_rejection_code or res.rejection_reason or "unknown"
-        lines.append(f"Причина: {rc}")
+        nearest = None
+        best_sc = None
+        for row in dbg.get("matches") or []:
+            sc = row.get("best_candidate_score")
+            if sc is not None:
+                if best_sc is None or float(sc) > float(best_sc):
+                    best_sc = float(sc)
+                    nearest = row
+        if nearest and nearest.get("match_name"):
+            lines.append(f"• Ближайший по score: {nearest.get('match_name')}")
+            lines.append(f"• Его score: {nearest.get('best_candidate_score')}")
+            if min_score is not None and best_sc is not None:
+                gap = float(min_score) - float(best_sc)
+                if gap > 0:
+                    lines.append(f"• До порога не хватило: ~{gap:.1f}")
+        elif (cand_total == 0 or cand_total is None) and not dbg.get("matches"):
+            lines.append("• Ближайший кандидат: не сформирован")
         if res.report_dedup_skipped:
-            lines.append(f"(dedup skipped: {res.report_dedup_skipped})")
-    if res.dry_run:
-        lines.extend(["", "ℹ️ Режим прогона: без записи в БД и без отправки в канал."])
-    lines += _football_debug_summary_lines(res.football_cycle_debug)
-    lines.extend(["", f"Сообщение цикла: {res.message}"])
+            lines.append(f"• Dedup отклонил кандидатов: {res.report_dedup_skipped}")
+        if res.dry_run:
+            lines.append("")
+            lines.append("ℹ️ Прогон тестовый: канал и БД не затрагиваются.")
+
+    lines.extend(
+        [
+            "",
+            "🛠 Диагностика:",
+            f"• Provider: {res.source_name or '—'}",
+            f"• HTTP: {res.last_live_http_status if res.last_live_http_status is not None else '—'}",
+            f"• Auth (сырой код): {res.live_auth_status or '—'}",
+            f"• Dry run: да",
+            f"• Хост API: {_prog_netloc(res.endpoint)}",
+        ]
+    )
+
     text = "\n".join(lines)
     if len(text) > 3900:
-        return text[:3870] + "\n…(обрезано, полный JSON в логах [FOOTBALL][CYCLE_DEBUG_JSON])"
+        return text[:3870] + "\n… (обрезано; детали в логах [FOOTBALL][CYCLE_DEBUG_JSON])"
     return text
 
 

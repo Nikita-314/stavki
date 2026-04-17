@@ -140,10 +140,12 @@ def compile_football_cycle_debug(
         else:
             final_status = "blocked_integrity"
 
+        tn = str(getattr(match, "tournament_name", "") or "").strip()
         rows.append(
             {
                 "event_id": eid,
                 "match_name": str(match.match_name or ""),
+                "tournament_name": tn or None,
                 "is_live": bool(getattr(match, "is_live", False)),
                 "event_start_at": match.event_start_at.isoformat() if getattr(match, "event_start_at", None) else None,
                 "hours_to_start": None if hours_to_start is None else round(float(hours_to_start), 3),
@@ -241,45 +243,6 @@ def _football_top_matches_for_telegram(rows: list[dict], *, limit: int) -> list[
         return (pri, -sc, r.get("match_name") or "")
 
     return sorted(rows, key=sort_key)[:limit]
-
-
-def _football_debug_summary_lines(debug: dict | None) -> list[str]:
-    if not debug:
-        return []
-    lines: list[str] = [
-        "",
-        "— Football cycle debug —",
-        f"Время (уник. матчи): live={debug['time_buckets_unique_matches']['live']} "
-        f"near={debug['time_buckets_unique_matches']['near']} "
-        f"too_far={debug['time_buckets_unique_matches']['too_far']}",
-        f"Порог score: {debug.get('min_signal_score')}",
-        f"Вероятный bottleneck: {debug.get('bottleneck_hint') or '—'}",
-        f"Отсев по статусу: {debug.get('final_status_counts')}",
-        f"Лучшие score (до {len(debug.get('best_scores_all_matches') or [])} знач.): {debug.get('best_scores_all_matches')}",
-        f"Send-filter drops: {debug.get('send_filter_drop_reasons')}",
-        f"До send-filter (buckets): {debug.get('family_histogram_before_send_filter')}",
-        f"После send-filter (raw families): {debug.get('families_left_after_send_filter')}",
-        f"Exotic: до={debug.get('exotic_count_before_send_filter')} после={debug.get('exotic_count_after_send_filter')}",
-        f"После scoring (все прошедшие integrity): {debug.get('family_buckets_after_scoring_integrity_pool')}",
-        f"После порога (finalists buckets): {debug.get('family_buckets_after_scoring_finalists')}",
-    ]
-    samples = debug.get("integrity_fail_samples") or []
-    if samples:
-        lines.append("Integrity (примеры):")
-        for s in samples[:5]:
-            lines.append(f"  · {s.get('source_market_label')} | sel={s.get('selection')} | fam={s.get('family')} | {s.get('reason')}")
-    top = debug.get("matches_top_for_message") or []
-    if top:
-        lines.append("Матчи (сводка):")
-        for r in top:
-            st = r.get("final_status")
-            nm = r.get("match_name") or "—"
-            sc = r.get("best_candidate_score")
-            if sc is not None and st == "blocked_low_score":
-                lines.append(f"  · {nm} → {st} ({sc})")
-            else:
-                lines.append(f"  · {nm} → {st}")
-    return lines
 
 
 class AutoSignalService:
