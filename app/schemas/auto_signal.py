@@ -21,6 +21,8 @@ class AutoSignalCycleResult(BaseModel):
     runtime_paused: bool = False
     runtime_active_sports: list[str] = []
     source_name: str | None = None
+    live_auth_status: str | None = None
+    last_live_http_status: int | None = None
     fallback_used: bool = False
     fallback_source_name: str | None = None
     rejection_reason: str | None = None

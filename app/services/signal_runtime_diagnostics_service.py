@@ -12,6 +12,11 @@ class SignalRuntimeDiagnosticsState:
     active_mode: str = "football"
     football_source: str | None = None
     football_fallback_source: str | None = None
+    live_provider_name: str | None = None
+    live_auth_status: str | None = None
+    last_live_http_status: int | None = None
+    last_live_endpoint: str | None = None
+    last_live_error_body: str | None = None
     source_mode: str | None = None
     last_fetch_status: str | None = None
     last_error: str | None = None

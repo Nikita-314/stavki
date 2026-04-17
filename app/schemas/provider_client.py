@@ -12,6 +12,11 @@ class ProviderClientFetchResult(BaseModel):
     status_code: int | None
     error: str | None
     payload: dict[str, Any] | None
+    auth_status: str | None = None
+    response_body_snippet: str | None = None
+    key_present: bool = False
+    key_masked: str | None = None
+    key_length: int = 0
 
 
 class ProviderClientConfig(BaseModel):

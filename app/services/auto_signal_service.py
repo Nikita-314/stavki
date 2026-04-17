@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import parse_qsl, urlparse
 
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -27,6 +28,32 @@ logger = logging.getLogger(__name__)
 
 
 class AutoSignalService:
+    def _clean_optional_str(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    def _render_live_auth_status(self, auth_status: str | None, body_snippet: str | None) -> str:
+        if auth_status == "ok":
+            return "ok"
+        if auth_status == "no_key":
+            return "no_key"
+        if auth_status == "out_of_usage_credits":
+            return "unauthorized: usage quota has been reached"
+        if auth_status == "unauthorized":
+            return "unauthorized"
+        if auth_status == "http_error":
+            return "http_error"
+        if auth_status == "request_error":
+            return "request_error"
+        return str(body_snippet or "").strip() or "unknown"
+
+    def _provider_query_params(self, endpoint: str | None) -> dict[str, str]:
+        if not endpoint:
+            return {}
+        return dict(parse_qsl(urlparse(endpoint).query, keep_blank_values=False))
+
     async def run_single_cycle(
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
@@ -42,6 +69,11 @@ class AutoSignalService:
             active_mode="football" if SportType.FOOTBALL.value in active_sports else "inactive",
             football_source=self._detect_provider_name(settings),
             football_fallback_source="manual_winline_json",
+            live_provider_name=self._detect_provider_name(settings),
+            live_auth_status=None,
+            last_live_http_status=None,
+            last_live_endpoint=None,
+            last_live_error_body=None,
             source_mode="unknown",
             preview_only=bool(settings.auto_signal_preview_only),
             fallback_used=False,
@@ -151,6 +183,25 @@ class AutoSignalService:
         logger.info("[FOOTBALL] fetch started")
         logger.info("[FOOTBALL] fetch source=%s endpoint=%s", self._detect_provider_name(settings), config.base_url)
         fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
+        live_auth_status = self._render_live_auth_status(fetch_res.auth_status, fetch_res.response_body_snippet)
+        diagnostics.update(
+            live_provider_name=self._detect_provider_name(settings),
+            live_auth_status=live_auth_status,
+            last_live_http_status=fetch_res.status_code,
+            last_live_endpoint=fetch_res.endpoint,
+            last_live_error_body=fetch_res.response_body_snippet,
+        )
+        logger.info(
+            "[FOOTBALL][LIVE] provider=%s endpoint=%s key_present=%s key_length=%s key_masked=%s http_status=%s auth_status=%s params=%s",
+            self._detect_provider_name(settings),
+            fetch_res.endpoint,
+            "yes" if fetch_res.key_present else "no",
+            fetch_res.key_length,
+            fetch_res.key_masked or "—",
+            fetch_res.status_code,
+            live_auth_status,
+            self._provider_query_params(fetch_res.endpoint),
+        )
         preview = None
         payload = None
         source_name = self._detect_provider_name(settings)
@@ -187,6 +238,8 @@ class AutoSignalService:
                         runtime_paused=False,
                         runtime_active_sports=active_sports,
                         source_name=source_name,
+                        live_auth_status=live_auth_status,
+                        last_live_http_status=fetch_res.status_code,
                         rejection_reason="provider unauthorized",
                     )
                 preview = fallback["preview"]
@@ -199,7 +252,7 @@ class AutoSignalService:
                     fallback_used=True,
                     source_mode="fallback",
                     last_delivery_reason="non_live_source_blocked",
-                    note="provider unauthorized; fallback to manual football payload",
+                    note=f"live provider unauthorized: {live_auth_status}",
                 )
                 logger.info("[FOOTBALL] fetch source=%s unauthorized; fallback source=%s", source_name, fallback_source_name)
             else:
@@ -217,6 +270,8 @@ class AutoSignalService:
                     runtime_paused=False,
                     runtime_active_sports=active_sports,
                     source_name=source_name,
+                    live_auth_status=live_auth_status,
+                    last_live_http_status=fetch_res.status_code,
                     rejection_reason=err,
                 )
 
@@ -236,6 +291,8 @@ class AutoSignalService:
                 runtime_paused=False,
                 runtime_active_sports=active_sports,
                 source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
                 rejection_reason="payload_is_not_dict",
@@ -291,12 +348,15 @@ class AutoSignalService:
 
         if source_kind != "live":
             logger.info("[FOOTBALL][BLOCK] auto-send disabled for non-live source=%s", source_kind)
+            block_reason = "non_live_source_blocked"
+            if live_auth_status and live_auth_status != "ok":
+                block_reason = f"non_live_source_blocked: {live_auth_status}"
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_after_filter_count=0,
                 football_sent_count=0,
-                last_delivery_reason="non_live_source_blocked",
+                last_delivery_reason=block_reason,
                 note=f"auto-send blocked for non-live source: {source_kind}",
             )
             return AutoSignalCycleResult(
@@ -317,9 +377,11 @@ class AutoSignalService:
                 runtime_paused=False,
                 runtime_active_sports=active_sports,
                 source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
-                rejection_reason="non_live_source_blocked",
+                rejection_reason=block_reason,
             )
 
         if settings.auto_signal_preview_only:
@@ -348,6 +410,8 @@ class AutoSignalService:
                 runtime_paused=False,
                 runtime_active_sports=active_sports,
                 source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
                 rejection_reason="preview_only enabled",
@@ -422,6 +486,8 @@ class AutoSignalService:
                 runtime_paused=False,
                 runtime_active_sports=active_sports,
                 source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
                 rejection_reason="football send filter rejected all signals",
@@ -486,6 +552,8 @@ class AutoSignalService:
             runtime_paused=False,
             runtime_active_sports=active_sports,
             source_name=source_name,
+            live_auth_status=live_auth_status,
+            last_live_http_status=fetch_res.status_code,
             fallback_used=fallback_used,
             fallback_source_name=fallback_source_name,
         )
@@ -503,11 +571,13 @@ class AutoSignalService:
             try:
                 result = await self.run_single_cycle(sessionmaker, bot)
                 logger.info(
-                    "Football auto cycle: source=%s endpoint=%s fetch_ok=%s preview_candidates=%s created=%s skipped=%s "
+                    "Football auto cycle: source=%s endpoint=%s fetch_ok=%s http_status=%s auth_status=%s preview_candidates=%s created=%s skipped=%s "
                     "notifications=%s preview_only=%s paused=%s active_sports=%s fallback=%s message=%s",
                     result.source_name,
                     result.endpoint,
                     result.fetch_ok,
+                    result.last_live_http_status,
+                    result.live_auth_status,
                     result.preview_candidates,
                     result.created_signals_count,
                     result.skipped_candidates_count,
@@ -527,17 +597,18 @@ class AutoSignalService:
             await asyncio.sleep(interval)
 
     def _build_provider_client_config(self, settings: Settings) -> ProviderClientConfig | None:
-        if not settings.odds_provider_base_url:
+        base_url = self._clean_optional_str(settings.odds_provider_base_url)
+        if not base_url:
             return None
         return ProviderClientConfig(
-            base_url=settings.odds_provider_base_url,
-            api_key=settings.odds_provider_api_key,
-            sport=settings.odds_provider_sport,
-            regions=settings.odds_provider_regions,
-            markets=settings.odds_provider_markets,
-            bookmakers=settings.odds_provider_bookmakers,
-            odds_format=settings.odds_provider_odds_format,
-            date_format=settings.odds_provider_date_format,
+            base_url=base_url,
+            api_key=self._clean_optional_str(settings.odds_provider_api_key),
+            sport=self._clean_optional_str(settings.odds_provider_sport),
+            regions=self._clean_optional_str(settings.odds_provider_regions),
+            markets=self._clean_optional_str(settings.odds_provider_markets),
+            bookmakers=self._clean_optional_str(settings.odds_provider_bookmakers),
+            odds_format=self._clean_optional_str(settings.odds_provider_odds_format),
+            date_format=self._clean_optional_str(settings.odds_provider_date_format),
             timeout_seconds=int(settings.odds_provider_timeout_seconds),
         )
 
