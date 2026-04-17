@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     football_allow_manual_production_fallback: bool = False
     football_analytics_enabled: bool = True
     football_learning_enabled: bool = True
-    football_min_signal_score: float = 60.0
+    football_min_signal_score: float = 55.0
     football_dedup_relaxed_interval_minutes: int = 30
 
     model_config = SettingsConfigDict(

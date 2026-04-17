@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections import Counter
 from urllib.parse import parse_qsl, urlparse
 
 from aiogram import Bot
@@ -31,6 +33,253 @@ from app.services.winline_manual_payload_service import WinlineManualPayloadServ
 
 
 logger = logging.getLogger(__name__)
+
+
+def _football_event_id(candidate: ProviderSignalCandidate) -> str:
+    return str(getattr(getattr(candidate, "match", None), "external_event_id", "") or "")
+
+
+def _football_only(candidates: list[ProviderSignalCandidate]) -> list[ProviderSignalCandidate]:
+    return [c for c in candidates if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL]
+
+
+def compile_football_cycle_debug(
+    *,
+    fb_preview: list[ProviderSignalCandidate],
+    fb_cvf: list[ProviderSignalCandidate],
+    fb_post_send: list[ProviderSignalCandidate],
+    fb_post_integrity: list[ProviderSignalCandidate],
+    enriched_scored: list[ProviderSignalCandidate] | None,
+    finalists: list[ProviderSignalCandidate] | None,
+    min_score: float,
+    family_svc: FootballSignalSendFilterService,
+    send_filter_stats,
+    integrity_dropped_checks: list,
+    dry_run: bool,
+    global_block: str | None = None,
+) -> dict:
+    """Aggregated per-match football pipeline diagnostics for dry_run Telegram + logs."""
+    send_surviving_eids = {_football_event_id(c) for c in fb_post_send if _football_event_id(c)}
+    send_fail_by_eid = family_svc.per_event_send_filter_failure(fb_cvf, surviving_event_ids=send_surviving_eids)
+
+    def _count_by_event(cands: list[ProviderSignalCandidate]) -> Counter[str]:
+        ctr: Counter[str] = Counter()
+        for c in cands:
+            eid = _football_event_id(c)
+            if eid:
+                ctr[eid] += 1
+        return ctr
+
+    preview_counts = _count_by_event(fb_preview)
+    cvf_counts = _count_by_event(fb_cvf)
+    post_send_counts = _count_by_event(fb_post_send)
+    post_int_counts = _count_by_event(fb_post_integrity)
+    finalist_counts = _count_by_event(finalists or [])
+
+    preview_by_eid: dict[str, ProviderSignalCandidate] = {}
+    for c in fb_preview:
+        eid = _football_event_id(c)
+        if eid and eid not in preview_by_eid:
+            preview_by_eid[eid] = c
+
+    best_by_eid: dict[str, tuple[float, ProviderSignalCandidate]] = {}
+    if enriched_scored:
+        for c in enriched_scored:
+            eid = _football_event_id(c)
+            if not eid:
+                continue
+            sc = float(c.signal_score or 0.0)
+            prev = best_by_eid.get(eid)
+            if prev is None or sc > prev[0]:
+                best_by_eid[eid] = (sc, c)
+
+    rows: list[dict] = []
+    for eid, rep in sorted(preview_by_eid.items(), key=lambda kv: (kv[1].match.match_name or "")):
+        match = rep.match
+        is_live, hours_to_start = family_svc._time_window_info(rep)
+        raw_keys = {
+            (
+                str(c.market.market_type or ""),
+                str(c.market.market_label or ""),
+                str(c.market.selection or ""),
+            )
+            for c in fb_preview
+            if _football_event_id(c) == eid
+        }
+        n_preview = preview_counts.get(eid, 0)
+        n_cvf = cvf_counts.get(eid, 0)
+        n_send = post_send_counts.get(eid, 0)
+        n_int = post_int_counts.get(eid, 0)
+        n_final = finalist_counts.get(eid, 0)
+
+        best_sc, best_c = best_by_eid.get(eid, (0.0, None))
+        best_market = None
+        best_odds = None
+        if best_c is not None:
+            best_market = str(best_c.market.market_label or best_c.market.market_type or "")
+            best_odds = str(best_c.market.odds_value) if best_c.market.odds_value is not None else None
+
+        final_status = "blocked_unknown"
+        if n_preview == 0:
+            final_status = "no_candidates"
+        elif n_cvf == 0:
+            final_status = "blocked_unknown"
+        elif n_send == 0:
+            if send_fail_by_eid.get(eid) == "too_far_in_time":
+                final_status = "blocked_too_far_in_time"
+            else:
+                final_status = "blocked_send_filter"
+        elif n_int == 0:
+            final_status = "blocked_integrity"
+        elif n_int > 0 and best_c is None:
+            final_status = "blocked_unknown"
+        elif n_final > 0:
+            final_status = "selected"
+        elif best_c is not None:
+            final_status = "blocked_low_score"
+        else:
+            final_status = "blocked_integrity"
+
+        rows.append(
+            {
+                "event_id": eid,
+                "match_name": str(match.match_name or ""),
+                "is_live": bool(getattr(match, "is_live", False)),
+                "event_start_at": match.event_start_at.isoformat() if getattr(match, "event_start_at", None) else None,
+                "hours_to_start": None if hours_to_start is None else round(float(hours_to_start), 3),
+                "raw_markets_count": len(raw_keys),
+                "candidates_before_filter": n_preview,
+                "candidates_after_cvf": n_cvf,
+                "candidates_after_send_filter": n_send,
+                "candidates_after_integrity": n_int,
+                "candidates_after_score_threshold": n_final,
+                "best_candidate_market": best_market,
+                "best_candidate_odds": best_odds,
+                "best_candidate_score": round(best_sc, 2) if best_c is not None else None,
+                "final_status": final_status,
+            }
+        )
+
+    if global_block:
+        gb = global_block.lower()
+        forced = "blocked_non_real_source" if ("non_live" in gb or "non_real" in gb) else "blocked_unknown"
+        for r in rows:
+            r["final_status"] = forced
+
+    status_counts = Counter(str(r["final_status"]) for r in rows)
+    best_scores_sorted = sorted(
+        (float(r["best_candidate_score"]) for r in rows if r.get("best_candidate_score") is not None),
+        reverse=True,
+    )
+    integrity_samples: list[dict] = []
+    for check in (integrity_dropped_checks or [])[:5]:
+        integrity_samples.append(
+            {
+                "source_market_label": getattr(check, "source_market_label", ""),
+                "selection": getattr(check, "source_selection", ""),
+                "family": getattr(check, "source_family", ""),
+                "reason": getattr(check, "integrity_check_reason", ""),
+            }
+        )
+
+    live_m = near_m = too_m = 0
+    if send_filter_stats is not None:
+        live_m = int(send_filter_stats.live_matches)
+        near_m = int(send_filter_stats.near_matches)
+        too_m = int(send_filter_stats.too_far_matches_dropped)
+    else:
+        live_m, near_m, too_m = family_svc._summarize_match_timing(fb_preview)
+
+    families_after_send = dict(send_filter_stats.families_left) if send_filter_stats else {}
+    hist_send = dict(send_filter_stats.family_histogram_input) if send_filter_stats else {}
+    exotic_in = int(send_filter_stats.exotic_count_input) if send_filter_stats else 0
+    exotic_after = int(send_filter_stats.exotic_count_after_filter) if send_filter_stats else 0
+
+    fam_after_score: dict[str, int] = {}
+    if finalists:
+        fam_after_score, _ = family_svc.broad_family_histogram(finalists)
+    fam_scored_integrity_pool: dict[str, int] = {}
+    if enriched_scored:
+        fam_scored_integrity_pool, _ = family_svc.broad_family_histogram(enriched_scored)
+
+    bottleneck_hint: str | None = None
+    if status_counts:
+        bottleneck_hint = max(status_counts.items(), key=lambda kv: kv[1])[0]
+
+    debug = {
+        "global_block": global_block,
+        "dry_run": dry_run,
+        "min_signal_score": min_score,
+        "time_buckets_unique_matches": {"live": live_m, "near": near_m, "too_far": too_m},
+        "final_status_counts": dict(status_counts),
+        "best_scores_all_matches": [round(x, 2) for x in best_scores_sorted[:25]],
+        "send_filter_drop_reasons": dict(send_filter_stats.drop_reasons) if send_filter_stats else {},
+        "family_histogram_before_send_filter": hist_send,
+        "exotic_count_before_send_filter": exotic_in,
+        "exotic_count_after_send_filter": exotic_after,
+        "families_left_after_send_filter": families_after_send,
+        "family_buckets_after_scoring_integrity_pool": fam_scored_integrity_pool,
+        "family_buckets_after_scoring_finalists": fam_after_score,
+        "bottleneck_hint": bottleneck_hint,
+        "integrity_fail_samples": integrity_samples,
+        "matches": rows,
+        "matches_top_for_message": _football_top_matches_for_telegram(rows, limit=10),
+        "blocked_dedup_note": "dedup runs only on live ingest; dry_run does not evaluate DB dedup per match",
+    }
+    try:
+        logger.info("[FOOTBALL][CYCLE_DEBUG_JSON] %s", json.dumps(debug, default=str, ensure_ascii=False)[:24000])
+    except Exception:
+        logger.info("[FOOTBALL][CYCLE_DEBUG_JSON] (serialization failed)")
+    return debug
+
+
+def _football_top_matches_for_telegram(rows: list[dict], *, limit: int) -> list[dict]:
+    def sort_key(r: dict) -> tuple[int, float, str]:
+        status = r.get("final_status") or ""
+        pri = 0 if status == "selected" else 1 if status == "blocked_low_score" else 2
+        sc = float(r["best_candidate_score"] or -1.0)
+        return (pri, -sc, r.get("match_name") or "")
+
+    return sorted(rows, key=sort_key)[:limit]
+
+
+def _football_debug_summary_lines(debug: dict | None) -> list[str]:
+    if not debug:
+        return []
+    lines: list[str] = [
+        "",
+        "— Football cycle debug —",
+        f"Время (уник. матчи): live={debug['time_buckets_unique_matches']['live']} "
+        f"near={debug['time_buckets_unique_matches']['near']} "
+        f"too_far={debug['time_buckets_unique_matches']['too_far']}",
+        f"Порог score: {debug.get('min_signal_score')}",
+        f"Вероятный bottleneck: {debug.get('bottleneck_hint') or '—'}",
+        f"Отсев по статусу: {debug.get('final_status_counts')}",
+        f"Лучшие score (до {len(debug.get('best_scores_all_matches') or [])} знач.): {debug.get('best_scores_all_matches')}",
+        f"Send-filter drops: {debug.get('send_filter_drop_reasons')}",
+        f"До send-filter (buckets): {debug.get('family_histogram_before_send_filter')}",
+        f"После send-filter (raw families): {debug.get('families_left_after_send_filter')}",
+        f"Exotic: до={debug.get('exotic_count_before_send_filter')} после={debug.get('exotic_count_after_send_filter')}",
+        f"После scoring (все прошедшие integrity): {debug.get('family_buckets_after_scoring_integrity_pool')}",
+        f"После порога (finalists buckets): {debug.get('family_buckets_after_scoring_finalists')}",
+    ]
+    samples = debug.get("integrity_fail_samples") or []
+    if samples:
+        lines.append("Integrity (примеры):")
+        for s in samples[:5]:
+            lines.append(f"  · {s.get('source_market_label')} | sel={s.get('selection')} | fam={s.get('family')} | {s.get('reason')}")
+    top = debug.get("matches_top_for_message") or []
+    if top:
+        lines.append("Матчи (сводка):")
+        for r in top:
+            st = r.get("final_status")
+            nm = r.get("match_name") or "—"
+            sc = r.get("best_candidate_score")
+            if sc is not None and st == "blocked_low_score":
+                lines.append(f"  · {nm} → {st} ({sc})")
+            else:
+                lines.append(f"  · {nm} → {st}")
+    return lines
 
 
 class AutoSignalService:
@@ -436,6 +685,8 @@ class AutoSignalService:
         )
         deduped = DeduplicationService().deduplicate_candidates(filtered.accepted_candidates)
         filtered_candidates = list(deduped.unique_candidates)
+        fb_preview = _football_only(candidates_before_filter)
+        fb_cvf = _football_only(filtered_candidates)
 
         logger.info("[FOOTBALL] raw events: %s", raw_events_count)
         logger.info("[FOOTBALL] normalized markets: %s", normalized_markets_count)
@@ -477,6 +728,20 @@ class AutoSignalService:
                 last_delivery_reason=block_reason,
                 note=f"auto-send blocked for non-live source: {source_kind}",
             )
+            _dbg = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=[],
+                fb_post_integrity=[],
+                enriched_scored=None,
+                finalists=None,
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=None,
+                integrity_dropped_checks=[],
+                dry_run=dry_run,
+                global_block=block_reason,
+            )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
                 fetch_ok=True,
@@ -500,6 +765,7 @@ class AutoSignalService:
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
                 rejection_reason=block_reason,
+                football_cycle_debug=_dbg,
             )
 
         if settings.auto_signal_preview_only:
@@ -509,6 +775,20 @@ class AutoSignalService:
                 messages_sent_count=0,
                 last_delivery_reason="preview_only",
                 note="preview_only enabled",
+            )
+            _dbg_po = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=[],
+                fb_post_integrity=[],
+                enriched_scored=None,
+                finalists=None,
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=None,
+                integrity_dropped_checks=[],
+                dry_run=dry_run,
+                global_block="preview_only_enabled",
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -533,6 +813,7 @@ class AutoSignalService:
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
                 rejection_reason="preview_only enabled",
+                football_cycle_debug=_dbg_po,
             )
 
         delivery_scope = "live_auto" if source_kind == "live" else "football_manual_auto"
@@ -552,11 +833,12 @@ class AutoSignalService:
             for c in filtered_candidates
         ]
         logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))
+        send_filter_result = None
         if settings.football_debug_disable_filter:
             logger.info("[FOOTBALL][DEBUG] filter disabled, sending raw candidates")
             candidates_to_ingest = candidates_to_ingest[:3]
             diagnostics.update(football_after_filter_count=len(candidates_to_ingest))
-        else:
+        elif candidates_to_ingest:
             football_send_filter = FootballSignalSendFilterService()
             send_filter_result = football_send_filter.filter_auto_send_candidates(candidates_to_ingest)
             logger.info("[FOOTBALL] after family whitelist: %s", send_filter_result.stats.after_whitelist)
@@ -572,9 +854,11 @@ class AutoSignalService:
                 dropped_too_far_in_time_count=send_filter_result.stats.drop_reasons.get("too_far_in_time", 0),
                 selected_match_reason=(send_filter_result.stats.selected_per_match[0] if send_filter_result.stats.selected_per_match else None),
             )
+        fb_post_send_saved = _football_only(candidates_to_ingest)
         post_send_filter_count = len(candidates_to_ingest)
         integrity_result = FootballSignalIntegrityService().validate_candidates(candidates_to_ingest)
         candidates_to_ingest = integrity_result.valid_candidates
+        fb_post_integrity_saved = _football_only(candidates_to_ingest)
         invalid_market_drops = len(
             [
                 check
@@ -601,7 +885,11 @@ class AutoSignalService:
             logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_total_scope=%s", invalid_total_scope_drops)
         post_integrity_count = len(candidates_to_ingest)
         if not candidates_to_ingest:
-            too_far_drops = 0 if settings.football_debug_disable_filter else send_filter_result.stats.drop_reasons.get("too_far_in_time", 0)
+            too_far_drops = (
+                0
+                if send_filter_result is None
+                else int(send_filter_result.stats.drop_reasons.get("too_far_in_time", 0))
+            )
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
@@ -630,6 +918,19 @@ class AutoSignalService:
                         )
                     )
                 ),
+            )
+            _dbg_empty = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=fb_post_send_saved,
+                fb_post_integrity=fb_post_integrity_saved,
+                enriched_scored=None,
+                finalists=None,
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=send_filter_result.stats if send_filter_result else None,
+                integrity_dropped_checks=list(integrity_result.dropped_checks),
+                dry_run=dry_run,
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -662,6 +963,7 @@ class AutoSignalService:
                         else ("too_far_in_time" if too_far_drops else "football send filter rejected all signals")
                     )
                 ),
+                football_cycle_debug=_dbg_empty,
             )
         omitted_by_limit = 0
         limit = settings.auto_signal_max_created_per_cycle
@@ -773,6 +1075,20 @@ class AutoSignalService:
 
         report_after_scoring = len(finalists)
 
+        cycle_dbg = compile_football_cycle_debug(
+            fb_preview=fb_preview,
+            fb_cvf=fb_cvf,
+            fb_post_send=fb_post_send_saved,
+            fb_post_integrity=fb_post_integrity_saved,
+            enriched_scored=enriched,
+            finalists=finalists,
+            min_score=min_score,
+            family_svc=FootballSignalSendFilterService(),
+            send_filter_stats=send_filter_result.stats if send_filter_result else None,
+            integrity_dropped_checks=list(integrity_result.dropped_checks),
+            dry_run=dry_run,
+        )
+
         def _pick_bet_text(cand: ProviderSignalCandidate) -> str:
             from app.services.football_bet_formatter_service import FootballBetFormatterService
 
@@ -847,6 +1163,7 @@ class AutoSignalService:
                 report_selected_reason_codes=codes,
                 report_human_reasons=human_rs,
                 report_dedup_skipped=0,
+                football_cycle_debug=cycle_dbg,
             )
 
         if dry_run:
@@ -894,6 +1211,7 @@ class AutoSignalService:
                 report_selected_reason_codes=codes,
                 report_human_reasons=human_rs,
                 report_dedup_skipped=0,
+                football_cycle_debug=cycle_dbg,
             )
 
         candidates_to_ingest = finalists
@@ -969,6 +1287,7 @@ class AutoSignalService:
                 report_selected_reason_codes=codes,
                 report_human_reasons=human_rs,
                 report_dedup_skipped=int(ingest_res.skipped_candidates),
+                football_cycle_debug=cycle_dbg,
             )
 
         diagnostics.update(
@@ -1019,6 +1338,7 @@ class AutoSignalService:
             report_selected_reason_codes=codes,
             report_human_reasons=human_rs,
             report_dedup_skipped=int(ingest_res.skipped_candidates),
+            football_cycle_debug=cycle_dbg,
         )
 
     async def run_forever(

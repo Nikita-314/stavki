@@ -41,4 +41,6 @@ class AutoSignalCycleResult(BaseModel):
     report_human_reasons: list[str] = Field(default_factory=list)
     report_rejection_code: str | None = None
     report_dedup_skipped: int | None = None
+    football_cycle_debug: dict | None = None
+    """Structured football-only diagnostics for dry_run / logging (per-match rows, counts, samples)."""
 

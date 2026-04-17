@@ -44,7 +44,7 @@ from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
 from app.schemas.auto_signal import AutoSignalCycleResult
-from app.services.auto_signal_service import AutoSignalService
+from app.services.auto_signal_service import AutoSignalService, _football_debug_summary_lines
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.schemas.provider_client import ProviderClientConfig
@@ -657,8 +657,12 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             lines.append(f"(dedup skipped: {res.report_dedup_skipped})")
     if res.dry_run:
         lines.extend(["", "ℹ️ Режим прогона: без записи в БД и без отправки в канал."])
+    lines += _football_debug_summary_lines(res.football_cycle_debug)
     lines.extend(["", f"Сообщение цикла: {res.message}"])
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        return text[:3870] + "\n…(обрезано, полный JSON в логах [FOOTBALL][CYCLE_DEBUG_JSON])"
+    return text
 
 
 def _format_auto_signal_env_lines(settings: Settings, runtime: SignalRuntimeSettingsService) -> list[str]:

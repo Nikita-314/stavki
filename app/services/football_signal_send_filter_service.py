@@ -22,6 +22,10 @@ class FootballSendFilterStats:
     after_per_match_cap: int
     drop_reasons: dict[str, int]
     families_left: dict[str, int]
+    family_histogram_input: dict[str, int]
+    """Broad buckets on football candidates before whitelist (result, totals, btts, handicap, corners, exotic)."""
+    exotic_count_input: int
+    exotic_count_after_filter: int
     selected_per_match: list[str]
     live_matches: int
     near_matches: int
@@ -38,6 +42,38 @@ class FootballSignalSendFilterService:
     MAX_SIGNALS_PER_MATCH = 1
     NEAR_MATCH_HOURS = 6.0
     MAX_PREMATCH_HOURS = 24.0
+
+    @staticmethod
+    def is_corner_market(candidate: ProviderSignalCandidate) -> bool:
+        label = str(getattr(getattr(candidate, "market", None), "market_label", "") or "").lower()
+        mtype = str(getattr(getattr(candidate, "market", None), "market_type", "") or "").lower()
+        blob = f"{label} {mtype}"
+        return "corner" in blob or "углов" in blob
+
+    def broad_family_histogram(self, candidates: list[ProviderSignalCandidate]) -> tuple[dict[str, int], int]:
+        """Returns (bucket_counts, exotic_count) for diagnostics; corners are counted separately from get_market_family."""
+        buckets = {"result": 0, "totals": 0, "btts": 0, "handicap": 0, "corners": 0, "exotic": 0}
+        exotic_only = 0
+        for candidate in candidates:
+            if self.is_corner_market(candidate):
+                buckets["corners"] += 1
+                continue
+            family = self.get_market_family(candidate)
+            if family in {"result", "double_chance"}:
+                buckets["result"] += 1
+            elif family == "totals":
+                buckets["totals"] += 1
+            elif family == "btts":
+                buckets["btts"] += 1
+            elif family == "handicap":
+                buckets["handicap"] += 1
+            elif family in self._ALLOWED_AUTO_FAMILIES | self._SOFT_ALLOWED_AUTO_FAMILIES:
+                buckets["exotic"] += 1
+                exotic_only += 1
+            else:
+                buckets["exotic"] += 1
+                exotic_only += 1
+        return buckets, exotic_only
 
     _ALLOWED_AUTO_FAMILIES = {"result", "double_chance", "totals", "btts", "handicap"}
     _SOFT_ALLOWED_AUTO_FAMILIES = {"combo"}
@@ -94,6 +130,7 @@ class FootballSignalSendFilterService:
             if getattr(getattr(candidate, "match", None), "sport", None) == SportType.FOOTBALL
         ]
         before = len(football_candidates)
+        family_histogram_input, exotic_count_input = self.broad_family_histogram(football_candidates)
         logger.info("[FOOTBALL][FILTER] incoming candidates: %s", before)
         live_matches, near_matches, too_far_matches = self._summarize_match_timing(football_candidates)
         logger.info(
@@ -146,6 +183,7 @@ class FootballSignalSendFilterService:
         for candidate in capped:
             family = self.get_market_family(candidate)
             families_left[family] = families_left.get(family, 0) + 1
+        _, exotic_after = self.broad_family_histogram(capped)
         logger.info(
             "[FOOTBALL][FILTER] families left: %s",
             ", ".join(f"{family}={count}" for family, count in sorted(families_left.items())) or "—",
@@ -177,12 +215,51 @@ class FootballSignalSendFilterService:
                 after_per_match_cap=len(capped),
                 drop_reasons=dict(drop_reasons),
                 families_left=families_left,
+                family_histogram_input=family_histogram_input,
+                exotic_count_input=exotic_count_input,
+                exotic_count_after_filter=exotic_after,
                 selected_per_match=selected_per_match,
                 live_matches=live_matches,
                 near_matches=near_matches,
                 too_far_matches_dropped=too_far_matches,
             ),
         )
+
+    def per_event_send_filter_failure(
+        self,
+        candidates: list[ProviderSignalCandidate],
+        *,
+        surviving_event_ids: set[str],
+    ) -> dict[str, str]:
+        """For football events not in surviving_event_ids, best-effort primary failure code for diagnostics."""
+        football_candidates = [
+            c
+            for c in candidates
+            if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL
+        ]
+        by_event: dict[str, list[ProviderSignalCandidate]] = {}
+        for c in football_candidates:
+            eid = str(getattr(getattr(c, "match", None), "external_event_id", "") or "")
+            if not eid:
+                continue
+            by_event.setdefault(eid, []).append(c)
+
+        out: dict[str, str] = {}
+        for eid, subs in by_event.items():
+            if eid in surviving_event_ids:
+                continue
+            reasons: list[str | None] = []
+            for c in subs:
+                ok, reason = self._is_allowed_for_auto_send(c)
+                if not ok and reason:
+                    reasons.append(reason)
+            if reasons and all(r == "too_far_in_time" for r in reasons):
+                out[eid] = "too_far_in_time"
+            elif reasons:
+                out[eid] = "send_filter_other"
+            else:
+                out[eid] = "send_filter_unknown"
+        return out
 
     def get_market_family(self, candidate: ProviderSignalCandidate) -> str:
         market_type = str(getattr(getattr(candidate, "market", None), "market_type", "") or "").strip().lower()
