@@ -15,7 +15,8 @@ from app.services.sanity_check_service import SanityCheckService
 from app.services.winline_final_signal_service import WinlineFinalSignalService
 from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
 from app.services.winline_manual_payload_service import WinlineManualPayloadService
-from app.services.winline_settlement_demo_service import _map_sport, _parse_dt, normalize_winline_line_payload
+from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
+from app.services.winline_settlement_demo_service import _map_sport, _parse_dt
 from app.services.winline_signal_delivery_demo_service import WinlineSignalDeliveryDemoService
 
 
@@ -25,6 +26,7 @@ class WinlineManualCycleService:
     def __init__(self) -> None:
         self._manual = WinlineManualPayloadService()
         self._storage = WinlineManualFileStorageService()
+        self._bridge = WinlineRawLineBridgeService()
         self._final = WinlineFinalSignalService()
         self._delivery = WinlineSignalDeliveryDemoService()
         self._adapter = AdapterIngestionService()
@@ -129,10 +131,13 @@ class WinlineManualCycleService:
         return "Следующий шаг: Winline file status или загрузите JSON."
 
     def _normalize_line_or_error(self, raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-        if "events" not in raw or "markets" not in raw:
-            return None, "manual_line_payload_not_supported_shape"
         try:
-            return normalize_winline_line_payload(raw), None
+            normalized = self._bridge.normalize_raw_winline_line_payload(raw)
+            if not (normalized.get("events") or []):
+                return None, "no_valid_events"
+            if not (normalized.get("markets") or []):
+                return None, "no_supported_markets"
+            return normalized, None
         except Exception as exc:  # noqa: BLE001
             return None, f"normalize_line: {exc!s}"
 

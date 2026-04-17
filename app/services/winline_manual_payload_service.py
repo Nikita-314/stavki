@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.adapter_ingestion_service import AdapterIngestionService
-from app.services.winline_settlement_demo_service import normalize_winline_line_payload
+from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
 
 
 def _repo_root() -> Path:
@@ -80,17 +80,22 @@ class WinlineManualPayloadService:
         return data, None
 
     def preview_line_payload(self) -> dict[str, Any]:
-        """Summary for Telegram / diagnostics; uses `GenericOddsAdapter` when shape fits."""
+        """Summary for Telegram / diagnostics; supports normalized and raw Winline-ish shapes."""
         raw, err = self.load_line_payload()
         exists = self.line_payload_exists()
+        bridge = WinlineRawLineBridgeService()
         base: dict[str, Any] = {
             "ok": False,
             "payload_exists": exists,
             "root_type": None,
             "top_level_keys": [],
+            "detected_shape": "unsupported",
+            "raw_events_count": None,
             "events_count": None,
             "lines_count": None,
             "championships_count": None,
+            "normalized_events_count": None,
+            "normalized_markets_count": None,
             "preview_candidates": None,
             "ingestible_shape": False,
             "error": err,
@@ -102,27 +107,30 @@ class WinlineManualPayloadService:
 
         base["root_type"] = _root_type_name(raw)
         base["top_level_keys"] = sorted(raw.keys())
+        base["detected_shape"] = bridge.detect_payload_shape(raw)
+        base["raw_events_count"] = _len_if_list(raw, "events")
         base["events_count"] = _len_if_list(raw, "events")
         base["lines_count"] = _len_if_list(raw, "lines")
         base["championships_count"] = _len_if_list(raw, "championships")
 
-        if "events" in raw and "markets" in raw:
-            base["ingestible_shape"] = True
-            try:
-                normalized = normalize_winline_line_payload(raw)
-                ar = AdapterIngestionService().preview_payload(normalized)
-                base["preview_candidates"] = len(ar.candidates)
-                base["ok"] = True
-                base["error"] = None
-            except Exception as exc:  # noqa: BLE001
-                base["ok"] = False
-                base["preview_candidates"] = None
-                base["error"] = f"adapter_preview: {exc!s}"
-        else:
+        try:
+            normalized = bridge.normalize_raw_winline_line_payload(raw)
+            base["normalized_events_count"] = len(normalized.get("events") or [])
+            base["normalized_markets_count"] = len(normalized.get("markets") or [])
+            ar = AdapterIngestionService().preview_payload(normalized)
+            base["preview_candidates"] = len(ar.candidates)
+            base["ingestible_shape"] = (
+                base["normalized_events_count"] > 0
+                and base["normalized_markets_count"] > 0
+                and base["preview_candidates"] is not None
+            )
+            base["ok"] = bool(base["ingestible_shape"])
+            base["error"] = None if base["ok"] else "manual_line_payload_incomplete"
+        except Exception as exc:  # noqa: BLE001
             base["ingestible_shape"] = False
             base["preview_candidates"] = None
             if base["error"] is None:
-                base["error"] = "manual_line_payload_not_supported_shape"
+                base["error"] = str(exc)
 
         return base
 
