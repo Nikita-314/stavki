@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from io import BytesIO
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from aiogram import Router
-from aiogram.filters import Command
+from aiogram import Bot, F, Router
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,6 +51,76 @@ from app.services.remote_smoke_service import RemoteSmokeService
 router = Router(name="debug")
 logger = logging.getLogger(__name__)
 
+# user_id -> "line" | "result" — ожидание JSON-документа после /winline_manual_upload_*
+_pending_manual_json_upload: dict[int, str] = {}
+
+_MAX_MANUAL_JSON_UPLOAD_BYTES = 5 * 1024 * 1024
+_SNIPPET_CHARS = 1200
+
+
+class _PendingManualJsonUploadFilter(BaseFilter):
+    """Только сообщения от пользователей, которым нужен приём manual JSON."""
+
+    async def __call__(self, message: Message) -> bool:
+        uid = message.from_user.id if message.from_user else None
+        return bool(uid and uid in _pending_manual_json_upload)
+
+
+def _format_manual_line_preview_lines() -> list[str]:
+    from app.services.winline_manual_cycle_service import WinlineManualCycleService
+
+    pv = WinlineManualCycleService().preview_manual_line()
+    lp = pv.get("line_preview") or {}
+    keys = lp.get("top_level_keys") or []
+    keys_s = ", ".join(keys[:15]) + ("…" if len(keys) > 15 else "")
+    lines = [
+        "📄 Winline manual — line preview",
+        f"- root: {lp.get('root_type')}",
+        f"- keys: {keys_s or '—'}",
+        f"- events: {lp.get('events_count') if lp.get('events_count') is not None else '—'}",
+        f"- lines: {lp.get('lines_count') if lp.get('lines_count') is not None else '—'}",
+        f"- championships: {lp.get('championships_count') if lp.get('championships_count') is not None else '—'}",
+        f"- ingestible: {_fmt_yes_no(bool(lp.get('ingestible_shape')))}",
+        f"- adapter candidates: {lp.get('preview_candidates') if lp.get('preview_candidates') is not None else '—'}",
+        f"- final signals (synth): {pv.get('final_signals_ready') if pv.get('final_signals_ready') is not None else '—'}",
+    ]
+    err = lp.get("error") or pv.get("error")
+    if err:
+        lines.append(f"- ошибка: {err}")
+    return lines
+
+
+def _format_manual_result_preview_lines() -> list[str]:
+    from app.services.winline_manual_cycle_service import WinlineManualCycleService
+
+    pr = WinlineManualCycleService().preview_manual_result()
+    rp = pr.get("result_preview") or {}
+    keys = rp.get("top_level_keys") or []
+    keys_s = ", ".join(keys[:15]) + ("…" if len(keys) > 15 else "")
+    lines = [
+        "📄 Winline manual — result preview",
+        f"- root: {rp.get('root_type')}",
+        f"- keys: {keys_s or '—'}",
+        f"- results rows: {rp.get('raw_results_count') if rp.get('raw_results_count') is not None else '—'}",
+    ]
+    if rp.get("error"):
+        lines.append(f"- ошибка: {rp['error']}")
+    return lines
+
+
+def _json_snippet_messages(title: str, text: str | None) -> list[str]:
+    if not text or not text.strip():
+        return [f"{title}\n(пусто)"]
+    t = text.strip()
+    if len(t) <= _SNIPPET_CHARS:
+        return [f"{title}\n{t}"]
+    chunk2 = t[_SNIPPET_CHARS : _SNIPPET_CHARS * 2]
+    suffix = "…" if len(t) > _SNIPPET_CHARS * 2 else ""
+    return [
+        f"{title}\n{t[:_SNIPPET_CHARS]}…",
+        f"… (продолжение)\n{chunk2}{suffix}",
+    ]
+
 
 def _text_is(*values: str):
     expected = {v.strip() for v in values}
@@ -76,6 +147,33 @@ def _fmt_decimal(v: Decimal | None) -> str:
 
 def _fmt_yes_no(v: bool) -> str:
     return "Да" if v else "Нет"
+
+
+def _chunk_answer_text(text: str, limit: int = 3800) -> list[str]:
+    """Split long debug text for Telegram (no huge single messages)."""
+    if len(text) <= limit:
+        return [text]
+    lines = text.split("\n")
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if buf and size + line_len > limit:
+            chunks.append("\n".join(buf))
+            buf = [line]
+            size = line_len
+        else:
+            buf.append(line)
+            size += line_len
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks or [""]
+
+
+async def _answer_long_message(message: Message, text: str) -> None:
+    for part in _chunk_answer_text(text):
+        await message.answer(part)
 
 
 def _utc_now() -> datetime:
@@ -2750,6 +2848,563 @@ async def cmd_demo_cycle_sport_scenario(message: Message, sessionmaker: async_se
             ]
         )
     )
+
+
+@router.message(Command("winline_manual_upload_line"))
+@router.message(_text_is("Winline upload line"))
+async def cmd_winline_manual_upload_line(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    uid = message.from_user.id if message.from_user else None
+    if uid is None:
+        return
+    _pending_manual_json_upload[uid] = "line"
+    await message.answer("📥 Пришлите JSON-файл line payload документом")
+
+
+@router.message(Command("winline_manual_upload_result"))
+@router.message(_text_is("Winline upload result"))
+async def cmd_winline_manual_upload_result(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    uid = message.from_user.id if message.from_user else None
+    if uid is None:
+        return
+    _pending_manual_json_upload[uid] = "result"
+    await message.answer("📥 Пришлите JSON-файл result payload документом")
+
+
+@router.message(Command("winline_manual_clear_line"))
+@router.message(_text_is("Winline clear line"))
+async def cmd_winline_manual_clear_line(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+    r = WinlineManualFileStorageService().clear_line_payload()
+    if r.get("ok"):
+        await message.answer("✅ line payload очищен")
+    else:
+        await message.answer(f"⚠️ Не удалось очистить line.\n{r.get('error')}")
+
+
+@router.message(Command("winline_manual_clear_result"))
+@router.message(_text_is("Winline clear result"))
+async def cmd_winline_manual_clear_result(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+    r = WinlineManualFileStorageService().clear_result_payload()
+    if r.get("ok"):
+        await message.answer("✅ result payload очищен")
+    else:
+        await message.answer(f"⚠️ Не удалось очистить result.\n{r.get('error')}")
+
+
+@router.message(Command("winline_manual_file_status"))
+@router.message(_text_is("Winline file status"))
+async def cmd_winline_manual_file_status(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+        st = WinlineManualFileStorageService().get_file_status()
+        lines = [
+            "📁 Winline manual files",
+            f"- line exists: {_fmt_yes_no(bool(st.get('line_exists')))}",
+            f"- line size: {st.get('line_size_bytes')} B",
+            f"- line readable: {_fmt_yes_no(bool(st.get('line_readable')))}",
+            f"- line keys: {', '.join(st.get('line_keys') or []) or '—'}",
+            f"- result exists: {_fmt_yes_no(bool(st.get('result_exists')))}",
+            f"- result size: {st.get('result_size_bytes')} B",
+            f"- result readable: {_fmt_yes_no(bool(st.get('result_readable')))}",
+            f"- result keys: {', '.join(st.get('result_keys') or []) or '—'}",
+        ]
+        if st.get("line_error"):
+            lines.append(f"- line err: {st['line_error']}")
+        if st.get("result_error"):
+            lines.append(f"- result err: {st['result_error']}")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Статус файлов недоступен.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_manual_show_line"))
+@router.message(_text_is("Winline show line"))
+async def cmd_winline_manual_show_line(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+    text = WinlineManualFileStorageService().read_line_payload_text()
+    for part in _json_snippet_messages("📄 line payload snippet", text):
+        await message.answer(part)
+
+
+@router.message(Command("winline_manual_show_result"))
+@router.message(_text_is("Winline show result"))
+async def cmd_winline_manual_show_result(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+    text = WinlineManualFileStorageService().read_result_payload_text()
+    for part in _json_snippet_messages("📄 result payload snippet", text):
+        await message.answer(part)
+
+
+@router.message(F.document, _PendingManualJsonUploadFilter())
+async def handle_winline_manual_json_document(message: Message, bot: Bot) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        if message.from_user:
+            _pending_manual_json_upload.pop(message.from_user.id, None)
+        return
+    uid = message.from_user.id if message.from_user else None
+    if uid is None or not message.document:
+        return
+    kind = _pending_manual_json_upload.get(uid)
+    if not kind:
+        return
+
+    doc = message.document
+    if doc.file_size and doc.file_size > _MAX_MANUAL_JSON_UPLOAD_BYTES:
+        await message.answer(
+            f"⚠️ Файл слишком большой (лимит {_MAX_MANUAL_JSON_UPLOAD_BYTES // (1024 * 1024)} MB). Пришлите меньший JSON."
+        )
+        return
+
+    try:
+        buf = BytesIO()
+        await bot.download(doc, destination=buf)
+        data = buf.getvalue()
+    except Exception as exc:
+        await message.answer(f"⚠️ Не удалось скачать файл.\nКратко: {exc!s}")
+        return
+
+    if len(data) > _MAX_MANUAL_JSON_UPLOAD_BYTES:
+        await message.answer("⚠️ После скачивания файл всё ещё слишком большой.")
+        return
+
+    fname = (doc.file_name or "").strip().lower()
+    if fname and not fname.endswith(".json"):
+        await message.answer(
+            "ℹ️ Имя файла не .json — пробуем распарсить содержимое как JSON."
+        )
+
+    from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+    storage = WinlineManualFileStorageService()
+    if kind == "line":
+        res = storage.save_line_payload_bytes(data)
+    else:
+        res = storage.save_result_payload_bytes(data)
+
+    if not res.get("ok"):
+        await message.answer(
+            "\n".join(
+                [
+                    "⚠️ JSON не сохранён (ошибка валидации). Старый файл не изменён.",
+                    f"- причина: {res.get('error')}",
+                    "Пришлите исправленный файл или начните заново командой загрузки.",
+                ]
+            )
+        )
+        return
+
+    _pending_manual_json_upload.pop(uid, None)
+
+    keys = res.get("top_level_keys") or []
+    keys_s = ", ".join(keys[:20]) + ("…" if len(keys) > 20 else "")
+    await message.answer(
+        "\n".join(
+            [
+                "✅ Файл сохранён",
+                f"- путь: {res.get('path')}",
+                f"- размер: {res.get('bytes')} B",
+                f"- top-level: {res.get('top_level_type')}",
+                f"- keys: {keys_s or '—'}",
+            ]
+        )
+    )
+    if kind == "line":
+        await message.answer("\n".join(_format_manual_line_preview_lines()))
+    else:
+        await message.answer("\n".join(_format_manual_result_preview_lines()))
+
+
+@router.message(Command("winline_manual_status"))
+@router.message(_text_is("Winline manual статус"))
+async def cmd_winline_manual_status(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_manual_payload_service import WinlineManualPayloadService
+
+        m = WinlineManualPayloadService()
+        settings = get_settings()
+        line_ex = m.line_payload_exists()
+        res_ex = m.result_payload_exists()
+        ld, le = m.load_line_payload()
+        rd, re = m.load_result_payload()
+        line_ok = ld is not None and le is None
+        res_ok = rd is not None and re is None
+        chat_ok = settings.signal_chat_id is not None
+        lines = [
+            "📁 Winline manual JSON",
+            f"- line file exists: {_fmt_yes_no(line_ex)}",
+            f"- result file exists: {_fmt_yes_no(res_ex)}",
+            f"- line payload readable: {_fmt_yes_no(line_ok)}",
+            f"- result payload readable: {_fmt_yes_no(res_ok)}",
+            f"- signal chat configured: {_fmt_yes_no(chat_ok)}",
+        ]
+        if le:
+            lines.append(f"- line load: {le}")
+        if re:
+            lines.append(f"- result load: {re}")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Статус manual недоступен.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_manual_line_preview"))
+@router.message(_text_is("Winline manual line"))
+async def cmd_winline_manual_line_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        await message.answer("\n".join(_format_manual_line_preview_lines()))
+    except Exception as exc:
+        await message.answer(f"⚠️ Превью line не получилось.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_manual_line_ingest"))
+@router.message(_text_is("Winline manual ingest"))
+async def cmd_winline_manual_line_ingest(
+    message: Message, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_manual_cycle_service import WinlineManualCycleService
+
+        r = await WinlineManualCycleService().ingest_manual_line(sessionmaker)
+        lines = [
+            "⬇️ Winline manual — line ingest",
+            f"- status: {r.get('status')}",
+            f"- created_signals: {r.get('created_signals')}",
+            f"- skipped_candidates: {r.get('skipped_candidates')}",
+            f"- created ids count: {len(r.get('created_signal_ids') or [])}",
+        ]
+        if r.get("error"):
+            lines.append(f"- ошибка: {r['error']}")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Ingest line не выполнен.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_manual_result_preview"))
+@router.message(_text_is("Winline manual result"))
+async def cmd_winline_manual_result_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        await message.answer("\n".join(_format_manual_result_preview_lines()))
+    except Exception as exc:
+        await message.answer(f"⚠️ Превью result не получилось.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_manual_result_process"))
+@router.message(_text_is("Winline manual process"))
+async def cmd_winline_manual_result_process(
+    message: Message, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_manual_cycle_service import WinlineManualCycleService
+
+        r = await WinlineManualCycleService().process_manual_result(sessionmaker)
+        bal = r.get("current_balance_rub")
+        bal_s = f"{bal:.2f} ₽" if isinstance(bal, Decimal) else (str(bal) if bal is not None else "—")
+        lines = [
+            "⚙️ Winline manual — result process",
+            f"- status: {r.get('status')}",
+            f"- raw_results rows: {r.get('raw_results')}",
+            f"- settled signals count: {len(r.get('settled_signal_ids') or [])}",
+            f"- wins / losses / voids: {r.get('wins')} / {r.get('losses')} / {r.get('voids')}",
+            f"- balance: {bal_s}",
+            f"- sanity issues: {r.get('sanity_issues_count')}",
+        ]
+        if r.get("error"):
+            lines.append(f"- ошибка: {r['error']}")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Обработка result не выполнена.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_manual_full_cycle"))
+@router.message(_text_is("Winline manual full"))
+async def cmd_winline_manual_full_cycle(
+    message: Message, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_manual_cycle_service import WinlineManualCycleService
+
+        data = await WinlineManualCycleService().run_manual_full_cycle(sessionmaker, message.bot, send_signals=True)
+        s = data.get("summary") or {}
+        rp = data.get("result_processing") or {}
+        bal = rp.get("current_balance_rub")
+        bal_s = f"{bal:.2f} ₽" if isinstance(bal, Decimal) else (str(bal) if bal is not None else "—")
+        send_r = data.get("send_result") or {}
+        lines = [
+            "🧪 Winline manual — full cycle",
+            f"- line ingest created: {s.get('line_ingest_created')}",
+            f"- final signals ready: {s.get('final_ready')}",
+            f"- messages sent: {s.get('messages_sent')}",
+            f"- result rows: {s.get('result_rows')}",
+            f"- settled count: {s.get('settled_ids_count')}",
+            f"- balance: {bal_s}",
+            f"- sanity issues: {s.get('sanity_issues')}",
+            f"- send status: {send_r.get('status')}",
+        ]
+        errs = data.get("errors") or []
+        if errs:
+            lines.append(f"- замечания: {'; '.join(errs)[:500]}")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Full cycle не завершён.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_demo_status"))
+@router.message(_text_is("Winline статус"))
+async def cmd_winline_demo_status(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_final_signal_service import WinlineFinalSignalService
+        from app.services.winline_live_signal_service import WinlineLiveSignalService
+        from app.services.winline_signal_delivery_demo_service import WinlineSignalDeliveryDemoService
+
+        settings = get_settings()
+        demo_cases = len(WinlineLiveSignalService().build_live_demo_inputs())
+        previews = WinlineFinalSignalService().build_all_previews()
+        final_ready = sum(1 for p in previews if p.has_signal)
+        sendable = len(WinlineSignalDeliveryDemoService()._get_sendable_previews())
+        signal_ok = settings.signal_chat_id is not None
+        token_ok = bool(settings.bot_token and str(settings.bot_token).strip())
+        lines = [
+            "🤖 Winline demo status",
+            f"- demo inputs cases: {demo_cases}",
+            f"- final signals ready: {final_ready}",
+            f"- sendable messages: {sendable}",
+            f"- signal chat configured: {_fmt_yes_no(signal_ok)}",
+            f"- bot token configured: {_fmt_yes_no(token_ok)}",
+            "- settlement demo available: Да",
+            "- manual delivery available: Да",
+        ]
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Не удалось собрать статус.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_demo_preview"))
+@router.message(_text_is("Winline превью"))
+async def cmd_winline_demo_preview(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_final_signal_service import WinlineFinalSignalService
+        from app.services.winline_telegram_formatter_service import WinlineTelegramFormatterService
+
+        fmt = WinlineTelegramFormatterService()
+        previews = WinlineFinalSignalService().build_all_previews()
+        sendable = [p for p in previews if p.has_signal and p.signal is not None]
+        n = len(sendable)
+        lines: list[str] = [f"🔎 Найдено сигналов: {n}", ""]
+        if n == 0:
+            lines.append("Сигналы не собраны. Все кейсы отфильтрованы.")
+            await _answer_long_message(message, "\n".join(lines))
+            return
+        for p in sendable:
+            s = p.signal
+            if s is None:
+                continue
+            lines.append(f"— {p.case_name}")
+            lines.append(fmt.format_compact_signal_text(s))
+            rc = ", ".join((s.live_reason_codes or [])[:3])
+            if len(s.live_reason_codes or []) > 3:
+                rc += "…"
+            stake_u = s.recommended_stake_units
+            su = f"{float(stake_u):.2f}" if stake_u is not None else "n/a"
+            ev = s.expected_value
+            evs = f"{float(ev):.4f}" if ev is not None else "n/a"
+            lines.append(f"  live: {rc or '—'} | stake: {su}u | EV: {evs}")
+            lines.append("")
+        await _answer_long_message(message, "\n".join(lines).rstrip())
+    except Exception as exc:
+        await message.answer(f"⚠️ Превью недоступно.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_demo_send"))
+@router.message(_text_is("Winline отправка"))
+async def cmd_winline_demo_send(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_signal_delivery_demo_service import WinlineSignalDeliveryDemoService
+
+        res = await WinlineSignalDeliveryDemoService().send_demo_messages(message.bot)
+        st = res.get("status")
+        if st == "skipped_no_signal_chat":
+            await message.answer(
+                "\n".join(
+                    [
+                        "⚠️ Отправка пропущена",
+                        "- причина: SIGNAL_CHAT_ID не настроен",
+                    ]
+                )
+            )
+            return
+        if st == "no_sendable_messages":
+            await message.answer(
+                "\n".join(
+                    [
+                        "⚠️ Отправка пропущена",
+                        "- причина: нет sendable-сообщений (все кейсы отфильтрованы)",
+                    ]
+                )
+            )
+            return
+        chat_id = res.get("chat_id")
+        sent = int(res.get("sent") or 0)
+        await message.answer(
+            "\n".join(
+                [
+                    "✅ Demo-сигналы отправлены",
+                    f"- отправлено: {sent}",
+                    f"- chat_id: {chat_id}",
+                ]
+            )
+        )
+    except Exception as exc:
+        await message.answer(f"⚠️ Отправка не удалась.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_demo_settlement"))
+@router.message(_text_is("Winline settlement"))
+async def cmd_winline_demo_settlement(
+    message: Message, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    try:
+        from app.services.winline_settlement_demo_service import WinlineSettlementDemoService
+
+        data = await WinlineSettlementDemoService().run_demo_and_collect(sessionmaker)
+        err = data.get("error")
+        bal = data.get("current_balance_rub")
+        bal_s = f"{bal:.2f} ₽" if isinstance(bal, Decimal) else (str(bal) if bal is not None else "n/a")
+        lines = [
+            "📦 Winline settlement demo",
+            f"- preview candidates: {data.get('preview_candidates')}",
+            f"- created signals: {data.get('created_signals')}",
+            f"- settled signals: {len(data.get('settled_signal_ids') or [])}",
+            f"- wins / losses / voids: {data.get('wins')} / {data.get('losses')} / {data.get('voids')}",
+            f"- balance: {bal_s}",
+            f"- sanity issues: {data.get('sanity_issues_count')}",
+            f"- intersection event ids: {', '.join(data.get('intersection_event_ids') or []) or '—'}",
+        ]
+        if err:
+            lines.insert(1, f"- ошибка: {err}")
+        if data.get("ok") is False and not err:
+            lines.insert(1, "- статус: частичный сбой (см. лог)")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        await message.answer(f"⚠️ Settlement demo не выполнен.\nКратко: {exc!s}")
+
+
+@router.message(Command("winline_demo_full_cycle"))
+@router.message(_text_is("Winline full cycle"))
+async def cmd_winline_demo_full_cycle(
+    message: Message, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    from app.services.winline_final_signal_service import WinlineFinalSignalService
+    from app.services.winline_settlement_demo_service import WinlineSettlementDemoService
+    from app.services.winline_signal_delivery_demo_service import WinlineSignalDeliveryDemoService
+
+    steps: list[str] = []
+    final_ready = 0
+    sent_n = 0
+    data: dict | None = None
+
+    try:
+        previews = WinlineFinalSignalService().build_all_previews()
+        final_ready = sum(1 for p in previews if p.has_signal)
+    except Exception as exc:
+        steps.append(f"final: {exc!s}")
+
+    try:
+        send_res = await WinlineSignalDeliveryDemoService().send_demo_messages(message.bot)
+        if send_res.get("status") == "ok":
+            sent_n = int(send_res.get("sent") or 0)
+        else:
+            steps.append(f"send: {send_res.get('status')} — {send_res.get('message') or ''}".strip())
+    except Exception as exc:
+        steps.append(f"send: {exc!s}")
+
+    try:
+        data = await WinlineSettlementDemoService().run_demo_and_collect(sessionmaker)
+    except Exception as exc:
+        steps.append(f"settlement: {exc!s}")
+
+    err_all = None
+    if data:
+        err_all = data.get("error")
+    if steps:
+        err_all = "; ".join(steps + ([err_all] if err_all else []))
+
+    bal = (data or {}).get("current_balance_rub")
+    bal_s = f"{bal:.2f} ₽" if isinstance(bal, Decimal) else (str(bal) if bal is not None else "n/a")
+
+    lines = [
+        "🚀 Winline full cycle completed",
+        f"- final signals ready: {final_ready}",
+        f"- messages sent: {sent_n}",
+        f"- created signals: {(data or {}).get('created_signals')}",
+        f"- settled signals: {len((data or {}).get('settled_signal_ids') or [])}",
+        f"- wins / losses / voids: {(data or {}).get('wins')} / {(data or {}).get('losses')} / {(data or {}).get('voids')}",
+        f"- balance: {bal_s}",
+        f"- sanity issues: {(data or {}).get('sanity_issues_count')}",
+    ]
+    if err_all:
+        lines.append(f"- этапы / ошибки: {err_all}")
+    await message.answer("\n".join(lines))
 
 
 @router.message()
