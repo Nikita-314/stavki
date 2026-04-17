@@ -36,7 +36,7 @@ class AutoSignalService:
         diagnostics = SignalRuntimeDiagnosticsService()
         active_sports = [sport.value for sport in runtime.active_sports()]
         diagnostics.update(
-            active_mode="football" if active_sports == [SportType.FOOTBALL.value] else "mixed",
+            active_mode="football" if SportType.FOOTBALL.value in active_sports else "inactive",
             football_source=self._detect_provider_name(settings),
             football_fallback_source="manual_winline_json",
             preview_only=bool(settings.auto_signal_preview_only),
@@ -66,10 +66,10 @@ class AutoSignalService:
                 source_name=self._detect_provider_name(settings),
                 rejection_reason="delivery skipped: paused",
             )
-        if not active_sports:
-            logger.info("[FOOTBALL] fetch skipped: no active sports selected")
+        if not runtime.is_sport_enabled(SportType.FOOTBALL):
+            logger.info("[FOOTBALL] fetch skipped: football disabled in runtime")
             diagnostics.update(
-                last_fetch_status="no_active_sports",
+                last_fetch_status="football_disabled",
                 note="filtered by runtime sport settings",
             )
             return AutoSignalCycleResult(
@@ -82,33 +82,11 @@ class AutoSignalService:
                 skipped_candidates_count=0,
                 notifications_sent_count=0,
                 preview_only=settings.auto_signal_preview_only,
-                message="no_active_sports",
+                message="football_disabled",
                 runtime_paused=False,
                 runtime_active_sports=active_sports,
                 source_name=self._detect_provider_name(settings),
                 rejection_reason="filtered by runtime sport settings",
-            )
-        if active_sports != [SportType.FOOTBALL.value]:
-            logger.info("[FOOTBALL] fetch skipped: active sports are not football-only: %s", active_sports)
-            diagnostics.update(
-                last_fetch_status="sport_mismatch",
-                note="runtime is not focused on football-only mode",
-            )
-            return AutoSignalCycleResult(
-                endpoint=None,
-                fetch_ok=False,
-                preview_candidates=0,
-                preview_skipped_items=0,
-                created_signal_ids=[],
-                created_signals_count=0,
-                skipped_candidates_count=0,
-                notifications_sent_count=0,
-                preview_only=settings.auto_signal_preview_only,
-                message="football_only_mode_required",
-                runtime_paused=False,
-                runtime_active_sports=active_sports,
-                source_name=self._detect_provider_name(settings),
-                rejection_reason="runtime is not focused on football-only mode",
             )
         config = self._build_provider_client_config(settings)
         inferred_sport = self._infer_provider_sport(config) if config is not None else None
@@ -318,6 +296,20 @@ class AutoSignalService:
             )
 
         candidates_to_ingest = filtered_candidates
+        if fallback_used:
+            candidates_to_ingest = [
+                c.model_copy(
+                    update={
+                        "notes": "fallback_json",
+                        "feature_snapshot_json": {
+                            **(c.feature_snapshot_json or {}),
+                            "runtime_source_kind": "fallback_json",
+                            "runtime_primary_source": source_name,
+                        },
+                    }
+                )
+                for c in candidates_to_ingest
+            ]
         omitted_by_limit = 0
         limit = settings.auto_signal_max_created_per_cycle
         if limit is not None and limit > 0:
@@ -478,6 +470,19 @@ class AutoSignalService:
             c
             for c in preview.candidates
             if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL
+        ]
+        football_candidates = [
+            c.model_copy(
+                update={
+                    "notes": "fallback_json",
+                    "feature_snapshot_json": {
+                        **(c.feature_snapshot_json or {}),
+                        "runtime_source_kind": "fallback_json",
+                        "runtime_primary_source": "the_odds_api",
+                    },
+                }
+            )
+            for c in football_candidates
         ]
         preview = preview.model_copy(
             update={

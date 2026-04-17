@@ -14,6 +14,13 @@ from app.services.winline_final_signal_service import WinlineFinalSignal, Winlin
 class WinlineTelegramFormatterService:
     """Format `WinlineFinalSignal` into short Telegram-friendly messages."""
 
+    _TEAM_TRANSLIT = {
+        "Zenit": "Зенит",
+        "Spartak": "Спартак",
+        "Liverpool": "Ливерпуль",
+        "Everton": "Эвертон",
+    }
+
     def _fmt_decimal(self, value: Decimal, *, places: int = 4) -> str:
         q = Decimal("1").scaleb(-places)
         return str(value.quantize(q))
@@ -40,65 +47,107 @@ class WinlineTelegramFormatterService:
 
     def _selection_humanize(self, selection: str) -> str:
         s = (selection or "").strip().upper()
-        if s in {"HOME", "AWAY", "DRAW", "OVER", "UNDER", "YES", "NO"}:
-            return s
+        if s == "HOME":
+            return "Победа хозяев"
+        if s == "AWAY":
+            return "Победа гостей"
+        if s == "DRAW":
+            return "Ничья"
+        if s == "YES":
+            return "Да"
+        if s == "NO":
+            return "Нет"
         return (selection or "").strip() or "?"
+
+    def _humanize_team(self, value: str | None) -> str:
+        text = (value or "").strip()
+        return self._TEAM_TRANSLIT.get(text, text)
+
+    def _match_name(self, signal: WinlineFinalSignal) -> str:
+        home = self._humanize_team(signal.home_team)
+        away = self._humanize_team(signal.away_team)
+        if home and away:
+            return f"{home} — {away}"
+        text = (signal.match_name or "").strip()
+        return text.replace(" vs ", " — ")
+
+    def _humanize_bet(self, signal: WinlineFinalSignal) -> str:
+        mt = (signal.market_kind or "").strip().lower()
+        ml = (signal.market_label or "").strip()
+        sel = (signal.selection or "").strip()
+        sel_l = sel.lower()
+        number = None
+        for token in f"{ml} {sel}".replace(",", ".").split():
+            try:
+                float(token)
+                number = token
+                break
+            except Exception:
+                continue
+        if "total" in mt or "тотал" in ml.lower():
+            if "under" in sel_l or "меньше" in sel_l:
+                return f"Тотал меньше {number}".strip()
+            if "over" in sel_l or "больше" in sel_l:
+                return f"Тотал больше {number}".strip()
+        if "match" in mt or "result" in ml.lower():
+            return self._selection_humanize(sel)
+        if "btts" in mt or "both" in ml.lower():
+            return f"Обе забьют: {self._selection_humanize(sel).lower()}"
+        return f"{ml}: {self._selection_humanize(sel)}".strip(": ")
+
+    def _source_badge(self, signal: WinlineFinalSignal) -> str | None:
+        source = (signal.source_kind or "").strip().lower()
+        if source in {"fallback_json", "fallback"}:
+            return "🧪 Режим: fallback JSON"
+        if source == "manual":
+            return "📂 Режим: manual JSON"
+        if source == "demo":
+            return "🧪 Источник: тестовый demo"
+        return None
 
     def format_signal_text(self, signal: WinlineFinalSignal) -> str:
         """Full readable message with emojis; no markdown tables, no raw_json dump."""
-        sp = (signal.sport or "unknown").strip()
-        emoji = self._sport_emoji(sp)
-        sel_h = self._selection_humanize(signal.selection)
-
+        source_badge = self._source_badge(signal)
         lines: list[str] = [
-            "🚨 Live signal",
-            "",
-            f"{emoji} Матч: {signal.match_name}",
-            f"🎯 Рынок: {signal.market_label}",
-            f"✅ Выбор: {sel_h}",
-            f"💸 Коэффициент: {self._fmt_optional_decimal(signal.odds_value, places=2)}",
-            "",
-            "📊 Оценка:",
-            f"• Implied probability: {self._fmt_optional_decimal(signal.implied_prob)}",
-            f"• Estimated probability: {self._fmt_optional_decimal(signal.estimated_prob)}",
-            f"• Edge: {self._fmt_optional_decimal(signal.edge)}",
-            f"• EV: {self._fmt_optional_decimal(signal.expected_value)}",
-            f"• Confidence: {self._fmt_optional_decimal(signal.confidence_score)}",
-            "",
-            "💰 Ставка:",
+            "🚨 Футбольный сигнал",
         ]
+        if source_badge:
+            lines.extend(["", source_badge])
+        lines.extend(
+            [
+                "",
+                f"🏆 Турнир: {(signal.tournament_name or 'Не указан').strip()}",
+                f"⚽ Матч: {self._match_name(signal)}",
+                f"🎯 Ставка: {self._humanize_bet(signal)}",
+                f"💰 Коэффициент: {self._fmt_optional_decimal(signal.odds_value, places=2)}",
+                "🏢 Букмекер: Winline",
+            ]
+        )
 
-        lines.append(f"• Units: {self._fmt_optional_decimal(signal.recommended_stake_units, places=2)}")
-        kf = signal.recommended_stake_fraction
-        if kf is not None:
-            lines.append(f"• Kelly fraction: {self._fmt_optional_decimal(kf)}")
-        else:
-            lines.append("• Kelly fraction: n/a")
-        sm = signal.sizing_method or "n/a"
-        lines.append(f"• Sizing: {sm}")
-
-        lines.extend(["", "🧠 Причина:"])
         expl = (signal.short_explanation or "").strip()
-        lines.append(expl if expl else "—")
+        if expl:
+            lines.extend(["", "📌 Основание:", expl])
 
         return "\n".join(lines)
 
     def format_compact_signal_text(self, signal: WinlineFinalSignal) -> str:
         """One-screen alert: summary line + key metrics."""
-        sp = (signal.sport or "unknown").strip().upper()
-        emoji = self._sport_emoji(signal.sport or "")
-        sel_h = self._selection_humanize(signal.selection)
-        line1 = f"{emoji} {sp} | {signal.match_name}"
-        line2 = f"{signal.market_label} {sel_h} @ {self._fmt_optional_decimal(signal.odds_value, places=2)}"
-        edge = self._fmt_optional_decimal(signal.edge)
-        ev = self._fmt_optional_decimal(signal.expected_value)
-        stake = self._fmt_optional_decimal(signal.recommended_stake_units, places=2)
-        line3 = f"Edge: {edge} | EV: {ev} | Stake: {stake}u"
-        return "\n".join([line1, line2, line3])
+        header = f"🚨 {self._match_name(signal)}"
+        tournament = (signal.tournament_name or "").strip()
+        bet = self._humanize_bet(signal)
+        odds = self._fmt_optional_decimal(signal.odds_value, places=2)
+        lines = [header]
+        if tournament:
+            lines.append(f"🏆 {tournament}")
+        lines.append(f"🎯 {bet} @ {odds}")
+        badge = self._source_badge(signal)
+        if badge:
+            lines.append(badge)
+        return "\n".join(lines)
 
     def format_skip_text(self, case_name: str, skip_reason: str | None) -> str:
         reason = (skip_reason or "unknown").strip()
-        return f"⚪ {case_name}\nNo signal: {reason}"
+        return f"⚪ {case_name}\nСигнал не собран: {reason}"
 
     def preview_formatter_demo(self) -> None:
         from app.services.winline_live_signal_service import WinlineLiveSignalService

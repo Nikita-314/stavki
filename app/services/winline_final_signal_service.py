@@ -18,6 +18,10 @@ class WinlineFinalSignal(BaseModel):
     event_external_id: str
     sport: str
     match_name: str
+    tournament_name: str | None = None
+    home_team: str | None = None
+    away_team: str | None = None
+    source_kind: str | None = None
     market_kind: str | None = None
     market_label: str
     selection: str
@@ -109,6 +113,7 @@ class WinlineFinalSignalService:
             "confidence_score": str(conf) if conf is not None else None,
             "value_is_positive": bool(value_assessment.is_value_bet),
             "sizing_method": stake_recommendation.sizing_method,
+            "source_kind": str(getattr(state, "source_kind", "") or "demo"),
         }
 
         match_name = str(getattr(state, "match_name", "") or getattr(candidate, "match_name", ""))
@@ -127,6 +132,10 @@ class WinlineFinalSignalService:
             event_external_id=str(getattr(candidate, "event_external_id", "")),
             sport=sport,
             match_name=match_name,
+            tournament_name=str(getattr(state, "tournament_name", "") or getattr(candidate, "tournament_name", "") or ""),
+            home_team=str(getattr(state, "home_team", "") or getattr(candidate, "home_team", "") or ""),
+            away_team=str(getattr(state, "away_team", "") or getattr(candidate, "away_team", "") or ""),
+            source_kind=str(getattr(state, "source_kind", "") or raw_json.get("source_kind") or "demo"),
             market_kind=getattr(candidate, "market_kind", None),
             market_label=str(getattr(candidate, "market_label", "")),
             selection=str(getattr(candidate, "selection", "")),

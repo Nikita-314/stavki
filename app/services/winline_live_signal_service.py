@@ -24,12 +24,19 @@ class WinlineDemoCandidate(BaseModel):
     selection: str
     odds_value: Decimal
     implied_prob: Decimal | None = None
+    tournament_name: str | None = None
+    home_team: str | None = None
+    away_team: str | None = None
 
 
 class WinlineDemoLiveState(BaseModel):
     event_external_id: str
     sport: str
     match_name: str
+    tournament_name: str | None = None
+    home_team: str | None = None
+    away_team: str | None = None
+    source_kind: str = "demo"
 
 
 class WinlineDemoLiveFeatures(BaseModel):
@@ -69,6 +76,10 @@ class WinlineLiveSignalService:
                 event_external_id=c1.event_external_id,
                 sport="football",
                 match_name="Zenit vs Spartak",
+                tournament_name="РПЛ",
+                home_team="Zenit",
+                away_team="Spartak",
+                source_kind="demo",
             ),
             "live_features": WinlineDemoLiveFeatures(is_home_leading=True, is_away_leading=False),
             "live_evaluation": WinlineDemoLiveEvaluation(
@@ -93,6 +104,10 @@ class WinlineLiveSignalService:
                 event_external_id=c2.event_external_id,
                 sport="football",
                 match_name="Liverpool vs Everton",
+                tournament_name="АПЛ",
+                home_team="Liverpool",
+                away_team="Everton",
+                source_kind="demo",
             ),
             "live_features": WinlineDemoLiveFeatures(is_home_leading=False, is_away_leading=True),
             "live_evaluation": WinlineDemoLiveEvaluation(
@@ -117,6 +132,10 @@ class WinlineLiveSignalService:
                 event_external_id=c3.event_external_id,
                 sport="cs2",
                 match_name="Team Spirit vs NAVI",
+                tournament_name="PGL CS2",
+                home_team="Team Spirit",
+                away_team="NAVI",
+                source_kind="demo",
             ),
             "live_features": WinlineDemoLiveFeatures(),
             "live_evaluation": WinlineDemoLiveEvaluation(
@@ -141,6 +160,10 @@ class WinlineLiveSignalService:
                 event_external_id=c4.event_external_id,
                 sport="dota2",
                 match_name="Team A vs Team B",
+                tournament_name="DreamLeague",
+                home_team="Team A",
+                away_team="Team B",
+                source_kind="demo",
             ),
             "live_features": WinlineDemoLiveFeatures(),
             "live_evaluation": WinlineDemoLiveEvaluation(
@@ -165,6 +188,10 @@ class WinlineLiveSignalService:
                 event_external_id=c5.event_external_id,
                 sport="football",
                 match_name="Demo vs Demo B",
+                tournament_name="Тестовый матч",
+                home_team="Demo",
+                away_team="Demo B",
+                source_kind="demo",
             ),
             "live_features": WinlineDemoLiveFeatures(is_home_leading=True, is_away_leading=False),
             "live_evaluation": WinlineDemoLiveEvaluation(
@@ -251,11 +278,22 @@ class WinlineLiveSignalService:
             selection=side,
             odds_value=odds,
             implied_prob=_implied(odds),
+            tournament_name=str(cand.match.tournament_name or ""),
+            home_team=str(cand.match.home_team or ""),
+            away_team=str(cand.match.away_team or ""),
         )
         state = WinlineDemoLiveState(
             event_external_id=wc.event_external_id,
             sport=sport_str,
             match_name=str(cand.match.match_name or "?"),
+            tournament_name=str(cand.match.tournament_name or ""),
+            home_team=str(cand.match.home_team or ""),
+            away_team=str(cand.match.away_team or ""),
+            source_kind=str(
+                cand.feature_snapshot_json.get("runtime_source_kind")
+                or cand.notes
+                or "live"
+            ),
         )
 
         if sport == SportType.FOOTBALL:
