@@ -99,6 +99,15 @@ class GenericOddsAdapter(BaseProviderAdapter):
                             "source_name": raw.source_name,
                             "raw_event_id": ev.external_event_id,
                             "raw_market_type": m.market_type,
+                            "source_market_type": m.market_type,
+                            "source_market_label": m.market_label,
+                            "source_selection": m.selection,
+                            "source_odds_value": str(m.odds_value),
+                            "source_section_name": m.section_name,
+                            "source_subsection_name": m.subsection_name,
+                            "source_bookmaker": m.bookmaker,
+                            "source_raw_market_json": m.raw_json,
+                            "adapter": "generic_odds",
                         },
                     )
                 )

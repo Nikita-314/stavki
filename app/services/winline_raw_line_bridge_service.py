@@ -336,22 +336,6 @@ class WinlineRawLineBridgeService:
         home = str(event.get("home_team", "")).strip()
         away = str(event.get("away_team", "")).strip()
 
-        for rule in WINLINE_SELECTION_RULES:
-            aliases = {str(x).lower() for x in (rule.get("aliases") or set())}
-            if rl and rl in aliases:
-                normalized = str(rule.get("normalized") or raw)
-                if normalized == "HOME":
-                    return home or normalized, str(rule.get("source") or "rule:selection")
-                if normalized == "AWAY":
-                    return away or normalized, str(rule.get("source") or "rule:selection")
-                if normalized == "DRAW":
-                    return "Draw", str(rule.get("source") or "rule:selection")
-                if normalized == "YES":
-                    return "Yes", str(rule.get("source") or "rule:selection")
-                if normalized == "NO":
-                    return "No", str(rule.get("source") or "rule:selection")
-                return normalized, str(rule.get("source") or "rule:selection")
-
         if market_type in {"1x2", "match_winner"}:
             if rl in {"1", "home", "п1"}:
                 return home, "fallback:winner_home"
@@ -386,6 +370,22 @@ class WinlineRawLineBridgeService:
             ft = str(line.get("freeTextR", "")).strip()
             if ft:
                 return ft, "fallback:freeTextR"
+
+        for rule in WINLINE_SELECTION_RULES:
+            aliases = {str(x).lower() for x in (rule.get("aliases") or set())}
+            if rl and rl in aliases:
+                normalized = str(rule.get("normalized") or raw)
+                if normalized == "HOME":
+                    return home or normalized, str(rule.get("source") or "rule:selection")
+                if normalized == "AWAY":
+                    return away or normalized, str(rule.get("source") or "rule:selection")
+                if normalized == "DRAW":
+                    return "Draw", str(rule.get("source") or "rule:selection")
+                if normalized == "YES":
+                    return "Yes", str(rule.get("source") or "rule:selection")
+                if normalized == "NO":
+                    return "No", str(rule.get("source") or "rule:selection")
+                return normalized, str(rule.get("source") or "rule:selection")
         return raw, "fallback:raw"
 
     def _map_section_name_from_raw(self, line: dict[str, Any], market_type: str) -> str:

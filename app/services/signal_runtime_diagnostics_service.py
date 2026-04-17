@@ -30,6 +30,7 @@ class SignalRuntimeDiagnosticsState:
     football_candidates_count: int = 0
     football_real_candidates_count: int = 0
     football_after_filter_count: int = 0
+    dropped_invalid_market_mapping_count: int = 0
     football_sent_count: int = 0
     final_signals_count: int = 0
     messages_sent_count: int = 0

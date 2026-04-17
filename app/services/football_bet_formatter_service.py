@@ -26,6 +26,7 @@ class FootballBetFormatterService:
     _UNDER_TOKENS = {"UNDER", "МЕНЬШЕ", "TM", "ТМ", "U"}
     _ODD_TOKENS = {"ODD", "НЕЧЕТ", "НЕЧЁТ", "НЕЧЕТНЫЙ", "НЕЧЁТНЫЙ"}
     _EVEN_TOKENS = {"EVEN", "ЧЕТ", "ЧЁТ", "ЧЕТНЫЙ", "ЧЁТНЫЙ"}
+    _SHORT_TOKEN_ALIASES = {"Y", "N", "O", "U"}
 
     def format_bet(
         self,
@@ -240,9 +241,9 @@ class FootballBetFormatterService:
             return "да"
         if token in self._NO_TOKENS:
             return "нет"
-        if any(alias in token for alias in self._YES_TOKENS):
+        if self._contains_alias_token(token, self._YES_TOKENS):
             return "да"
-        if any(alias in token for alias in self._NO_TOKENS):
+        if self._contains_alias_token(token, self._NO_TOKENS):
             return "нет"
         return None
 
@@ -252,9 +253,9 @@ class FootballBetFormatterService:
             return "нечёт"
         if token in self._EVEN_TOKENS:
             return "чёт"
-        if any(alias in token for alias in self._ODD_TOKENS):
+        if self._contains_alias_token(token, self._ODD_TOKENS):
             return "нечёт"
-        if any(alias in token for alias in self._EVEN_TOKENS):
+        if self._contains_alias_token(token, self._EVEN_TOKENS):
             return "чёт"
         return None
 
@@ -264,11 +265,23 @@ class FootballBetFormatterService:
             return "ТБ"
         if token in self._UNDER_TOKENS:
             return "ТМ"
-        if any(alias in token for alias in self._OVER_TOKENS):
+        if self._contains_alias_token(token, self._OVER_TOKENS):
             return "ТБ"
-        if any(alias in token for alias in self._UNDER_TOKENS):
+        if self._contains_alias_token(token, self._UNDER_TOKENS):
             return "ТМ"
         return None
+
+    def _contains_alias_token(self, token: str, aliases: set[str]) -> bool:
+        words = {part for part in re.split(r"[^A-ZА-Я0-9Ё]+", token) if part}
+        for alias in aliases:
+            alias_u = alias.upper()
+            if alias_u in self._SHORT_TOKEN_ALIASES:
+                if alias_u in words:
+                    return True
+                continue
+            if alias_u in token:
+                return True
+        return False
 
     def _format_total(
         self,

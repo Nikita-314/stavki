@@ -16,6 +16,7 @@ from app.schemas.provider_client import ProviderClientConfig
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.candidate_filter_service import CandidateFilterService
 from app.services.deduplication_service import DeduplicationService
+from app.services.football_signal_integrity_service import FootballSignalIntegrityService
 from app.services.ingestion_service import IngestionService
 from app.services.orchestration_service import OrchestrationService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
@@ -85,6 +86,7 @@ class AutoSignalService:
             football_candidates_count=0,
             football_real_candidates_count=0,
             football_after_filter_count=0,
+            dropped_invalid_market_mapping_count=0,
             football_sent_count=0,
         )
         if runtime.is_paused():
@@ -486,14 +488,32 @@ class AutoSignalService:
             candidates_to_ingest = send_filter_result.candidates
             diagnostics.update(football_after_filter_count=len(candidates_to_ingest))
         post_send_filter_count = len(candidates_to_ingest)
+        integrity_result = FootballSignalIntegrityService().validate_candidates(candidates_to_ingest)
+        candidates_to_ingest = integrity_result.valid_candidates
+        invalid_market_drops = len(integrity_result.dropped_checks)
+        diagnostics.update(
+            football_after_filter_count=len(candidates_to_ingest),
+            dropped_invalid_market_mapping_count=invalid_market_drops,
+        )
+        if invalid_market_drops:
+            logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_market_mapping=%s", invalid_market_drops)
+        post_integrity_count = len(candidates_to_ingest)
         if not candidates_to_ingest:
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_after_filter_count=0,
                 football_sent_count=0,
-                last_delivery_reason="football_send_filter_rejected_all",
-                note="football send filter rejected all signals",
+                last_delivery_reason=(
+                    "dropped_invalid_market_mapping"
+                    if invalid_market_drops
+                    else "football_send_filter_rejected_all"
+                ),
+                note=(
+                    "all selected football signals failed integrity check"
+                    if invalid_market_drops
+                    else "football send filter rejected all signals"
+                ),
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -502,7 +522,7 @@ class AutoSignalService:
                 preview_skipped_items=preview_skipped_items,
                 created_signal_ids=[],
                 created_signals_count=0,
-                skipped_candidates_count=max(0, len(filtered_candidates) - post_send_filter_count),
+                skipped_candidates_count=max(0, len(filtered_candidates) - post_integrity_count),
                 notifications_sent_count=0,
                 preview_only=False,
                 message="ok",
@@ -517,13 +537,17 @@ class AutoSignalService:
                 last_live_http_status=fetch_res.status_code,
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
-                rejection_reason="football send filter rejected all signals",
+                rejection_reason=(
+                    "dropped_invalid_market_mapping"
+                    if invalid_market_drops
+                    else "football send filter rejected all signals"
+                ),
             )
         omitted_by_limit = 0
         limit = settings.auto_signal_max_created_per_cycle
         if limit is not None and limit > 0:
             candidates_to_ingest = candidates_to_ingest[:limit]
-            omitted_by_limit = max(0, post_send_filter_count - len(candidates_to_ingest))
+            omitted_by_limit = max(0, post_integrity_count - len(candidates_to_ingest))
 
         logger.info("[FOOTBALL] final signals to send: %s", len(candidates_to_ingest))
         self._log_final_candidates(candidates_to_ingest)
@@ -556,7 +580,7 @@ class AutoSignalService:
             last_delivery_reason=(
                 None
                 if notifications_sent_count
-                else ("duplicate_in_db_or_no_new_signals" if post_send_filter_count > 0 else "no_created_signals")
+                else ("duplicate_in_db_or_no_new_signals" if post_integrity_count > 0 else "no_created_signals")
             ),
             note=None if ingest_res.created_signals else "no created football signals",
         )
