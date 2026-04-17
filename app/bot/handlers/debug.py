@@ -204,6 +204,9 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"📥 Последний fetch: {last_fetch}",
         f"📊 Raw events: {diag.get('raw_events_count') or 0}",
         f"🧠 Кандидатов: {diag.get('candidates_after_filter_count') or 0}",
+        f"⚽ football_candidates: {diag.get('football_candidates_count') or 0}",
+        f"⚽ football_after_filter: {diag.get('football_after_filter_count') or 0}",
+        f"⚽ football_sent: {diag.get('football_sent_count') or 0}",
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено: {diag.get('messages_sent_count') or 0}",
     ]

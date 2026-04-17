@@ -135,6 +135,13 @@ class NotificationService:
 
     async def send_signal_notification(self, bot: Bot, chat_id: int, report: SignalAnalyticsReport) -> None:
         text = self.format_signal_message(report)
+        signal = getattr(report, "signal", None)
+        logger.info(
+            "[FOOTBALL][SEND] sending message: match=%s market=%s odds=%s",
+            getattr(signal, "match_name", None),
+            getattr(signal, "market_label", None),
+            getattr(signal, "odds_at_signal", None),
+        )
         logger.info(
             "[WINLINE] send_message signal chat_id=%s signal_id=%s text_len=%s",
             chat_id,

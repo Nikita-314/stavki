@@ -36,6 +36,8 @@ class AutoSignalService:
         runtime = SignalRuntimeSettingsService()
         diagnostics = SignalRuntimeDiagnosticsService()
         active_sports = [sport.value for sport in runtime.active_sports()]
+        logger.info("[FOOTBALL] cycle started")
+        logger.info("[FOOTBALL] paused state: %s", str(runtime.is_paused()).upper())
         diagnostics.update(
             active_mode="football" if SportType.FOOTBALL.value in active_sports else "inactive",
             football_source=self._detect_provider_name(settings),
@@ -44,9 +46,12 @@ class AutoSignalService:
             fallback_used=False,
             last_error=None,
             note=None,
+            football_candidates_count=0,
+            football_after_filter_count=0,
+            football_sent_count=0,
         )
         if runtime.is_paused():
-            logger.info("[FOOTBALL] fetch skipped: paused")
+            logger.info("[FOOTBALL][BLOCK] skipped due to paused")
             diagnostics.update(
                 last_fetch_status="paused",
                 note="delivery skipped: paused",
@@ -144,6 +149,7 @@ class AutoSignalService:
         source_name = self._detect_provider_name(settings)
         fallback_used = False
         fallback_source_name = None
+        source_kind = "live"
 
         if fetch_res.ok and isinstance(fetch_res.payload, dict):
             payload = fetch_res.payload
@@ -180,6 +186,7 @@ class AutoSignalService:
                 payload = fallback["payload"]
                 fallback_used = True
                 fallback_source_name = "manual_winline_json"
+                source_kind = "fallback"
                 diagnostics.update(
                     last_fetch_status="fallback_manual_payload",
                     fallback_used=True,
@@ -228,13 +235,17 @@ class AutoSignalService:
         if preview is None:
             adapter_service = AdapterIngestionService()
             preview = adapter_service.preview_odds_style_payload(payload)
+        logger.info("[FOOTBALL] source: %s", source_kind)
         raw_events_count = int(preview.total_events)
         normalized_markets_count = int(preview.total_markets)
         preview_candidates = len(preview.candidates)
         preview_skipped_items = int(preview.skipped_items)
         candidates_before_filter = list(preview.candidates)
+        logger.info("[FOOTBALL] raw events fetched: %s", raw_events_count)
         if not candidates_before_filter:
             logger.info("[FOOTBALL] candidates before filter: 0 (no football events in payload)")
+        logger.info("[FOOTBALL] candidates total: %s", len(candidates_before_filter))
+        self._log_candidates_per_match(candidates_before_filter)
         runtime_candidates = self._filter_candidates_by_runtime(candidates_before_filter, runtime)
         filtered = CandidateFilterService().filter_candidates(
             runtime_candidates,
@@ -252,6 +263,7 @@ class AutoSignalService:
             normalized_markets_count=normalized_markets_count,
             candidates_before_filter_count=len(candidates_before_filter),
             candidates_after_filter_count=len(filtered_candidates),
+            football_candidates_count=len(candidates_before_filter),
             football_source=source_name,
             football_fallback_source=fallback_source_name,
             fallback_used=fallback_used,
@@ -311,18 +323,27 @@ class AutoSignalService:
                 )
                 for c in candidates_to_ingest
             ]
-        football_send_filter = FootballSignalSendFilterService()
-        send_filter_result = football_send_filter.filter_auto_send_candidates(candidates_to_ingest)
-        logger.info("[FOOTBALL] final before send filter: %s", send_filter_result.stats.before)
-        logger.info("[FOOTBALL] after family whitelist: %s", send_filter_result.stats.after_whitelist)
-        logger.info("[FOOTBALL] after family dedup: %s", send_filter_result.stats.after_family_dedup)
-        logger.info("[FOOTBALL] after per-match cap: %s", send_filter_result.stats.after_per_match_cap)
-        candidates_to_ingest = send_filter_result.candidates
+        logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))
+        if settings.football_debug_disable_filter:
+            logger.info("[FOOTBALL][DEBUG] filter disabled, sending raw candidates")
+            candidates_to_ingest = candidates_to_ingest[:3]
+            diagnostics.update(football_after_filter_count=len(candidates_to_ingest))
+        else:
+            football_send_filter = FootballSignalSendFilterService()
+            send_filter_result = football_send_filter.filter_auto_send_candidates(candidates_to_ingest)
+            logger.info("[FOOTBALL] after family whitelist: %s", send_filter_result.stats.after_whitelist)
+            logger.info("[FOOTBALL] after ranking: %s", send_filter_result.stats.after_ranking)
+            logger.info("[FOOTBALL] after family dedup: %s", send_filter_result.stats.after_family_dedup)
+            logger.info("[FOOTBALL] after per-match cap: %s", send_filter_result.stats.after_per_match_cap)
+            candidates_to_ingest = send_filter_result.candidates
+            diagnostics.update(football_after_filter_count=len(candidates_to_ingest))
         post_send_filter_count = len(candidates_to_ingest)
         if not candidates_to_ingest:
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
+                football_after_filter_count=0,
+                football_sent_count=0,
                 note="football send filter rejected all signals",
             )
             return AutoSignalCycleResult(
@@ -353,6 +374,9 @@ class AutoSignalService:
             candidates_to_ingest = candidates_to_ingest[:limit]
             omitted_by_limit = max(0, post_send_filter_count - len(candidates_to_ingest))
 
+        logger.info("[FOOTBALL] final signals to send: %s", len(candidates_to_ingest))
+        self._log_final_candidates(candidates_to_ingest)
+
         async with sessionmaker() as session:
             ingest_res = await IngestionService().ingest_candidates(session, candidates_to_ingest)
             await session.commit()
@@ -372,6 +396,7 @@ class AutoSignalService:
         diagnostics.update(
             final_signals_count=int(ingest_res.created_signals),
             messages_sent_count=notifications_sent_count,
+            football_sent_count=notifications_sent_count,
             note=None if ingest_res.created_signals else "no created football signals",
         )
 
@@ -552,4 +577,28 @@ class AutoSignalService:
         if deduped_count == 0:
             return "deduplicated to zero candidates"
         return "unknown_zero_candidate_reason"
+
+    def _log_candidates_per_match(self, candidates) -> None:
+        counts: dict[tuple[str, str], int] = {}
+        for candidate in candidates:
+            match = getattr(candidate, "match", None)
+            event_id = str(getattr(match, "external_event_id", "") or "—")
+            match_name = str(getattr(match, "match_name", "") or "—")
+            key = (event_id, match_name)
+            counts[key] = counts.get(key, 0) + 1
+        logger.info("[FOOTBALL] candidates per match:")
+        for (event_id, match_name), count in sorted(counts.items()):
+            logger.info("- event_id=%s, match=%s, count=%s", event_id, match_name, count)
+
+    def _log_final_candidates(self, candidates) -> None:
+        for candidate in candidates:
+            match = getattr(candidate, "match", None)
+            market = getattr(candidate, "market", None)
+            logger.info(
+                "- match=%s, market=%s, odds=%s, family=%s",
+                getattr(match, "match_name", "—"),
+                getattr(market, "market_label", "—"),
+                getattr(market, "odds_value", "—"),
+                FootballSignalSendFilterService().get_market_family(candidate),
+            )
 

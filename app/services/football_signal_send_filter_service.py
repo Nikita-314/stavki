@@ -6,14 +6,22 @@ from typing import Any
 
 from app.core.enums import SportType
 from app.schemas.provider_models import ProviderSignalCandidate
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class FootballSendFilterStats:
     before: int
     after_whitelist: int
+    after_ranking: int
     after_family_dedup: int
     after_per_match_cap: int
+    drop_reasons: dict[str, int]
+    families_left: dict[str, int]
+    selected_per_match: list[str]
 
 
 @dataclass(frozen=True)
@@ -67,16 +75,32 @@ class FootballSignalSendFilterService:
         self,
         candidates: list[ProviderSignalCandidate],
     ) -> FootballSendFilterResult:
+        drop_reasons = {
+            "blocked_family": 0,
+            "low_score": 0,
+            "dedup_family": 0,
+            "cap_per_match": 0,
+        }
         football_candidates = [
             candidate
             for candidate in candidates
             if getattr(getattr(candidate, "match", None), "sport", None) == SportType.FOOTBALL
         ]
         before = len(football_candidates)
+        logger.info("[FOOTBALL][FILTER] incoming candidates: %s", before)
 
         ranked = sorted(football_candidates, key=self._candidate_rank_key, reverse=True)
-        whitelisted = [candidate for candidate in ranked if self._is_allowed_for_auto_send(candidate)]
+        whitelisted: list[ProviderSignalCandidate] = []
+        for candidate in ranked:
+            allowed, reason = self._is_allowed_for_auto_send(candidate)
+            if allowed:
+                whitelisted.append(candidate)
+            elif reason in drop_reasons:
+                drop_reasons[reason] += 1
         after_whitelist = len(whitelisted)
+        logger.info("[FOOTBALL][FILTER] after whitelist: %s", after_whitelist)
+        after_ranking = len(whitelisted)
+        logger.info("[FOOTBALL][FILTER] after ranking: %s", after_ranking)
 
         family_deduped: list[ProviderSignalCandidate] = []
         seen_families: set[tuple[str, str]] = set()
@@ -85,10 +109,12 @@ class FootballSignalSendFilterService:
             idea_family = self.get_signal_idea_family(candidate)
             dedup_key = (event_id, idea_family)
             if dedup_key in seen_families:
+                drop_reasons["dedup_family"] += 1
                 continue
             seen_families.add(dedup_key)
             family_deduped.append(candidate)
         after_family_dedup = len(family_deduped)
+        logger.info("[FOOTBALL][FILTER] after family dedup: %s", after_family_dedup)
 
         capped: list[ProviderSignalCandidate] = []
         per_match_count: dict[str, int] = {}
@@ -96,17 +122,47 @@ class FootballSignalSendFilterService:
             event_id = str(getattr(getattr(candidate, "match", None), "external_event_id", "") or "")
             used = per_match_count.get(event_id, 0)
             if used >= self.MAX_SIGNALS_PER_MATCH:
+                drop_reasons["cap_per_match"] += 1
                 continue
             per_match_count[event_id] = used + 1
             capped.append(candidate)
+        logger.info("[FOOTBALL][FILTER] after per-match cap: %s", len(capped))
+
+        families_left: dict[str, int] = {}
+        for candidate in capped:
+            family = self.get_market_family(candidate)
+            families_left[family] = families_left.get(family, 0) + 1
+        logger.info(
+            "[FOOTBALL][FILTER] families left: %s",
+            ", ".join(f"{family}={count}" for family, count in sorted(families_left.items())) or "—",
+        )
+
+        selected_per_match = [self._describe_candidate(candidate) for candidate in capped]
+        if selected_per_match:
+            logger.info("[FOOTBALL][FILTER] selected per match:")
+            for row in selected_per_match:
+                logger.info("- %s", row)
+        if not capped:
+            logger.warning("[FOOTBALL][FILTER][WARNING] no signals after filtering")
+        logger.info(
+            "[FOOTBALL][FILTER][DROP REASONS]: blocked_family=%s, low_score=%s, dedup_family=%s, cap_per_match=%s",
+            drop_reasons["blocked_family"],
+            drop_reasons["low_score"],
+            drop_reasons["dedup_family"],
+            drop_reasons["cap_per_match"],
+        )
 
         return FootballSendFilterResult(
             candidates=capped,
             stats=FootballSendFilterStats(
                 before=before,
                 after_whitelist=after_whitelist,
+                after_ranking=after_ranking,
                 after_family_dedup=after_family_dedup,
                 after_per_match_cap=len(capped),
+                drop_reasons=dict(drop_reasons),
+                families_left=families_left,
+                selected_per_match=selected_per_match,
             ),
         )
 
@@ -177,15 +233,17 @@ class FootballSignalSendFilterService:
         family_priority = self._FAMILY_PRIORITY.get(self.get_market_family(candidate), 0.0)
         return (score, family_priority)
 
-    def _is_allowed_for_auto_send(self, candidate: ProviderSignalCandidate) -> bool:
+    def _is_allowed_for_auto_send(self, candidate: ProviderSignalCandidate) -> tuple[bool, str | None]:
         family = self.get_market_family(candidate)
         if family in self._BLOCKED_AUTO_FAMILIES:
-            return False
+            return False, "blocked_family"
         if family in self._ALLOWED_AUTO_FAMILIES:
-            return True
+            return True, None
         if family in self._SOFT_ALLOWED_AUTO_FAMILIES:
-            return self._is_strong_combo(candidate)
-        return False
+            if self._is_strong_combo(candidate):
+                return True, None
+            return False, "low_score"
+        return False, "blocked_family"
 
     def _is_strong_combo(self, candidate: ProviderSignalCandidate) -> bool:
         return any(
@@ -216,3 +274,13 @@ class FootballSignalSendFilterService:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    def _describe_candidate(self, candidate: ProviderSignalCandidate) -> str:
+        match_name = str(getattr(getattr(candidate, "match", None), "match_name", "") or "unknown_match")
+        market_label = str(getattr(getattr(candidate, "market", None), "market_label", "") or "unknown_market")
+        selection = str(getattr(getattr(candidate, "market", None), "selection", "") or "")
+        odds = getattr(getattr(candidate, "market", None), "odds_value", None)
+        family = self.get_market_family(candidate)
+        suffix = f" ({selection})" if selection else ""
+        odds_text = f"@{odds}" if odds is not None else "@?"
+        return f"{match_name} -> {family} [{market_label}{suffix}] {odds_text}"
