@@ -23,6 +23,7 @@ from app.services.football_signal_send_filter_service import FootballSignalSendF
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.services.winline_manual_cycle_service import WinlineManualCycleService
+from app.services.winline_manual_payload_service import WinlineManualPayloadService
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class AutoSignalService:
             fallback_source_available=False,
             manual_production_fallback_allowed=bool(settings.football_allow_manual_production_fallback),
             source_mode="unknown",
+            is_real_source=False,
             preview_only=bool(settings.auto_signal_preview_only),
             fallback_used=False,
             last_error=None,
@@ -86,6 +88,7 @@ class AutoSignalService:
             football_candidates_count=0,
             football_real_candidates_count=0,
             football_after_filter_count=0,
+            football_after_integrity_count=0,
             dropped_invalid_market_mapping_count=0,
             football_sent_count=0,
         )
@@ -216,7 +219,7 @@ class AutoSignalService:
         if fetch_res.ok and isinstance(fetch_res.payload, dict):
             payload = fetch_res.payload
             source_name = str(fetch_res.source_name or source_name)
-            diagnostics.update(last_fetch_status="ok", source_mode="live")
+            diagnostics.update(last_fetch_status="ok", source_mode="live", is_real_source=True)
         else:
             err = str(fetch_res.error or "fetch_error")
             diagnostics.update(
@@ -229,17 +232,45 @@ class AutoSignalService:
                 fallback_available = fallback is not None
                 diagnostics.update(fallback_source_available=fallback_available)
                 if fallback_available and settings.football_allow_manual_production_fallback:
+                    manual_source_mode = str(fallback.get("source_mode") or "manual_example")
+                    manual_is_real = bool(fallback.get("is_real_source", False))
+                    if not manual_is_real:
+                        diagnostics.update(
+                            source_mode=manual_source_mode,
+                            is_real_source=False,
+                            last_delivery_reason=f"non_real_source_blocked: {manual_source_mode}",
+                            note=str(fallback.get("source_reason") or "manual source is not real"),
+                        )
+                        return AutoSignalCycleResult(
+                            endpoint=fetch_res.endpoint,
+                            fetch_ok=False,
+                            preview_candidates=0,
+                            preview_skipped_items=0,
+                            created_signal_ids=[],
+                            created_signals_count=0,
+                            skipped_candidates_count=0,
+                            notifications_sent_count=0,
+                            preview_only=False,
+                            message=err,
+                            runtime_paused=False,
+                            runtime_active_sports=active_sports,
+                            source_name=source_name,
+                            live_auth_status=live_auth_status,
+                            last_live_http_status=fetch_res.status_code,
+                            rejection_reason=f"non_real_source_blocked: {manual_source_mode}",
+                        )
                     preview = fallback["preview"]
                     payload = fallback["payload"]
                     fallback_used = True
                     fallback_source_name = "manual_winline_json"
-                    source_kind = "semi_live_manual"
+                    source_kind = manual_source_mode
                     diagnostics.update(
                         last_fetch_status="manual_production_fallback",
                         fallback_used=True,
-                        source_mode="semi_live_manual",
+                        source_mode=manual_source_mode,
+                        is_real_source=manual_is_real,
                         last_delivery_reason=None,
-                        note="temporary production fallback enabled: Winline JSON",
+                        note=str(fallback.get("source_reason") or "temporary production fallback enabled: Winline JSON"),
                     )
                     logger.info(
                         "[FOOTBALL] live source unavailable; temporary production fallback source=%s",
@@ -248,6 +279,7 @@ class AutoSignalService:
                 elif fallback_available:
                     diagnostics.update(
                         source_mode="blocked",
+                        is_real_source=False,
                         last_delivery_reason=f"live_unavailable_manual_fallback_disabled: {live_auth_status}",
                         note="manual production fallback disabled",
                     )
@@ -272,6 +304,7 @@ class AutoSignalService:
                 if fallback is None:
                     diagnostics.update(
                         source_mode="blocked",
+                        is_real_source=False,
                         last_delivery_reason=f"live_unavailable_no_manual_fallback: {live_auth_status}",
                     )
                     logger.info("[FOOTBALL] provider unauthorized and no football fallback payload available")
@@ -375,6 +408,7 @@ class AutoSignalService:
             football_fallback_source=fallback_source_name,
             fallback_used=fallback_used,
             source_mode=source_kind,
+            is_real_source=(source_kind == "live" or source_kind == "semi_live_manual"),
         )
         if not filtered_candidates:
             reject_reason = self._resolve_zero_candidate_reason(
@@ -493,6 +527,7 @@ class AutoSignalService:
         invalid_market_drops = len(integrity_result.dropped_checks)
         diagnostics.update(
             football_after_filter_count=len(candidates_to_ingest),
+            football_after_integrity_count=len(candidates_to_ingest),
             dropped_invalid_market_mapping_count=invalid_market_drops,
         )
         if invalid_market_drops:
@@ -503,6 +538,7 @@ class AutoSignalService:
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_after_filter_count=0,
+            football_after_integrity_count=0,
                 football_sent_count=0,
                 last_delivery_reason=(
                     "dropped_invalid_market_mapping"
@@ -711,6 +747,7 @@ class AutoSignalService:
 
     def _build_manual_football_fallback_preview(self):
         svc = WinlineManualCycleService()
+        source_truth = WinlineManualPayloadService().get_line_source_truth()
         raw, err = svc._manual.load_line_payload()
         if raw is None or err:
             return None
@@ -744,7 +781,13 @@ class AutoSignalService:
                 "candidates": football_candidates,
             }
         )
-        return {"payload": normalized, "preview": preview}
+        return {
+            "payload": normalized,
+            "preview": preview,
+            "source_mode": str(source_truth.get("source_mode") or "manual_example"),
+            "is_real_source": bool(source_truth.get("is_real_source", False)),
+            "source_reason": str(source_truth.get("reason") or "manual payload"),
+        }
 
     def _resolve_zero_candidate_reason(
         self,

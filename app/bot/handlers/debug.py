@@ -198,6 +198,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
     fallback_source_available = _fmt_yes_no(bool(diag.get("fallback_source_available")))
     manual_fallback_allowed = _fmt_yes_no(bool(diag.get("manual_production_fallback_allowed")))
     source_mode = diag.get("source_mode") or "—"
+    is_real_source = _fmt_yes_no(bool(diag.get("is_real_source")))
     last_fetch = diag.get("last_fetch_status") or "—"
     if last_fetch == "fallback_manual_payload" and diag.get("last_error"):
         last_fetch = f"{diag.get('last_error')} -> fallback"
@@ -216,12 +217,14 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"📦 Fallback source available: {fallback_source_available}",
         f"🛠 Manual production fallback: {manual_fallback_allowed}",
         f"🧭 Source mode: {source_mode}",
+        f"✅ Real source: {is_real_source}",
         f"📥 Последний fetch: {last_fetch}",
         f"📊 Raw events: {diag.get('raw_events_count') or 0}",
         f"🧠 Кандидатов: {diag.get('candidates_after_filter_count') or 0}",
         f"⚽ real_candidates: {diag.get('football_real_candidates_count') or 0}",
         f"⚽ football_candidates: {diag.get('football_candidates_count') or 0}",
         f"⚽ football_after_filter: {diag.get('football_after_filter_count') or 0}",
+        f"⚽ football_after_integrity: {diag.get('football_after_integrity_count') or 0}",
         f"⚠ dropped_invalid_market_mapping: {diag.get('dropped_invalid_market_mapping_count') or 0}",
         f"⚽ football_sent: {diag.get('football_sent_count') or 0}",
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
@@ -597,6 +600,14 @@ async def cmd_auto_signal_status(message: Message) -> None:
                 f"- Fallback source available: {_fmt_yes_no(bool(diag.get('fallback_source_available')))}",
                 f"- Manual production fallback allowed: {_fmt_yes_no(bool(diag.get('manual_production_fallback_allowed')))}",
                 f"- Source mode last run: {diag.get('source_mode') or '—'}",
+                f"- Is real source: {_fmt_yes_no(bool(diag.get('is_real_source')))}",
+                f"- Raw events count: {diag.get('raw_events_count') or 0}",
+                f"- Normalized markets count: {diag.get('normalized_markets_count') or 0}",
+                f"- Football candidates count: {diag.get('football_candidates_count') or 0}",
+                f"- After send filter: {diag.get('football_after_filter_count') or 0}",
+                f"- After integrity check: {diag.get('football_after_integrity_count') or 0}",
+                f"- Final sendable signals: {diag.get('final_signals_count') or 0}",
+                f"- Sent count: {diag.get('messages_sent_count') or 0}",
                 f"- dropped_invalid_market_mapping: {diag.get('dropped_invalid_market_mapping_count') or 0}",
                 f"- Delivery block reason: {diag.get('last_delivery_reason') or diag.get('note') or '—'}",
                 f"- Последний fetch: {diag.get('last_fetch_status') or '—'}",

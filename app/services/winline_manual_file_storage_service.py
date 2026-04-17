@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,12 @@ class WinlineManualFileStorageService:
 
     def get_result_payload_path(self) -> Path:
         return self._paths.get_result_payload_path()
+
+    def get_line_metadata_path(self) -> Path:
+        return self.get_line_payload_path().with_suffix(".meta.json")
+
+    def get_result_metadata_path(self) -> Path:
+        return self.get_result_payload_path().with_suffix(".meta.json")
 
     def validate_json_bytes(self, data: bytes) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -84,6 +91,20 @@ class WinlineManualFileStorageService:
         if not v["ok"]:
             return v
         self._atomic_write(path, data.decode("utf-8"))
+        self._atomic_write(
+            self.get_line_metadata_path(),
+            json.dumps(
+                {
+                    "origin": "telegram_upload",
+                    "source_mode": "semi_live_manual",
+                    "is_real_source": True,
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
         return v
 
     def save_result_payload_bytes(self, data: bytes) -> dict[str, Any]:
@@ -93,6 +114,20 @@ class WinlineManualFileStorageService:
         if not v["ok"]:
             return v
         self._atomic_write(path, data.decode("utf-8"))
+        self._atomic_write(
+            self.get_result_metadata_path(),
+            json.dumps(
+                {
+                    "origin": "telegram_upload",
+                    "source_mode": "semi_live_manual",
+                    "is_real_source": True,
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
         return v
 
     def read_line_payload_text(self) -> str | None:
@@ -117,6 +152,20 @@ class WinlineManualFileStorageService:
         path = self.get_line_payload_path()
         try:
             self._atomic_write(path, "{}\n")
+            self._atomic_write(
+                self.get_line_metadata_path(),
+                json.dumps(
+                    {
+                        "origin": "cleared",
+                        "source_mode": "manual_example",
+                        "is_real_source": False,
+                        "uploaded_at": None,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
             return {"ok": True, "path": str(path), "error": None}
         except OSError as exc:
             return {"ok": False, "path": str(path), "error": str(exc)}
@@ -125,6 +174,20 @@ class WinlineManualFileStorageService:
         path = self.get_result_payload_path()
         try:
             self._atomic_write(path, '{"source_name":"winline","results":[]}\n')
+            self._atomic_write(
+                self.get_result_metadata_path(),
+                json.dumps(
+                    {
+                        "origin": "cleared",
+                        "source_mode": "manual_example",
+                        "is_real_source": False,
+                        "uploaded_at": None,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
             return {"ok": True, "path": str(path), "error": None}
         except OSError as exc:
             return {"ok": False, "path": str(path), "error": str(exc)}

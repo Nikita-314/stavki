@@ -20,6 +20,7 @@ class SignalRuntimeDiagnosticsState:
     fallback_source_available: bool = False
     manual_production_fallback_allowed: bool = False
     source_mode: str | None = None
+    is_real_source: bool = False
     last_fetch_status: str | None = None
     last_error: str | None = None
     last_delivery_reason: str | None = None
@@ -30,6 +31,7 @@ class SignalRuntimeDiagnosticsState:
     football_candidates_count: int = 0
     football_real_candidates_count: int = 0
     football_after_filter_count: int = 0
+    football_after_integrity_count: int = 0
     dropped_invalid_market_mapping_count: int = 0
     football_sent_count: int = 0
     final_signals_count: int = 0

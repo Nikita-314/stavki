@@ -42,6 +42,42 @@ class WinlineManualPayloadService:
     def get_result_payload_path(self) -> Path:
         return self._manual_dir / "result_payload.json"
 
+    def get_line_metadata_path(self) -> Path:
+        return self.get_line_payload_path().with_suffix(".meta.json")
+
+    def load_line_metadata(self) -> tuple[dict[str, Any] | None, str | None]:
+        path = self.get_line_metadata_path()
+        if not path.is_file():
+            return None, "metadata_not_found"
+        try:
+            text = path.read_text(encoding="utf-8")
+            data = json.loads(text)
+        except OSError as exc:
+            return None, f"metadata_read_error: {exc!s}"
+        except json.JSONDecodeError as exc:
+            return None, f"metadata_json_invalid: {exc!s}"
+        if not isinstance(data, dict):
+            return None, "metadata_invalid_root_type"
+        return data, None
+
+    def get_line_source_truth(self) -> dict[str, Any]:
+        metadata, meta_err = self.load_line_metadata()
+        if metadata is not None:
+            return {
+                "source_mode": str(metadata.get("source_mode") or "semi_live_manual"),
+                "is_real_source": bool(metadata.get("is_real_source", False)),
+                "reason": str(metadata.get("origin") or "metadata"),
+                "uploaded_at": metadata.get("uploaded_at"),
+                "metadata_error": None,
+            }
+        return {
+            "source_mode": "manual_example",
+            "is_real_source": False,
+            "reason": "bundled_example_fixture",
+            "uploaded_at": None,
+            "metadata_error": meta_err,
+        }
+
     def line_payload_exists(self) -> bool:
         return self.get_line_payload_path().is_file()
 
