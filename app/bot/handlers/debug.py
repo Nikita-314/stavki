@@ -102,9 +102,13 @@ def _format_manual_result_preview_lines() -> list[str]:
     keys_s = ", ".join(keys[:15]) + ("…" if len(keys) > 15 else "")
     lines = [
         "📄 Winline manual — result preview",
+        f"- detected shape: {rp.get('detected_shape')}",
         f"- root: {rp.get('root_type')}",
         f"- keys: {keys_s or '—'}",
-        f"- results rows: {rp.get('raw_results_count') if rp.get('raw_results_count') is not None else '—'}",
+        f"- raw result rows: {rp.get('raw_results_count') if rp.get('raw_results_count') is not None else '—'}",
+        f"- normalized result rows: {rp.get('normalized_results_count') if rp.get('normalized_results_count') is not None else '—'}",
+        f"- processible: {_fmt_yes_no(bool(rp.get('processible')))}",
+        f"- event results: {rp.get('event_results_count') if rp.get('event_results_count') is not None else '—'}",
     ]
     if rp.get("error"):
         lines.append(f"- ошибка: {rp['error']}")
@@ -2933,6 +2937,8 @@ async def cmd_winline_manual_file_status(message: Message) -> None:
             f"- result size: {st.get('result_size_bytes')} B",
             f"- result readable: {_fmt_yes_no(bool(st.get('result_readable')))}",
             f"- result keys: {', '.join(st.get('result_keys') or []) or '—'}",
+            f"- result shape: {(r.get('result_preview_meta') or {}).get('detected_shape') or '—'}",
+            f"- result processible: {_fmt_yes_no(bool(r.get('result_ready_for_process')))}",
             f"- line ready for preview: {_fmt_yes_no(bool(r.get('line_ready_for_preview')))}",
             f"- line ready for ingest: {_fmt_yes_no(bool(r.get('line_ready_for_ingest')))}",
             f"- result ready for preview: {_fmt_yes_no(bool(r.get('result_ready_for_preview')))}",

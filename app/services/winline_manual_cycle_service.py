@@ -16,6 +16,7 @@ from app.services.winline_final_signal_service import WinlineFinalSignalService
 from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
 from app.services.winline_manual_payload_service import WinlineManualPayloadService
 from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
+from app.services.winline_raw_result_bridge_service import WinlineRawResultBridgeService
 from app.services.winline_settlement_demo_service import _map_sport, _parse_dt
 from app.services.winline_signal_delivery_demo_service import WinlineSignalDeliveryDemoService
 
@@ -27,6 +28,7 @@ class WinlineManualCycleService:
         self._manual = WinlineManualPayloadService()
         self._storage = WinlineManualFileStorageService()
         self._bridge = WinlineRawLineBridgeService()
+        self._result_bridge = WinlineRawResultBridgeService()
         self._final = WinlineFinalSignalService()
         self._delivery = WinlineSignalDeliveryDemoService()
         self._adapter = AdapterIngestionService()
@@ -39,7 +41,11 @@ class WinlineManualCycleService:
         raw, err = self._manual.load_result_payload()
         if raw is None or err:
             return False
-        return isinstance(raw.get("results"), list)
+        try:
+            normalized = self._result_bridge.normalize_raw_winline_result_payload(raw)
+        except Exception:
+            return False
+        return isinstance(normalized.get("results"), list) and bool(normalized.get("results"))
 
     def get_operator_readiness(self) -> dict[str, Any]:
         """Флаги для операторского UI: что уже можно делать с файлами."""
@@ -229,8 +235,9 @@ class WinlineManualCycleService:
                 "error": load_err or "no_payload",
             }
 
-        rows = raw.get("results")
-        if not isinstance(rows, list):
+        try:
+            normalized = self._result_bridge.normalize_raw_winline_result_payload(raw)
+        except Exception as exc:
             return {
                 "status": "manual_result_payload_not_supported_shape",
                 "raw_results": 0,
@@ -241,7 +248,21 @@ class WinlineManualCycleService:
                 "voids": None,
                 "current_balance_rub": None,
                 "sanity_issues_count": None,
-                "error": "results_not_a_list",
+                "error": f"normalize_result: {exc!s}",
+            }
+        rows = normalized.get("results")
+        if not isinstance(rows, list) or not rows:
+            return {
+                "status": "manual_result_payload_not_supported_shape",
+                "raw_results": 0,
+                "processed_event_results": [],
+                "settled_signal_ids": [],
+                "wins": None,
+                "losses": None,
+                "voids": None,
+                "current_balance_rub": None,
+                "sanity_issues_count": None,
+                "error": "no_normalized_results",
             }
 
         settled_all: list[int] = []

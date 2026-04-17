@@ -8,6 +8,7 @@ from typing import Any
 
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
+from app.services.winline_raw_result_bridge_service import WinlineRawResultBridgeService
 
 
 def _repo_root() -> Path:
@@ -137,13 +138,17 @@ class WinlineManualPayloadService:
     def preview_result_payload(self) -> dict[str, Any]:
         raw, err = self.load_result_payload()
         exists = self.result_payload_exists()
+        bridge = WinlineRawResultBridgeService()
         base: dict[str, Any] = {
             "ok": False,
             "payload_exists": exists,
             "root_type": None,
             "top_level_keys": [],
+            "detected_shape": "unsupported",
             "raw_results_count": None,
+            "normalized_results_count": None,
             "event_results_count": None,
+            "processible": False,
             "error": err,
         }
         if raw is None:
@@ -153,16 +158,24 @@ class WinlineManualPayloadService:
 
         base["root_type"] = _root_type_name(raw)
         base["top_level_keys"] = sorted(raw.keys())
-        results = raw.get("results")
-        if isinstance(results, list):
-            base["raw_results_count"] = len(results)
-            base["event_results_count"] = len(results)
-            base["ok"] = True
-            base["error"] = None
-        else:
-            base["raw_results_count"] = None
+        base["detected_shape"] = bridge.detect_payload_shape(raw)
+
+        raw_rows = bridge._extract_raw_result_rows(raw)
+        base["raw_results_count"] = len(raw_rows) if raw_rows else (_len_if_list(raw, "results") or 0)
+
+        try:
+            normalized = bridge.normalize_raw_winline_result_payload(raw)
+            normalized_rows = list(normalized.get("results") or [])
+            base["normalized_results_count"] = len(normalized_rows)
+            base["event_results_count"] = len(normalized_rows)
+            base["processible"] = len(normalized_rows) > 0
+            base["ok"] = bool(base["processible"])
+            base["error"] = None if base["ok"] else "no_normalized_results"
+        except Exception as exc:  # noqa: BLE001
+            base["normalized_results_count"] = None
             base["event_results_count"] = None
+            base["processible"] = False
             base["ok"] = False
-            base["error"] = "result_payload_missing_results_array"
+            base["error"] = str(exc)
 
         return base
