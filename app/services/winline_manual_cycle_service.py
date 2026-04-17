@@ -13,6 +13,7 @@ from app.services.balance_service import BalanceService
 from app.services.result_ingestion_service import ResultIngestionService
 from app.services.sanity_check_service import SanityCheckService
 from app.services.winline_final_signal_service import WinlineFinalSignalService
+from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
 from app.services.winline_manual_payload_service import WinlineManualPayloadService
 from app.services.winline_settlement_demo_service import _map_sport, _parse_dt, normalize_winline_line_payload
 from app.services.winline_signal_delivery_demo_service import WinlineSignalDeliveryDemoService
@@ -23,9 +24,109 @@ class WinlineManualCycleService:
 
     def __init__(self) -> None:
         self._manual = WinlineManualPayloadService()
+        self._storage = WinlineManualFileStorageService()
         self._final = WinlineFinalSignalService()
         self._delivery = WinlineSignalDeliveryDemoService()
         self._adapter = AdapterIngestionService()
+
+    def _has_readable_line_payload(self) -> bool:
+        raw, err = self._manual.load_line_payload()
+        return raw is not None and err is None
+
+    def _has_readable_result_payload(self) -> bool:
+        raw, err = self._manual.load_result_payload()
+        if raw is None or err:
+            return False
+        return isinstance(raw.get("results"), list)
+
+    def get_operator_readiness(self) -> dict[str, Any]:
+        """Флаги для операторского UI: что уже можно делать с файлами."""
+        st = self._storage.get_file_status()
+        lp = self._manual.preview_line_payload()
+        rp = self._manual.preview_result_payload()
+
+        line_readable = bool(st.get("line_exists") and st.get("line_readable"))
+        result_readable = bool(st.get("result_exists") and st.get("result_readable"))
+
+        line_ready_for_preview = line_readable
+        line_ready_for_ingest = bool(line_readable and bool(lp.get("ingestible_shape")))
+
+        result_ready_for_preview = result_readable
+        raw_r, _e = self._manual.load_result_payload()
+        result_ready_for_process = bool(
+            result_readable and raw_r is not None and isinstance(raw_r.get("results"), list)
+        )
+
+        has_line = self._has_readable_line_payload()
+        has_result = self._has_readable_result_payload()
+
+        if not has_line and not has_result:
+            mode = "nothing"
+            rec = "Загрузите line и/или result JSON (кнопки upload или файлы на сервере)."
+        elif has_line and not has_result:
+            mode = "line_only"
+            rec = "Сделайте ingest line, затем загрузите result JSON или используйте run ready."
+        elif has_result and not has_line:
+            mode = "result_only"
+            rec = "Обработайте result или загрузите line JSON для полного цикла."
+        else:
+            mode = "full"
+            rec = "Можно Winline manual full или Winline run ready."
+
+        return {
+            "mode": mode,
+            "has_line": has_line,
+            "has_result": has_result,
+            "line_ready_for_preview": line_ready_for_preview,
+            "line_ready_for_ingest": line_ready_for_ingest,
+            "result_ready_for_preview": result_ready_for_preview,
+            "result_ready_for_process": result_ready_for_process,
+            "recommended_next_action": rec,
+            "storage": st,
+            "line_preview_meta": lp,
+            "result_preview_meta": rp,
+        }
+
+    def next_step_hint(self, after: str) -> str:
+        """Одна короткая строка подсказки после manual-команды."""
+        r = self.get_operator_readiness()
+        hl, hr = r["has_line"], r["has_result"]
+        ing = r["line_ready_for_ingest"]
+        rp_ok = r["result_ready_for_process"]
+
+        if after == "line_preview":
+            if ing and not hr:
+                return "Следующий шаг: Winline manual ingest или загрузите result JSON."
+            if hr:
+                return "Следующий шаг: Winline manual full или обработайте result."
+            return "Следующий шаг: исправьте line JSON или загрузите заново."
+
+        if after == "line_ingest":
+            if not hr:
+                return "Следующий шаг: загрузите result JSON, затем process или full."
+            return "Следующий шаг: Winline manual process или Winline manual full."
+
+        if after == "result_preview":
+            if rp_ok and not hl:
+                return "Следующий шаг: Winline manual process или загрузите line JSON."
+            if hl and hr:
+                return "Следующий шаг: Winline manual process или full cycle."
+            return "Следующий шаг: проверьте result JSON или загрузите заново."
+
+        if after == "result_process":
+            if hl and hr:
+                return "Следующий шаг: при необходимости Winline manual full или проверьте баланс."
+            if not hl:
+                return "Следующий шаг: загрузите line JSON для связки с сигналами."
+            return "Следующий шаг: загрузите result или проверьте статус файлов."
+
+        if after == "full_cycle":
+            return "Следующий шаг: при новых JSON — upload; иначе Winline file status."
+
+        if after == "run_ready":
+            return "Следующий шаг: смотрите итог выше или Winline file status."
+
+        return "Следующий шаг: Winline file status или загрузите JSON."
 
     def _normalize_line_or_error(self, raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
         if "events" not in raw or "markets" not in raw:
@@ -306,3 +407,62 @@ class WinlineManualCycleService:
             "summary": summary,
             "errors": errors,
         }
+
+    async def run_ready_cycle(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        bot: Bot | None = None,
+    ) -> dict[str, Any]:
+        """Выбрать сценарий по загруженным файлам и выполнить максимально полезный шаг."""
+        r = self.get_operator_readiness()
+        mode = str(r.get("mode") or "nothing")
+        errors: list[str] = []
+
+        base: dict[str, Any] = {
+            "mode": mode,
+            "line_preview": None,
+            "line_ingest": None,
+            "result_preview": None,
+            "result_processing": None,
+            "send_result": None,
+            "full_cycle": None,
+            "errors": errors,
+            "message": None,
+        }
+
+        if mode == "nothing":
+            base["message"] = "Файлы не загружены. Сначала загрузите line и/или result JSON."
+            return base
+
+        if mode == "line_only":
+            lp = self.preview_manual_line()
+            base["line_preview"] = lp
+            if lp.get("error"):
+                errors.append(str(lp["error"]))
+            li = await self.ingest_manual_line(sessionmaker)
+            base["line_ingest"] = li
+            if li.get("error"):
+                errors.append(str(li["error"]))
+            base["errors"] = errors
+            return base
+
+        if mode == "result_only":
+            rp = self.preview_manual_result()
+            base["result_preview"] = rp
+            pr = await self.process_manual_result(sessionmaker)
+            base["result_processing"] = pr
+            if pr.get("error"):
+                errors.append(str(pr["error"]))
+            base["errors"] = errors
+            return base
+
+        # full — оба файла
+        full = await self.run_manual_full_cycle(sessionmaker, bot, send_signals=True)
+        base["full_cycle"] = full
+        base["line_preview"] = full.get("line_preview")
+        base["line_ingest"] = full.get("line_ingest")
+        base["result_preview"] = full.get("result_preview")
+        base["result_processing"] = full.get("result_processing")
+        base["send_result"] = full.get("send_result")
+        base["errors"] = list(full.get("errors") or [])
+        return base

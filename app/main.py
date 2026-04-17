@@ -50,6 +50,7 @@ async def main() -> None:
             BotCommand(command="winline_manual_file_status", description="Winline: статус файлов на диске"),
             BotCommand(command="winline_manual_show_line", description="Winline: фрагмент line JSON"),
             BotCommand(command="winline_manual_show_result", description="Winline: фрагмент result JSON"),
+            BotCommand(command="winline_manual_run_ready", description="Winline: умный следующий шаг"),
         ]
     )
     dp = Dispatcher()
