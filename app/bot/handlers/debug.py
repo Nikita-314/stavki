@@ -136,6 +136,32 @@ def _format_manual_result_preview_lines() -> list[str]:
     return lines
 
 
+def _format_winline_runtime_source_lines() -> list[str]:
+    from app.services.winline_manual_payload_service import WinlineManualPayloadService
+
+    settings = get_settings()
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    truth = WinlineManualPayloadService().get_line_source_truth()
+    provider_name = diag.get("live_provider_name") or (
+        "the_odds_api" if getattr(settings, "odds_provider_base_url", None) else "—"
+    )
+    return [
+        "📡 Winline runtime source",
+        f"- provider: {provider_name}",
+        f"- live auth status: {diag.get('live_auth_status') or '—'}",
+        f"- source_mode: {truth.get('source_mode') or diag.get('source_mode') or '—'}",
+        f"- is_real_source: {_fmt_yes_no(bool(truth.get('is_real_source')))}",
+        f"- source_origin: {truth.get('source_origin') or '—'}",
+        f"- upload_provenance_present: {_fmt_yes_no(bool(truth.get('provenance_present')))}",
+        f"- uploaded_at: {truth.get('uploaded_at') or '—'}",
+        f"- source_file_path: {truth.get('file_path') or '—'}",
+        f"- checksum: {truth.get('checksum') or '—'}",
+        f"- fixture_match: {_fmt_yes_no(bool(truth.get('fixture_match')))}",
+        f"- raw_events_count: {diag.get('raw_events_count') if diag.get('raw_events_count') is not None else 0}",
+        f"- normalized_markets_count: {diag.get('normalized_markets_count') if diag.get('normalized_markets_count') is not None else 0}",
+    ]
+
+
 def _json_snippet_messages(title: str, text: str | None) -> list[str]:
     if not text or not text.strip():
         return [f"{title}\n(пусто)"]
@@ -3045,6 +3071,15 @@ async def cmd_winline_manual_upload_line(message: Message) -> None:
     await message.answer("📥 Пришлите JSON-файл line payload документом")
 
 
+@router.message(Command("winline_runtime_source"))
+@router.message(_text_is("Winline runtime source", "Winline runtime", "Winline источник runtime"))
+async def cmd_winline_runtime_source(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("\n".join(_format_winline_runtime_source_lines()))
+
+
 @router.message(Command("winline_manual_upload_result"))
 @router.message(_text_is("Winline загрузить JSON результата", "Winline загрузить result", "Winline upload result"))
 async def cmd_winline_manual_upload_result(message: Message) -> None:
@@ -3056,6 +3091,30 @@ async def cmd_winline_manual_upload_result(message: Message) -> None:
         return
     _pending_manual_json_upload[uid] = "result"
     await message.answer("📥 Пришлите JSON-файл result payload документом")
+
+
+@router.message(Command("winline_clear_uploaded_line"))
+@router.message(_text_is("Очистить загруженный line JSON", "Winline очистить загруженный line", "Winline clear uploaded line"))
+async def cmd_winline_clear_uploaded_line(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+
+    r = WinlineManualFileStorageService().clear_uploaded_line_payload()
+    if r.get("ok"):
+        await message.answer(
+            "\n".join(
+                [
+                    "✅ Uploaded line runtime очищен",
+                    f"- runtime path: {r.get('path')}",
+                    f"- metadata path: {r.get('metadata_path')}",
+                    f"- что-то удалено: {_fmt_yes_no(bool(r.get('deleted_any')))}",
+                ]
+            )
+        )
+    else:
+        await message.answer(f"⚠️ Не удалось очистить uploaded line runtime.\n{r.get('error')}")
 
 
 @router.message(Command("winline_manual_clear_line"))
@@ -3120,6 +3179,7 @@ async def cmd_winline_manual_file_status(message: Message) -> None:
             f"- upload provenance present: {_fmt_yes_no(bool(truth.get('provenance_present')))}",
             f"- uploaded_at: {truth.get('uploaded_at') or '—'}",
             f"- checksum: {truth.get('checksum') or '—'}",
+            f"- fixture match: {_fmt_yes_no(bool(truth.get('fixture_match')))}",
             f"- result exists: {_fmt_yes_no(bool(st.get('result_exists')))}",
             f"- result size: {st.get('result_size_bytes')} B",
             f"- result readable: {_fmt_yes_no(bool(st.get('result_readable')))}",
@@ -3209,7 +3269,9 @@ async def handle_winline_manual_json_document(message: Message, bot: Bot) -> Non
             "ℹ️ Имя файла не .json — пробуем распарсить содержимое как JSON."
         )
 
+    from app.services.winline_manual_cycle_service import WinlineManualCycleService
     from app.services.winline_manual_file_storage_service import WinlineManualFileStorageService
+    from app.services.winline_manual_payload_service import WinlineManualPayloadService
 
     storage = WinlineManualFileStorageService()
     if kind == "line":
@@ -3233,27 +3295,58 @@ async def handle_winline_manual_json_document(message: Message, bot: Bot) -> Non
 
     keys = res.get("top_level_keys") or []
     keys_s = ", ".join(keys[:20]) + ("…" if len(keys) > 20 else "")
-    await message.answer(
-        "\n".join(
-            [
-                "✅ Файл сохранён",
-                f"- путь: {res.get('path')}",
-                f"- размер: {res.get('bytes')} B",
-                f"- top-level: {res.get('top_level_type')}",
-                f"- keys: {keys_s or '—'}",
-            ]
-        )
-    )
+    payloads = WinlineManualPayloadService()
     if kind == "line":
+        truth = payloads.get_line_source_truth()
+        preview = payloads.preview_line_payload()
+        cycle_preview = WinlineManualCycleService().preview_manual_line()
+        await message.answer(
+            "\n".join(
+                [
+                    "✅ Line JSON сохранён",
+                    f"- путь: {res.get('path')}",
+                    f"- размер: {res.get('bytes')} B",
+                    f"- top-level: {res.get('top_level_type')}",
+                    f"- keys: {keys_s or '—'}",
+                    f"- source_mode: {truth.get('source_mode') or '—'}",
+                    f"- is_real_source: {_fmt_yes_no(bool(truth.get('is_real_source')))}",
+                    f"- source_origin: {truth.get('source_origin') or '—'}",
+                    f"- uploaded_at: {truth.get('uploaded_at') or '—'}",
+                    f"- checksum: {truth.get('checksum') or '—'}",
+                    f"- fixture_match: {_fmt_yes_no(bool(truth.get('fixture_match')))}",
+                    f"- raw_events: {preview.get('raw_events_count') if preview.get('raw_events_count') is not None else '—'}",
+                    f"- normalized_markets: {preview.get('normalized_markets_count') if preview.get('normalized_markets_count') is not None else '—'}",
+                    f"- candidates_preview: {preview.get('preview_candidates') if preview.get('preview_candidates') is not None else '—'}",
+                    f"- final_previews: {cycle_preview.get('final_signals_ready') if cycle_preview.get('final_signals_ready') is not None else '—'}",
+                ]
+            )
+        )
+        if truth.get("fixture_match"):
+            await message.answer(
+                "⚠️ Этот файл совпадает с bundled fixture/example. "
+                "Он будет помечен как manual_example и не будет использован как боевой football source."
+            )
         await message.answer("\n".join(_format_manual_line_preview_lines()))
         await message.answer(
             "Что дальше можно сделать:\n"
-            "- Winline превью линии — посмотреть line preview\n"
-            "- Winline загрузить сигналы — загрузить сигналы в систему\n"
-            "- Winline полный цикл — попробовать полный цикл",
+            "- /winline_runtime_source — проверить текущий runtime source\n"
+            "- ⚽ Футбольный прогон — выполнить football cycle\n"
+            "- /winline_clear_uploaded_line — убрать runtime uploaded line JSON",
             reply_markup=get_winline_manual_flow_keyboard(),
         )
     else:
+        await message.answer(
+            "\n".join(
+                [
+                    "✅ Result JSON сохранён",
+                    f"- путь: {res.get('path')}",
+                    f"- размер: {res.get('bytes')} B",
+                    f"- top-level: {res.get('top_level_type')}",
+                    f"- keys: {keys_s or '—'}",
+                    f"- checksum: {res.get('checksum') or '—'}",
+                ]
+            )
+        )
         await message.answer("\n".join(_format_manual_result_preview_lines()))
         await message.answer(
             "Что дальше можно сделать:\n"

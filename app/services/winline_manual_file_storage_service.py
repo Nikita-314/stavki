@@ -181,6 +181,26 @@ class WinlineManualFileStorageService:
         except OSError as exc:
             return {"ok": False, "path": str(path), "error": str(exc)}
 
+    def clear_uploaded_line_payload(self) -> dict[str, Any]:
+        path = self.get_line_payload_path()
+        meta = self.get_line_metadata_path()
+        deleted_any = False
+        errors: list[str] = []
+        for target in (path, meta):
+            try:
+                if target.exists():
+                    target.unlink()
+                    deleted_any = True
+            except OSError as exc:
+                errors.append(f"{target.name}: {exc!s}")
+        return {
+            "ok": not errors,
+            "path": str(path),
+            "metadata_path": str(meta),
+            "deleted_any": deleted_any,
+            "error": "; ".join(errors) if errors else None,
+        }
+
     def clear_result_payload(self) -> dict[str, Any]:
         path = self.get_result_payload_path()
         try:

@@ -116,6 +116,7 @@ class WinlineManualPayloadService:
                     "provenance_present": True,
                     "file_path": str(uploaded_path),
                     "checksum": uploaded_checksum,
+                    "fixture_match": False,
                 }
             return {
                 "source_mode": "manual_example" if example_checksum_match else "manual_uploaded_untrusted",
@@ -127,6 +128,7 @@ class WinlineManualPayloadService:
                 "provenance_present": provenance_present,
                 "file_path": str(uploaded_path),
                 "checksum": uploaded_checksum,
+                "fixture_match": example_checksum_match,
             }
         return {
             "source_mode": "manual_example",
@@ -138,6 +140,7 @@ class WinlineManualPayloadService:
             "provenance_present": False,
             "file_path": str(self.get_example_line_payload_path()),
             "checksum": self._sha256_file(self.get_example_line_payload_path()),
+            "fixture_match": True,
         }
 
     def line_payload_exists(self) -> bool:

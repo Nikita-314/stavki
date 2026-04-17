@@ -81,7 +81,11 @@ def get_debug_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="Winline очистить линию"),
                 KeyboardButton(text="Winline очистить результат"),
             ],
-            [KeyboardButton(text="Winline статус файлов")],
+            [
+                KeyboardButton(text="Winline статус файлов"),
+                KeyboardButton(text="Winline runtime source"),
+            ],
+            [KeyboardButton(text="Очистить загруженный line JSON")],
             [
                 KeyboardButton(text="Winline показать JSON линии"),
                 KeyboardButton(text="Winline показать JSON результата"),

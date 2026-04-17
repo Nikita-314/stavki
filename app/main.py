@@ -54,6 +54,8 @@ async def main() -> None:
             BotCommand(command="winline_manual_clear_line", description="Winline: очистить line JSON"),
             BotCommand(command="winline_manual_clear_result", description="Winline: очистить result JSON"),
             BotCommand(command="winline_manual_file_status", description="Winline: статус файлов на диске"),
+            BotCommand(command="winline_runtime_source", description="Winline: текущий runtime source"),
+            BotCommand(command="winline_clear_uploaded_line", description="Winline: удалить uploaded line runtime"),
             BotCommand(command="winline_manual_show_line", description="Winline: фрагмент line JSON"),
             BotCommand(command="winline_manual_show_result", description="Winline: фрагмент result JSON"),
             BotCommand(command="winline_manual_run_ready", description="Winline: умный следующий шаг"),
