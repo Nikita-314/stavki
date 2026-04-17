@@ -12,13 +12,16 @@ class SignalRuntimeDiagnosticsState:
     active_mode: str = "football"
     football_source: str | None = None
     football_fallback_source: str | None = None
+    source_mode: str | None = None
     last_fetch_status: str | None = None
     last_error: str | None = None
+    last_delivery_reason: str | None = None
     raw_events_count: int = 0
     normalized_markets_count: int = 0
     candidates_before_filter_count: int = 0
     candidates_after_filter_count: int = 0
     football_candidates_count: int = 0
+    football_real_candidates_count: int = 0
     football_after_filter_count: int = 0
     football_sent_count: int = 0
     final_signals_count: int = 0

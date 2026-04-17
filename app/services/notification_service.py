@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
@@ -46,6 +47,15 @@ class NotificationService:
         except Exception:
             return str(value)
 
+    def _format_match_start(self, value) -> str:
+        if value is None:
+            return "неизвестно"
+        try:
+            dt = value.astimezone(ZoneInfo("Europe/Moscow")) if getattr(value, "tzinfo", None) else value
+            return dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            return "неизвестно"
+
     def __init__(self) -> None:
         self._football_bet_formatter = FootballBetFormatterService()
 
@@ -75,6 +85,7 @@ class NotificationService:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
         tournament = (s.tournament_name or "").strip() or "Не указан"
+        match_start = self._format_match_start(getattr(s, "event_start_at", None))
         bet_presentation = self._football_bet_formatter.format_bet(
             market_type=s.market_type,
             market_label=s.market_label,
@@ -98,9 +109,11 @@ class NotificationService:
                 "",
                 f"🏆 Турнир: {tournament}",
                 f"⚽ Матч: {match_name}",
+                f"🕒 Начало матча: {match_start}",
                 f"🎯 Ставка: {bet_presentation.main_label}",
                 f"💰 Коэффициент: {odds}",
                 f"🏢 Букмекер: {bookmaker}",
+                "📡 Источник: live",
             ]
         )
         if bet_presentation.detail_label:

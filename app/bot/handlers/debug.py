@@ -191,24 +191,30 @@ def _format_signal_runtime_status_lines() -> list[str]:
     source = diag.get("football_source") or "—"
     if diag.get("fallback_used"):
         source = f"fallback ({diag.get('football_fallback_source') or 'manual'})"
+    source_mode = diag.get("source_mode") or "—"
     last_fetch = diag.get("last_fetch_status") or "—"
     if last_fetch == "fallback_manual_payload" and diag.get("last_error"):
         last_fetch = f"{diag.get('last_error')} -> fallback"
+    delivery_reason = diag.get("last_delivery_reason") or diag.get("note") or "—"
     return [
         "📊 Статус сигналов",
         f"▶️ Режим: {'запущен' if not state.get('paused') else 'остановлен'}",
         f"⚽ Футбол: {'включён' if state.get('football_enabled') else 'выключен'}",
         f"🎮 CS2: {'включён' if state.get('cs2_enabled') else 'выключен'}",
         f"🎮 Dota: {'включена' if state.get('dota_enabled') else 'выключена'}",
+        f"👁 Preview-only: {_fmt_yes_no(bool(diag.get('preview_only')))}",
         f"📡 Источник футбола: {source}",
+        f"🧭 Source mode: {source_mode}",
         f"📥 Последний fetch: {last_fetch}",
         f"📊 Raw events: {diag.get('raw_events_count') or 0}",
         f"🧠 Кандидатов: {diag.get('candidates_after_filter_count') or 0}",
+        f"⚽ real_candidates: {diag.get('football_real_candidates_count') or 0}",
         f"⚽ football_candidates: {diag.get('football_candidates_count') or 0}",
         f"⚽ football_after_filter: {diag.get('football_after_filter_count') or 0}",
         f"⚽ football_sent: {diag.get('football_sent_count') or 0}",
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено: {diag.get('messages_sent_count') or 0}",
+        f"🛑 Причина без отправки: {delivery_reason}",
     ]
 
 

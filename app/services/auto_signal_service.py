@@ -42,11 +42,14 @@ class AutoSignalService:
             active_mode="football" if SportType.FOOTBALL.value in active_sports else "inactive",
             football_source=self._detect_provider_name(settings),
             football_fallback_source="manual_winline_json",
+            source_mode="unknown",
             preview_only=bool(settings.auto_signal_preview_only),
             fallback_used=False,
             last_error=None,
+            last_delivery_reason=None,
             note=None,
             football_candidates_count=0,
+            football_real_candidates_count=0,
             football_after_filter_count=0,
             football_sent_count=0,
         )
@@ -54,6 +57,7 @@ class AutoSignalService:
             logger.info("[FOOTBALL][BLOCK] skipped due to paused")
             diagnostics.update(
                 last_fetch_status="paused",
+                last_delivery_reason="paused",
                 note="delivery skipped: paused",
             )
             return AutoSignalCycleResult(
@@ -76,6 +80,7 @@ class AutoSignalService:
             logger.info("[FOOTBALL] fetch skipped: football disabled in runtime")
             diagnostics.update(
                 last_fetch_status="football_disabled",
+                last_delivery_reason="football_disabled",
                 note="filtered by runtime sport settings",
             )
             return AutoSignalCycleResult(
@@ -100,6 +105,7 @@ class AutoSignalService:
             logger.info("[FOOTBALL] fetch skipped: configured source sport disabled source=%s", inferred_sport.value)
             diagnostics.update(
                 last_fetch_status=f"sport_disabled:{inferred_sport.value.lower()}",
+                last_delivery_reason="sport_disabled",
                 note="filtered by runtime sport settings",
             )
             return AutoSignalCycleResult(
@@ -123,6 +129,7 @@ class AutoSignalService:
             diagnostics.update(
                 last_fetch_status="provider_not_configured",
                 last_error="provider_not_configured",
+                last_delivery_reason="provider_not_configured",
             )
             return AutoSignalCycleResult(
                 endpoint=None,
@@ -154,7 +161,7 @@ class AutoSignalService:
         if fetch_res.ok and isinstance(fetch_res.payload, dict):
             payload = fetch_res.payload
             source_name = str(fetch_res.source_name or source_name)
-            diagnostics.update(last_fetch_status="ok")
+            diagnostics.update(last_fetch_status="ok", source_mode="live")
         else:
             err = str(fetch_res.error or "fetch_error")
             diagnostics.update(
@@ -190,6 +197,8 @@ class AutoSignalService:
                 diagnostics.update(
                     last_fetch_status="fallback_manual_payload",
                     fallback_used=True,
+                    source_mode="fallback",
+                    last_delivery_reason="non_live_source_blocked",
                     note="provider unauthorized; fallback to manual football payload",
                 )
                 logger.info("[FOOTBALL] fetch source=%s unauthorized; fallback source=%s", source_name, fallback_source_name)
@@ -264,9 +273,11 @@ class AutoSignalService:
             candidates_before_filter_count=len(candidates_before_filter),
             candidates_after_filter_count=len(filtered_candidates),
             football_candidates_count=len(candidates_before_filter),
+            football_real_candidates_count=len(candidates_before_filter) if source_kind == "live" else 0,
             football_source=source_name,
             football_fallback_source=fallback_source_name,
             fallback_used=fallback_used,
+            source_mode=source_kind,
         )
         if not filtered_candidates:
             reject_reason = self._resolve_zero_candidate_reason(
@@ -278,11 +289,45 @@ class AutoSignalService:
             )
             logger.info("[FOOTBALL] candidates after filter: 0 (%s)", reject_reason)
 
+        if source_kind != "live":
+            logger.info("[FOOTBALL][BLOCK] auto-send disabled for non-live source=%s", source_kind)
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_after_filter_count=0,
+                football_sent_count=0,
+                last_delivery_reason="non_live_source_blocked",
+                note=f"auto-send blocked for non-live source: {source_kind}",
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=0,
+                notifications_sent_count=0,
+                preview_only=settings.auto_signal_preview_only,
+                message="non_live_source_blocked",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="non_live_source_blocked",
+            )
+
         if settings.auto_signal_preview_only:
             logger.info("[FOOTBALL] final signals: 0 (preview_only enabled)")
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
+                last_delivery_reason="preview_only",
                 note="preview_only enabled",
             )
             return AutoSignalCycleResult(
@@ -308,7 +353,19 @@ class AutoSignalService:
                 rejection_reason="preview_only enabled",
             )
 
-        candidates_to_ingest = filtered_candidates
+        candidates_to_ingest = [
+            c.model_copy(
+                update={
+                    "notes": "live_auto",
+                    "feature_snapshot_json": {
+                        **(c.feature_snapshot_json or {}),
+                        "runtime_source_kind": "live",
+                        "delivery_scope": "live_auto",
+                    },
+                }
+            )
+            for c in filtered_candidates
+        ]
         if fallback_used:
             candidates_to_ingest = [
                 c.model_copy(
@@ -344,6 +401,7 @@ class AutoSignalService:
                 messages_sent_count=0,
                 football_after_filter_count=0,
                 football_sent_count=0,
+                last_delivery_reason="football_send_filter_rejected_all",
                 note="football send filter rejected all signals",
             )
             return AutoSignalCycleResult(
@@ -378,7 +436,12 @@ class AutoSignalService:
         self._log_final_candidates(candidates_to_ingest)
 
         async with sessionmaker() as session:
-            ingest_res = await IngestionService().ingest_candidates(session, candidates_to_ingest)
+            ingest_res = await IngestionService().ingest_candidates(
+                session,
+                candidates_to_ingest,
+                dedup_exclude_notes=("fallback_json", "manual_json", "demo"),
+                dedup_required_notes=("live_auto",),
+            )
             await session.commit()
 
         notifications_sent_count = 0
@@ -397,6 +460,11 @@ class AutoSignalService:
             final_signals_count=int(ingest_res.created_signals),
             messages_sent_count=notifications_sent_count,
             football_sent_count=notifications_sent_count,
+            last_delivery_reason=(
+                None
+                if notifications_sent_count
+                else ("duplicate_in_db_or_no_new_signals" if post_send_filter_count > 0 else "no_created_signals")
+            ),
             note=None if ingest_res.created_signals else "no created football signals",
         )
 

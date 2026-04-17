@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -66,6 +66,8 @@ class SignalRepository:
         market_type: str,
         selection: str,
         is_live: bool,
+        exclude_notes: tuple[str, ...] = (),
+        required_notes: tuple[str, ...] = (),
     ) -> Signal | None:
         """Best-effort exact duplicate lookup (no unique constraints, no fuzzy matching).
 
@@ -83,6 +85,10 @@ class SignalRepository:
         )
         if event_external_id is not None:
             stmt = stmt.where(Signal.event_external_id == event_external_id)
+        if required_notes:
+            stmt = stmt.where(Signal.notes.in_(list(required_notes)))
+        if exclude_notes:
+            stmt = stmt.where(or_(Signal.notes.is_(None), ~Signal.notes.in_(list(exclude_notes))))
         result = await session.execute(stmt)
         return result.scalars().first()
 

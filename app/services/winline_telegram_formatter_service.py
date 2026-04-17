@@ -68,7 +68,7 @@ class WinlineTelegramFormatterService:
         if source == "manual":
             return "📂 Режим: manual JSON"
         if source == "demo":
-            return "🧪 Источник: тестовый demo"
+            return "🧪 Режим: демо"
         return None
 
     def format_signal_text(self, signal: WinlineFinalSignal) -> str:

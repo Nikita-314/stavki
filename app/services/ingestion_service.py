@@ -21,7 +21,12 @@ class IngestionService:
         return self._candidate_to_bundle(candidate)
 
     async def ingest_candidates(
-        self, session: AsyncSession, candidates: list[ProviderSignalCandidate]
+        self,
+        session: AsyncSession,
+        candidates: list[ProviderSignalCandidate],
+        *,
+        dedup_exclude_notes: tuple[str, ...] = (),
+        dedup_required_notes: tuple[str, ...] = (),
     ) -> ProviderBatchIngestResult:
         """Ingest a batch of provider candidates into Signal + PredictionLog (no commit).
 
@@ -47,6 +52,8 @@ class IngestionService:
                     market_type=bundle.signal.market_type,
                     selection=bundle.signal.selection,
                     is_live=bundle.signal.is_live,
+                    exclude_notes=dedup_exclude_notes,
+                    required_notes=dedup_required_notes,
                 )
                 if existing is not None:
                     skipped += 1
