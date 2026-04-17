@@ -64,16 +64,22 @@ class FootballLearningService:
 
         bucket_wins: dict[str, int] = defaultdict(int)
         bucket_losses: dict[str, int] = defaultdict(int)
+        league_wins: dict[tuple[str, str], int] = defaultdict(int)
+        league_losses: dict[tuple[str, str], int] = defaultdict(int)
 
         for signal, st in rows:
             if st.result not in (BetResult.WIN, BetResult.LOSE):
                 continue
             cand = self._candidate_from_signal(signal)
             fam = self._family.get_market_family(cand)
+            league = (signal.tournament_name or "").strip() or "—"
+            lk = (league, fam)
             if st.result == BetResult.WIN:
                 bucket_wins[fam] += 1
+                league_wins[lk] += 1
             else:
                 bucket_losses[fam] += 1
+                league_losses[lk] += 1
 
         aggregates: list[FootballLearningAggregate] = []
         multipliers: dict[str, float] = {}
@@ -86,7 +92,39 @@ class FootballLearningService:
             aggregates.append(FootballLearningAggregate(family=fam, sample_size=n, wins=w, losses=l, win_rate=rate))
             multipliers[fam] = self._multiplier_from_rate(rate, n)
 
+        self._last_league_aggregates = self._build_league_aggregates(league_wins, league_losses)
         return multipliers, aggregates
+
+    def get_last_league_aggregates(self) -> list[dict[str, Any]]:
+        return list(getattr(self, "_last_league_aggregates", []) or [])
+
+    def _build_league_aggregates(
+        self,
+        league_wins: dict[tuple[str, str], int],
+        league_losses: dict[tuple[str, str], int],
+        *,
+        max_rows: int = 24,
+    ) -> list[dict[str, Any]]:
+        keys = set(league_wins) | set(league_losses)
+        rows: list[dict[str, Any]] = []
+        for league, fam in sorted(keys):
+            w = league_wins.get((league, fam), 0)
+            l = league_losses.get((league, fam), 0)
+            n = w + l
+            if n <= 0:
+                continue
+            rows.append(
+                {
+                    "league": league,
+                    "family": fam,
+                    "sample_size": n,
+                    "wins": w,
+                    "losses": l,
+                    "win_rate": round(w / n, 4) if n else None,
+                }
+            )
+        rows.sort(key=lambda r: r["sample_size"], reverse=True)
+        return rows[:max_rows]
 
     def multiplier_for_family(self, multipliers: dict[str, float], family: str) -> float:
         return float(multipliers.get(family, 1.0))

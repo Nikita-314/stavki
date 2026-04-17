@@ -704,6 +704,10 @@ class AutoSignalService:
             learning_payload: dict = {"enabled": learning_enabled, "family_multiplier": lf}
             if idx == 0 and summary:
                 learning_payload["aggregates_top"] = summary
+            if idx == 0:
+                league_top = learning_helper.get_last_league_aggregates()
+                if league_top:
+                    learning_payload["by_league_top"] = league_top
             fs_out: dict = {
                 **prev_fs,
                 "football_scoring": breakdown.as_dict(),
