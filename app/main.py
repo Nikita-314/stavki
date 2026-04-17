@@ -65,18 +65,17 @@ async def main() -> None:
 
     engine = create_engine(settings.database_url, echo=settings.debug)
     sessionmaker = create_sessionmaker(engine)
-    auto_task: asyncio.Task | None = None
 
     dp.include_router(debug_router)
-    if settings.auto_signal_polling_enabled:
-        auto_task = asyncio.create_task(AutoSignalService().run_forever(sessionmaker, bot))
+    football_live_task = asyncio.create_task(
+        AutoSignalService().run_football_live_forever(sessionmaker, bot)
+    )
     try:
         await dp.start_polling(bot, sessionmaker=sessionmaker)
     finally:
-        if auto_task is not None:
-            auto_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await auto_task
+        football_live_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await football_live_task
         await engine.dispose()
 
 

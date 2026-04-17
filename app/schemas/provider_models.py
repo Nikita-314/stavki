@@ -62,4 +62,7 @@ class ProviderBatchIngestResult(BaseModel):
     created_signals: int
     skipped_candidates: int
     created_signal_ids: list[int]
+    """Parallel to created_signal_ids — candidates that produced created signals (same order)."""
+
+    created_from_candidates: list["ProviderSignalCandidate"] = Field(default_factory=list)
 

@@ -19,6 +19,7 @@ from app.schemas.provider_client import ProviderClientConfig
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.candidate_filter_service import CandidateFilterService
 from app.services.deduplication_service import DeduplicationService
+from app.services.football_live_session_service import FootballLiveSessionService, build_live_idea_key
 from app.services.football_analytics_service import FootballAnalyticsService
 from app.services.football_learning_service import FootballLearningService
 from app.services.football_signal_integrity_service import FootballSignalIntegrityService
@@ -227,6 +228,7 @@ def compile_football_cycle_debug(
         "matches": rows,
         "matches_top_for_message": _football_top_matches_for_telegram(rows, limit=10),
         "blocked_dedup_note": "dedup runs only on live ingest; dry_run does not evaluate DB dedup per match",
+        "pipeline_live_only": True,
     }
     try:
         logger.info("[FOOTBALL][CYCLE_DEBUG_JSON] %s", json.dumps(debug, default=str, ensure_ascii=False)[:24000])
@@ -421,6 +423,33 @@ class AutoSignalService:
                 source_name=self._detect_provider_name(settings),
                 rejection_reason="provider_not_configured",
             )
+
+        if not dry_run:
+            ls_gate = FootballLiveSessionService()
+            ls_gate.expire_if_needed()
+            if not ls_gate.is_active():
+                logger.info("[FOOTBALL][BLOCK] football live session inactive — skipping HTTP fetch")
+                diagnostics.update(
+                    last_fetch_status="football_live_session_inactive",
+                    last_delivery_reason="football_live_session_inactive",
+                    note="Нажмите ▶️ Старт для запуска 15-минутной live-сессии",
+                )
+                return AutoSignalCycleResult(
+                    endpoint=getattr(config, "base_url", None),
+                    fetch_ok=False,
+                    preview_candidates=0,
+                    preview_skipped_items=0,
+                    created_signal_ids=[],
+                    created_signals_count=0,
+                    skipped_candidates_count=0,
+                    notifications_sent_count=0,
+                    preview_only=False,
+                    message="football_live_session_inactive",
+                    runtime_paused=False,
+                    runtime_active_sports=active_sports,
+                    source_name=self._detect_provider_name(settings),
+                    rejection_reason="football_live_session_inactive",
+                )
 
         logger.info("[FOOTBALL] fetch started")
         logger.info("[FOOTBALL] fetch source=%s endpoint=%s", self._detect_provider_name(settings), config.base_url)
@@ -631,14 +660,16 @@ class AutoSignalService:
             adapter_service = AdapterIngestionService()
             preview = adapter_service.preview_odds_style_payload(payload)
         logger.info("[FOOTBALL] source: %s", source_kind)
+        if not dry_run:
+            FootballLiveSessionService().touch_cycle()
         raw_events_count = int(preview.total_events)
         normalized_markets_count = int(preview.total_markets)
-        preview_candidates = len(preview.candidates)
         preview_skipped_items = int(preview.skipped_items)
-        candidates_before_filter = list(preview.candidates)
+        candidates_before_filter = self._filter_football_live_only(list(preview.candidates))
+        preview_candidates = len(candidates_before_filter)
         logger.info("[FOOTBALL] raw events fetched: %s", raw_events_count)
         if not candidates_before_filter:
-            logger.info("[FOOTBALL] candidates before filter: 0 (no football events in payload)")
+            logger.info("[FOOTBALL] candidates before filter: 0 (no live football matches)")
         logger.info("[FOOTBALL] candidates total: %s", len(candidates_before_filter))
         self._log_candidates_per_match(candidates_before_filter)
         runtime_candidates = self._filter_candidates_by_runtime(candidates_before_filter, runtime)
@@ -803,7 +834,12 @@ class AutoSignalService:
             diagnostics.update(football_after_filter_count=len(candidates_to_ingest))
         elif candidates_to_ingest:
             football_send_filter = FootballSignalSendFilterService()
-            send_filter_result = football_send_filter.filter_auto_send_candidates(candidates_to_ingest)
+            max_pm = max(1, int(settings.football_live_max_signals_per_match or 12))
+            send_filter_result = football_send_filter.filter_auto_send_candidates(
+                candidates_to_ingest,
+                live_only=True,
+                max_signals_per_match=max_pm,
+            )
             logger.info("[FOOTBALL] after family whitelist: %s", send_filter_result.stats.after_whitelist)
             logger.info("[FOOTBALL] after ranking: %s", send_filter_result.stats.after_ranking)
             logger.info("[FOOTBALL] after family dedup: %s", send_filter_result.stats.after_family_dedup)
@@ -1021,6 +1057,20 @@ class AutoSignalService:
                 min_score,
             )
         finalists = [c for c in scored_sorted if float(c.signal_score or 0) >= min_score]
+        if not dry_run:
+            ls_fin = FootballLiveSessionService()
+            kept_fin: list[ProviderSignalCandidate] = []
+            batch_seen: set[str] = set()
+            for c in finalists:
+                ik = build_live_idea_key(c)
+                if ik in batch_seen or ls_fin.has_idea(ik):
+                    ls_fin.record_duplicate_idea_blocked(1)
+                    logger.info("[FOOTBALL][SESSION_IDEA_DEDUP] blocked key=%s", ik[:200])
+                    continue
+                batch_seen.add(ik)
+                kept_fin.append(c)
+            finalists = kept_fin
+
         finalist_set = set(id(x) for x in finalists)
         for c in finalists:
             logger.info(
@@ -1191,6 +1241,11 @@ class AutoSignalService:
             )
             await session.commit()
 
+        ls_ing = FootballLiveSessionService()
+        for cr in ingest_res.created_from_candidates:
+            ls_ing.register_idea_sent(build_live_idea_key(cr))
+        ls_ing.record_signals_created(len(ingest_res.created_signal_ids))
+
         notifications_sent_count = 0
         orch = OrchestrationService()
         logger.info("[FOOTBALL] final signals: %s", ingest_res.created_signals)
@@ -1304,43 +1359,69 @@ class AutoSignalService:
             football_cycle_debug=cycle_dbg,
         )
 
+    async def run_football_live_forever(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        bot: Bot,
+    ) -> None:
+        """Фоновые циклы только пока активна 15-минутная football live-сессия (после ▶️ Старт)."""
+        settings = get_settings()
+        idle_sleep = max(45, min(180, int(settings.auto_signal_polling_interval_seconds or 60)))
+        poll_sleep = max(15, int(settings.auto_signal_polling_interval_seconds or 60))
+        while True:
+            sleep_time = idle_sleep
+            try:
+                sess = FootballLiveSessionService()
+                sess.expire_if_needed()
+                diag_fn = SignalRuntimeDiagnosticsService().update
+                if sess.is_active():
+                    await self.run_single_cycle(sessionmaker, bot, dry_run=False)
+                    snap = sess.snapshot()
+                    rem = sess.remaining_seconds()
+                    diag_fn(
+                        football_live_session_active=snap.active,
+                        football_live_session_expires_at=(
+                            snap.expires_at.isoformat() if snap.expires_at else None
+                        ),
+                        football_live_session_remaining_minutes=(
+                            (rem / 60.0) if rem is not None else None
+                        ),
+                        football_live_signals_sent_session=snap.signals_sent_in_session,
+                        football_live_duplicate_ideas_blocked=snap.duplicate_ideas_blocked_session,
+                        football_live_sent_ideas_count=snap.sent_idea_keys_count,
+                    )
+                    logger.info(
+                        "[FOOTBALL][LIVE_LOOP] cycle done signals_sent_session=%s dup_blocked=%s ideas=%s remaining_min=%s",
+                        snap.signals_sent_in_session,
+                        snap.duplicate_ideas_blocked_session,
+                        snap.sent_idea_keys_count,
+                        round((rem or 0) / 60.0, 2) if rem is not None else None,
+                    )
+                    sleep_time = poll_sleep
+                else:
+                    snap_idle = sess.snapshot()
+                    diag_fn(
+                        football_live_session_active=False,
+                        football_live_session_expires_at=None,
+                        football_live_session_remaining_minutes=None,
+                        football_live_signals_sent_session=snap_idle.signals_sent_in_session,
+                        football_live_duplicate_ideas_blocked=snap_idle.duplicate_ideas_blocked_session,
+                        football_live_sent_ideas_count=snap_idle.sent_idea_keys_count,
+                    )
+                    sleep_time = idle_sleep
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Football live session loop failed")
+                sleep_time = idle_sleep
+            await asyncio.sleep(sleep_time)
+
     async def run_forever(
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         bot: Bot,
     ) -> None:
-        settings = get_settings()
-        if not settings.auto_signal_polling_enabled:
-            return
-
-        while True:
-            try:
-                result = await self.run_single_cycle(sessionmaker, bot)
-                logger.info(
-                    "Football auto cycle: source=%s endpoint=%s fetch_ok=%s http_status=%s auth_status=%s preview_candidates=%s created=%s skipped=%s "
-                    "notifications=%s preview_only=%s paused=%s active_sports=%s fallback=%s message=%s",
-                    result.source_name,
-                    result.endpoint,
-                    result.fetch_ok,
-                    result.last_live_http_status,
-                    result.live_auth_status,
-                    result.preview_candidates,
-                    result.created_signals_count,
-                    result.skipped_candidates_count,
-                    result.notifications_sent_count,
-                    result.preview_only,
-                    result.runtime_paused,
-                    result.runtime_active_sports,
-                    result.fallback_used,
-                    result.message,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Auto signal cycle failed")
-
-            interval = max(1, int(get_settings().auto_signal_polling_interval_seconds))
-            await asyncio.sleep(interval)
+        await self.run_football_live_forever(sessionmaker, bot)
 
     def _build_provider_client_config(self, settings: Settings) -> ProviderClientConfig | None:
         base_url = self._clean_optional_str(settings.odds_provider_base_url)
@@ -1357,6 +1438,18 @@ class AutoSignalService:
             date_format=self._clean_optional_str(settings.odds_provider_date_format),
             timeout_seconds=int(settings.odds_provider_timeout_seconds),
         )
+
+    def _filter_football_live_only(self, candidates: list[ProviderSignalCandidate]) -> list[ProviderSignalCandidate]:
+        """Оставляет только футбол с is_live=True (без prematch)."""
+        out: list[ProviderSignalCandidate] = []
+        for candidate in candidates:
+            match = getattr(candidate, "match", None)
+            if getattr(match, "sport", None) != SportType.FOOTBALL:
+                continue
+            if not bool(getattr(match, "is_live", False)):
+                continue
+            out.append(candidate)
+        return out
 
     def _filter_candidates_by_runtime(self, candidates, runtime: SignalRuntimeSettingsService):
         accepted = []

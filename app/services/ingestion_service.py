@@ -42,6 +42,7 @@ class IngestionService:
         - skips invalid candidates without stopping the batch
         """
         created_ids: list[int] = []
+        created_pairs: list[ProviderSignalCandidate] = []
         skipped = 0
 
         for candidate in candidates:
@@ -78,6 +79,7 @@ class IngestionService:
 
                 signal = await self._signal_service.create_signal_with_prediction_log(session, bundle)
                 created_ids.append(int(signal.id))
+                created_pairs.append(candidate)
             except (ValidationError, ValueError, TypeError):
                 skipped += 1
                 continue
@@ -87,6 +89,7 @@ class IngestionService:
             created_signals=len(created_ids),
             skipped_candidates=skipped,
             created_signal_ids=created_ids,
+            created_from_candidates=created_pairs,
         )
 
     async def ingest_candidates_with_filter(

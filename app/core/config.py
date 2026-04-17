@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     football_learning_enabled: bool = True
     football_min_signal_score: float = 55.0
     football_dedup_relaxed_interval_minutes: int = 30
+    football_live_session_duration_minutes: int = 15
+    football_live_max_signals_per_match: int = 12
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -56,6 +56,12 @@ class SignalRuntimeDiagnosticsState:
     football_live_fields_in_last_cycle: bool = False
     football_injuries_data_available: bool = False
     football_line_movement_available: bool = False
+    football_live_session_active: bool = False
+    football_live_session_expires_at: str | None = None
+    football_live_session_remaining_minutes: float | None = None
+    football_live_signals_sent_session: int = 0
+    football_live_duplicate_ideas_blocked: int = 0
+    football_live_sent_ideas_count: int = 0
 
 
 _STATE = SignalRuntimeDiagnosticsState()

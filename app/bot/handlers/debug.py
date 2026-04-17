@@ -213,6 +213,8 @@ def _sport_toggle_label(key: str, enabled: bool) -> str:
 
 
 def _format_signal_runtime_status_lines() -> list[str]:
+    from app.services.football_live_session_service import FootballLiveSessionService
+
     state = SignalRuntimeSettingsService().get_state()
     diag = SignalRuntimeDiagnosticsService().get_state()
     source = diag.get("football_source") or "—"
@@ -269,6 +271,14 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено: {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {delivery_reason}",
+        "",
+        "— Football live-сессия (▶️ Старт) —",
+        f"🟢 Активна: {_fmt_yes_no(bool(diag.get('football_live_session_active')))}",
+        f"⏱ До конца (мин): {round(diag.get('football_live_session_remaining_minutes'), 2) if diag.get('football_live_session_remaining_minutes') is not None else '—'}",
+        f"🔔 Истекает: {diag.get('football_live_session_expires_at') or '—'}",
+        f"📤 Сигналов в сессии: {diag.get('football_live_signals_sent_session') or 0}",
+        f"🧱 Повтор идей отсеяно: {diag.get('football_live_duplicate_ideas_blocked') or 0}",
+        f"🧩 Идей в памяти сессии: {diag.get('football_live_sent_ideas_count') or 0}",
         "",
         "— Аналитика и обучение (флаги, без выдуманных данных) —",
         f"Сбор признаков в снимке: {_fmt_yes_no(bool(diag.get('football_analytics_enabled')))}",
@@ -567,18 +577,35 @@ async def cmd_signal_pause(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
+    from app.services.football_live_session_service import FootballLiveSessionService
+
+    FootballLiveSessionService().stop_session(manual=True)
     SignalRuntimeSettingsService().pause()
-    await message.answer("⏸ Стоп: отправка и футбольный цикл остановлены", reply_markup=get_signal_control_keyboard())
+    await message.answer(
+        "⏸ Футбольная live-сессия остановлена.\nНовые циклы не запускаются.",
+        reply_markup=get_signal_control_keyboard(),
+    )
 
 
 @router.message(_text_is("▶️ Старт"))
 @router.message(Command("signal_start"))
-async def cmd_signal_start(message: Message) -> None:
+async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
+    from app.services.football_live_session_service import FootballLiveSessionService
+
+    settings = get_settings()
+    dm = int(settings.football_live_session_duration_minutes or 15)
+    FootballLiveSessionService().start_session(duration_minutes=dm)
     SignalRuntimeSettingsService().start()
-    await message.answer("▶️ Старт: футбольный цикл снова запущен", reply_markup=get_signal_control_keyboard())
+    await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=False)
+    await message.answer(
+        f"▶️ Футбольная live-сессия запущена на {dm} минут.\n"
+        "Анализируются только матчи с признаком live.\n"
+        "Повтор одной и той же идеи по матчу блокируется до следующего запуска сессии.",
+        reply_markup=get_signal_control_keyboard(),
+    )
 
 
 @router.message(_text_is("⚽ Футбол"))
@@ -671,6 +698,7 @@ def _humanize_rejection_for_owner(raw: str | None) -> str:
         ("dropped_invalid_market_mapping", "ставка не прошла проверку целостности"),
         ("dropped_invalid_total_scope", "несовпадение тотала по области действия"),
         ("payload_is_not_dict", "ошибка формата данных провайдера"),
+        ("football_live_session_inactive", "live-сессия не запущена — нажмите ▶️ Старт"),
     ]
     for needle, nice in mapping:
         if needle.lower() in s:
@@ -745,6 +773,26 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
     used_source = ", ".join(dict.fromkeys(used_parts)) if used_parts else (res.source_name or "—")
 
     lines: list[str] = ["⚽ Футбольный прогон завершён", ""]
+
+    dbg = res.football_cycle_debug or {}
+    if dbg.get("pipeline_live_only"):
+        lines.extend(["📍 Политика контура: только live-матчи (prematch исключён).", ""])
+
+    from app.services.football_live_session_service import FootballLiveSessionService as _Fls
+
+    _snap = _Fls().snapshot()
+    _rem = _Fls().remaining_seconds()
+    lines.extend(
+        [
+            "🎚 Live-сессия (память процесса):",
+            f"• Активна: {'да' if _snap.active else 'нет'}",
+            f"• Осталось мин: {round(_rem / 60.0, 1) if _rem is not None and _snap.active else '—'}",
+            f"• Сигналов записано в БД за сессию: {_snap.signals_sent_in_session}",
+            f"• Повтор идей отсеяно (сессия): {_snap.duplicate_ideas_blocked_session}",
+            f"• Уникальных идей отправлено: {_snap.sent_idea_keys_count}",
+            "",
+        ]
+    )
 
     lines.extend(
         [

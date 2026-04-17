@@ -116,6 +116,9 @@ class FootballSignalSendFilterService:
     def filter_auto_send_candidates(
         self,
         candidates: list[ProviderSignalCandidate],
+        *,
+        live_only: bool = False,
+        max_signals_per_match: int | None = None,
     ) -> FootballSendFilterResult:
         drop_reasons = {
             "blocked_family": 0,
@@ -129,6 +132,13 @@ class FootballSignalSendFilterService:
             for candidate in candidates
             if getattr(getattr(candidate, "match", None), "sport", None) == SportType.FOOTBALL
         ]
+        if live_only:
+            football_candidates = [
+                c for c in football_candidates if bool(getattr(getattr(c, "match", None), "is_live", False))
+            ]
+            logger.info("[FOOTBALL][FILTER] live_only=yes football_candidates=%s", len(football_candidates))
+        cap_limit = int(max_signals_per_match) if max_signals_per_match is not None else self.MAX_SIGNALS_PER_MATCH
+        cap_limit = max(1, cap_limit)
         before = len(football_candidates)
         family_histogram_input, exotic_count_input = self.broad_family_histogram(football_candidates)
         logger.info("[FOOTBALL][FILTER] incoming candidates: %s", before)
@@ -172,7 +182,7 @@ class FootballSignalSendFilterService:
         for candidate in family_deduped:
             event_id = str(getattr(getattr(candidate, "match", None), "external_event_id", "") or "")
             used = per_match_count.get(event_id, 0)
-            if used >= self.MAX_SIGNALS_PER_MATCH:
+            if used >= cap_limit:
                 drop_reasons["cap_per_match"] += 1
                 continue
             per_match_count[event_id] = used + 1
