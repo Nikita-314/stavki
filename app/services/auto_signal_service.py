@@ -17,6 +17,7 @@ from app.services.candidate_filter_service import CandidateFilterService
 from app.services.deduplication_service import DeduplicationService
 from app.services.ingestion_service import IngestionService
 from app.services.orchestration_service import OrchestrationService
+from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.services.winline_manual_cycle_service import WinlineManualCycleService
@@ -310,11 +311,47 @@ class AutoSignalService:
                 )
                 for c in candidates_to_ingest
             ]
+        football_send_filter = FootballSignalSendFilterService()
+        send_filter_result = football_send_filter.filter_auto_send_candidates(candidates_to_ingest)
+        logger.info("[FOOTBALL] final before send filter: %s", send_filter_result.stats.before)
+        logger.info("[FOOTBALL] after family whitelist: %s", send_filter_result.stats.after_whitelist)
+        logger.info("[FOOTBALL] after family dedup: %s", send_filter_result.stats.after_family_dedup)
+        logger.info("[FOOTBALL] after per-match cap: %s", send_filter_result.stats.after_per_match_cap)
+        candidates_to_ingest = send_filter_result.candidates
+        post_send_filter_count = len(candidates_to_ingest)
+        if not candidates_to_ingest:
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                note="football send filter rejected all signals",
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=max(0, len(filtered_candidates) - post_send_filter_count),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="ok",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="football send filter rejected all signals",
+            )
         omitted_by_limit = 0
         limit = settings.auto_signal_max_created_per_cycle
         if limit is not None and limit > 0:
             candidates_to_ingest = candidates_to_ingest[:limit]
-            omitted_by_limit = max(0, len(filtered_candidates) - len(candidates_to_ingest))
+            omitted_by_limit = max(0, post_send_filter_count - len(candidates_to_ingest))
 
         async with sessionmaker() as session:
             ingest_res = await IngestionService().ingest_candidates(session, candidates_to_ingest)
