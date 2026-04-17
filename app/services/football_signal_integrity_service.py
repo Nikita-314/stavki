@@ -22,10 +22,16 @@ class FootballSignalIntegrityCheck:
     source_family: str
     source_odds_value: str
     final_bet_text: str
+    source_total_scope: str
+    final_total_scope: str
+    source_total_line: str
+    final_total_line: str
     allowed_selection: bool
     exact_market_match: bool
     exact_selection_match: bool
     exact_odds_match: bool
+    exact_total_scope_match: bool
+    exact_total_line_match: bool
     family_match: bool
     integrity_check_passed: bool
     integrity_check_reason: str
@@ -74,6 +80,10 @@ class FootballSignalIntegrityService:
                         "source_market_type": check.source_market_type,
                         "source_family": check.source_family,
                         "source_odds_value": check.source_odds_value,
+                        "source_total_scope": check.source_total_scope,
+                        "source_total_line": check.source_total_line,
+                        "final_total_scope": check.final_total_scope,
+                        "final_total_line": check.final_total_line,
                         "integrity_check_passed": check.integrity_check_passed,
                         "integrity_check_reason": check.integrity_check_reason,
                     }
@@ -128,10 +138,41 @@ class FootballSignalIntegrityService:
             subsection_name=candidate.market.subsection_name,
         )
         final_bet_text = final_bet.detail_label or final_bet.main_label
+        source_total = self._formatter.describe_total_context(
+            market_type=source_market_type,
+            market_label=source_market_label,
+            selection=source_selection,
+            home_team=candidate.match.home_team,
+            away_team=candidate.match.away_team,
+            section_name=str(snapshot.get("source_section_name") or ""),
+            subsection_name=str(snapshot.get("source_subsection_name") or ""),
+        )
+        final_total = self._formatter.describe_total_context(
+            market_type=candidate.market.market_type,
+            market_label=final_bet_text,
+            selection=final_bet_text,
+            home_team=candidate.match.home_team,
+            away_team=candidate.match.away_team,
+            section_name=candidate.market.section_name,
+            subsection_name=candidate.market.subsection_name,
+        )
+        source_total_scope = source_total.total_scope if source_total else ""
+        final_total_scope = final_total.total_scope if final_total else ""
+        source_total_line = source_total.total_line if source_total and source_total.total_line else ""
+        final_total_line = final_total.total_line if final_total and final_total.total_line else ""
+        exact_total_scope_match = True
+        exact_total_line_match = True
+        if final_family == "totals":
+            exact_total_scope_match = source_total_scope == final_total_scope
+            exact_total_line_match = source_total_line == final_total_line
 
         reason = "ok"
         if not allowed_selection:
             reason = f"invalid_selection_for_family:{final_family}"
+        elif final_family == "totals" and not exact_total_scope_match:
+            reason = "invalid_total_scope"
+        elif final_family == "totals" and not exact_total_line_match:
+            reason = "invalid_total_line"
         elif not exact_market_match:
             reason = "market_label_or_type_mismatch"
         elif not exact_selection_match:
@@ -149,10 +190,16 @@ class FootballSignalIntegrityService:
             source_family=source_family,
             source_odds_value=source_odds_value,
             final_bet_text=final_bet_text,
+            source_total_scope=source_total_scope,
+            final_total_scope=final_total_scope,
+            source_total_line=source_total_line,
+            final_total_line=final_total_line,
             allowed_selection=allowed_selection,
             exact_market_match=exact_market_match,
             exact_selection_match=exact_selection_match,
             exact_odds_match=exact_odds_match,
+            exact_total_scope_match=exact_total_scope_match,
+            exact_total_line_match=exact_total_line_match,
             family_match=family_match,
             integrity_check_passed=reason == "ok",
             integrity_check_reason=reason,
@@ -179,6 +226,20 @@ class FootballSignalIntegrityService:
             "pass" if check.integrity_check_passed else "fail",
             check.integrity_check_reason,
         )
+        if check.source_family == "totals":
+            logger.info(
+                "[FOOTBALL][TOTALS] source_market_label=%s source_selection=%s source_odds=%s normalized_market_text=%s source_total_scope=%s source_total_line=%s final_total_scope=%s final_total_line=%s exact_total_scope_match=%s exact_total_line_match=%s",
+                check.source_market_label,
+                check.source_selection,
+                check.source_odds_value,
+                check.final_bet_text,
+                check.source_total_scope or "—",
+                check.source_total_line or "—",
+                check.final_total_scope or "—",
+                check.final_total_line or "—",
+                str(check.exact_total_scope_match).lower(),
+                str(check.exact_total_line_match).lower(),
+            )
         if not check.integrity_check_passed:
             logger.info(
                 "[FOOTBALL][INTEGRITY][DROP] event_id=%s match=%s reason=%s",

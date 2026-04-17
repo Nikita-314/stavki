@@ -95,6 +95,12 @@ class AutoSignalService:
             football_after_filter_count=0,
             football_after_integrity_count=0,
             dropped_invalid_market_mapping_count=0,
+            dropped_invalid_total_scope_count=0,
+            dropped_too_far_in_time_count=0,
+            live_matches_count=0,
+            near_matches_count=0,
+            too_far_matches_count=0,
+            selected_match_reason=None,
             football_sent_count=0,
         )
         if runtime.is_paused():
@@ -546,35 +552,71 @@ class AutoSignalService:
             logger.info("[FOOTBALL] after family dedup: %s", send_filter_result.stats.after_family_dedup)
             logger.info("[FOOTBALL] after per-match cap: %s", send_filter_result.stats.after_per_match_cap)
             candidates_to_ingest = send_filter_result.candidates
-            diagnostics.update(football_after_filter_count=len(candidates_to_ingest))
+            diagnostics.update(
+                football_after_filter_count=len(candidates_to_ingest),
+                live_matches_count=send_filter_result.stats.live_matches,
+                near_matches_count=send_filter_result.stats.near_matches,
+                too_far_matches_count=send_filter_result.stats.too_far_matches_dropped,
+                dropped_too_far_in_time_count=send_filter_result.stats.drop_reasons.get("too_far_in_time", 0),
+                selected_match_reason=(send_filter_result.stats.selected_per_match[0] if send_filter_result.stats.selected_per_match else None),
+            )
         post_send_filter_count = len(candidates_to_ingest)
         integrity_result = FootballSignalIntegrityService().validate_candidates(candidates_to_ingest)
         candidates_to_ingest = integrity_result.valid_candidates
-        invalid_market_drops = len(integrity_result.dropped_checks)
+        invalid_market_drops = len(
+            [
+                check
+                for check in integrity_result.dropped_checks
+                if check.integrity_check_reason not in {"invalid_total_scope", "invalid_total_line"}
+            ]
+        )
+        invalid_total_scope_drops = len(
+            [
+                check
+                for check in integrity_result.dropped_checks
+                if check.integrity_check_reason in {"invalid_total_scope", "invalid_total_line"}
+            ]
+        )
         diagnostics.update(
             football_after_filter_count=len(candidates_to_ingest),
             football_after_integrity_count=len(candidates_to_ingest),
             dropped_invalid_market_mapping_count=invalid_market_drops,
+            dropped_invalid_total_scope_count=invalid_total_scope_drops,
         )
         if invalid_market_drops:
             logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_market_mapping=%s", invalid_market_drops)
+        if invalid_total_scope_drops:
+            logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_total_scope=%s", invalid_total_scope_drops)
         post_integrity_count = len(candidates_to_ingest)
         if not candidates_to_ingest:
+            too_far_drops = 0 if settings.football_debug_disable_filter else send_filter_result.stats.drop_reasons.get("too_far_in_time", 0)
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_after_filter_count=0,
-            football_after_integrity_count=0,
+                football_after_integrity_count=0,
                 football_sent_count=0,
                 last_delivery_reason=(
-                    "dropped_invalid_market_mapping"
-                    if invalid_market_drops
-                    else "football_send_filter_rejected_all"
+                    "dropped_invalid_total_scope"
+                    if invalid_total_scope_drops
+                    else (
+                        "dropped_invalid_market_mapping"
+                        if invalid_market_drops
+                        else ("too_far_in_time" if too_far_drops else "football_send_filter_rejected_all")
+                    )
                 ),
                 note=(
-                    "all selected football signals failed integrity check"
-                    if invalid_market_drops
-                    else "football send filter rejected all signals"
+                    "selected football signal lost exact total scope"
+                    if invalid_total_scope_drops
+                    else (
+                        "all selected football signals failed integrity check"
+                        if invalid_market_drops
+                        else (
+                            "all football matches are outside allowed prematch window"
+                            if too_far_drops
+                            else "football send filter rejected all signals"
+                        )
+                    )
                 ),
             )
             return AutoSignalCycleResult(
@@ -600,9 +642,13 @@ class AutoSignalService:
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
                 rejection_reason=(
-                    "dropped_invalid_market_mapping"
-                    if invalid_market_drops
-                    else "football send filter rejected all signals"
+                    "dropped_invalid_total_scope"
+                    if invalid_total_scope_drops
+                    else (
+                        "dropped_invalid_market_mapping"
+                        if invalid_market_drops
+                        else ("too_far_in_time" if too_far_drops else "football send filter rejected all signals")
+                    )
                 ),
             )
         omitted_by_limit = 0

@@ -10,6 +10,17 @@ class FootballBetPresentation:
     detail_label: str | None = None
 
 
+@dataclass(frozen=True)
+class FootballTotalContext:
+    total_scope: str
+    period_scope: str
+    target_scope: str
+    team_name: str | None
+    total_line: str | None
+    total_side: str | None
+    normalized_text: str
+
+
 class FootballBetFormatterService:
     _TEAM_TRANSLIT = {
         "Zenit": "Зенит",
@@ -78,7 +89,7 @@ class FootballBetFormatterService:
                 away_team=away_team,
             )
             if total_label:
-                return FootballBetPresentation(main_label=self._with_period(total_label, period))
+                return FootballBetPresentation(main_label=total_label)
 
         if self._is_handicap(market_type_l, market_label_s):
             handicap_label = self._format_handicap(
@@ -143,6 +154,52 @@ class FootballBetFormatterService:
         )
         return FootballBetPresentation(main_label=fallback)
 
+    def describe_total_context(
+        self,
+        *,
+        market_type: str | None,
+        market_label: str | None,
+        selection: str | None,
+        home_team: str | None = None,
+        away_team: str | None = None,
+        section_name: str | None = None,
+        subsection_name: str | None = None,
+    ) -> FootballTotalContext | None:
+        market_type_l = (market_type or "").strip().lower()
+        market_label_s = (market_label or "").strip()
+        selection_s = (selection or "").strip()
+        if not self._is_total(market_type_l, market_label_s, selection_s):
+            return None
+        combined = " ".join(
+            value for value in [market_label_s, selection_s, section_name or "", subsection_name or ""] if value
+        )
+        period_scope = self._detect_period_scope(combined)
+        team_name = self._extract_team_reference(combined, home_team=home_team, away_team=away_team)
+        target_scope = self._detect_total_target_scope(
+            text=combined,
+            team_name=team_name,
+            home_team=home_team,
+            away_team=away_team,
+        )
+        total_side = self._normalize_total_side(selection_s) or self._normalize_total_side(market_label_s)
+        total_line = self._extract_numeric_value(selection_s) or self._extract_numeric_value(market_label_s)
+        total_scope = self._compose_total_scope(period_scope=period_scope, target_scope=target_scope)
+        return FootballTotalContext(
+            total_scope=total_scope,
+            period_scope=period_scope,
+            target_scope=target_scope,
+            team_name=team_name,
+            total_line=total_line,
+            total_side=total_side,
+            normalized_text=self._render_total_context(
+                period_scope=period_scope,
+                target_scope=target_scope,
+                team_name=team_name,
+                total_side=total_side,
+                total_line=total_line,
+            ),
+        )
+
     def _is_outcome(self, market_type: str, market_label: str) -> bool:
         label = market_label.lower()
         return market_type in {"1x2", "match_winner"} or label in {
@@ -199,10 +256,10 @@ class FootballBetFormatterService:
 
     def _detect_period(self, *values: str) -> str | None:
         text = " ".join(v.lower() for v in values if v)
-        if any(token in text for token in ("1 тайм", "1-й тайм", "first half", "1st half")):
-            return "1 тайм"
-        if any(token in text for token in ("2 тайм", "2-й тайм", "second half", "2nd half")):
-            return "2 тайм"
+        if any(token in text for token in ("1 тайм", "1-й тайм", "first half", "1st half", "@1ht@", "1ht")):
+            return "1-й тайм"
+        if any(token in text for token in ("2 тайм", "2-й тайм", "second half", "2nd half", "@2ht@", "2ht")):
+            return "2-й тайм"
         if any(token in text for token in ("основное время", "full time", "match")):
             return None
         return None
@@ -291,31 +348,14 @@ class FootballBetFormatterService:
         home_team: str | None,
         away_team: str | None,
     ) -> str | None:
-        total_side = self._normalize_total_side(selection) or self._normalize_total_side(market_label)
-        total_value = self._extract_numeric_value(selection) or self._extract_numeric_value(market_label)
-        label_l = market_label.lower()
-        selection_l = selection.lower()
-        team = self._extract_team_reference(
-            f"{market_label} {selection}",
+        context = self.describe_total_context(
+            market_type="total_goals",
+            market_label=market_label,
+            selection=selection,
             home_team=home_team,
             away_team=away_team,
         )
-        if "team total" in label_l or "индивидуаль" in label_l:
-            prefix = f"Тотал {team}" if team else "Командный тотал"
-            if total_side and total_value:
-                return f"{prefix} {total_side} {total_value}"
-            return prefix
-        if total_side == "ТБ" and total_value:
-            return f"Тотал больше {total_value}"
-        if total_side == "ТМ" and total_value:
-            return f"Тотал меньше {total_value}"
-        if total_side and total_value:
-            return f"{total_side} {total_value}"
-        if "more" in selection_l or "больше" in selection_l:
-            return f"Тотал больше {total_value}".strip()
-        if "less" in selection_l or "меньше" in selection_l:
-            return f"Тотал меньше {total_value}".strip()
-        return None
+        return context.normalized_text if context else None
 
     def _format_handicap(
         self,
@@ -444,9 +484,9 @@ class FootballBetFormatterService:
             return home
         if away and away.lower() in raw.lower():
             return away
-        if any(token in upper for token in self._HOME_TOKENS):
+        if self._contains_exact_word_token(upper, self._HOME_TOKENS):
             return home or "хозяева"
-        if any(token in upper for token in self._AWAY_TOKENS):
+        if self._contains_exact_word_token(upper, self._AWAY_TOKENS):
             return away or "гости"
         return None
 
@@ -472,6 +512,74 @@ class FootballBetFormatterService:
             return None
         return match.group(1)
 
+    def _detect_period_scope(self, text: str) -> str:
+        lowered = (text or "").lower()
+        if any(token in lowered for token in ("1 тайм", "1-й тайм", "first half", "1st half", "@1ht@", "1ht")):
+            return "first_half"
+        if any(token in lowered for token in ("2 тайм", "2-й тайм", "second half", "2nd half", "@2ht@", "2ht")):
+            return "second_half"
+        return "match"
+
+    def _detect_total_target_scope(
+        self,
+        *,
+        text: str,
+        team_name: str | None,
+        home_team: str | None,
+        away_team: str | None,
+    ) -> str:
+        lowered = (text or "").lower()
+        if team_name:
+            home = self._humanize_team(home_team)
+            away = self._humanize_team(away_team)
+            if home and team_name.lower() == home.lower():
+                return "home_team"
+            if away and team_name.lower() == away.lower():
+                return "away_team"
+            return "team_total"
+        if any(token in lowered for token in ("team total", "индивидуаль", "команд", "it1", "it2")):
+            return "team_total"
+        return "match"
+
+    def _compose_total_scope(self, *, period_scope: str, target_scope: str) -> str:
+        if period_scope == "match" and target_scope == "match":
+            return "match_total"
+        return f"{period_scope}_{target_scope}_total"
+
+    def _render_total_context(
+        self,
+        *,
+        period_scope: str,
+        target_scope: str,
+        team_name: str | None,
+        total_side: str | None,
+        total_line: str | None,
+    ) -> str:
+        if total_side == "ТБ":
+            side_text = "больше"
+        elif total_side == "ТМ":
+            side_text = "меньше"
+        else:
+            side_text = None
+
+        period_prefix = ""
+        if period_scope == "first_half":
+            period_prefix = "1-й тайм "
+        elif period_scope == "second_half":
+            period_prefix = "2-й тайм "
+
+        if target_scope in {"home_team", "away_team", "team_total"}:
+            target = team_name or "команды"
+            base = f"{period_prefix}тотал {target}".strip()
+        else:
+            base = f"{period_prefix}тотал".strip()
+
+        if side_text and total_line:
+            return f"{base} {side_text} {total_line}"
+        if total_line:
+            return f"{base} {total_line}"
+        return base
+
     def _with_period(self, label: str, period: str | None) -> str:
         if not period:
             return label
@@ -479,6 +587,10 @@ class FootballBetFormatterService:
 
     def _clean_token(self, raw: str) -> str:
         return re.sub(r"[\s_()-]+", " ", (raw or "").strip()).strip()
+
+    def _contains_exact_word_token(self, text: str, aliases: set[str]) -> bool:
+        words = {part for part in re.split(r"[^A-ZА-Я0-9Ё]+", text or "") if part}
+        return any(alias.upper() in words for alias in aliases)
 
     def _humanize_team(self, raw: str | None) -> str:
         text = (raw or "").strip()

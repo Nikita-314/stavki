@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -22,6 +23,9 @@ class FootballSendFilterStats:
     drop_reasons: dict[str, int]
     families_left: dict[str, int]
     selected_per_match: list[str]
+    live_matches: int
+    near_matches: int
+    too_far_matches_dropped: int
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,8 @@ class FootballSendFilterResult:
 
 class FootballSignalSendFilterService:
     MAX_SIGNALS_PER_MATCH = 1
+    NEAR_MATCH_HOURS = 6.0
+    MAX_PREMATCH_HOURS = 24.0
 
     _ALLOWED_AUTO_FAMILIES = {"result", "double_chance", "totals", "btts", "handicap"}
     _SOFT_ALLOWED_AUTO_FAMILIES = {"combo"}
@@ -80,6 +86,7 @@ class FootballSignalSendFilterService:
             "low_score": 0,
             "dedup_family": 0,
             "cap_per_match": 0,
+            "too_far_in_time": 0,
         }
         football_candidates = [
             candidate
@@ -88,6 +95,13 @@ class FootballSignalSendFilterService:
         ]
         before = len(football_candidates)
         logger.info("[FOOTBALL][FILTER] incoming candidates: %s", before)
+        live_matches, near_matches, too_far_matches = self._summarize_match_timing(football_candidates)
+        logger.info(
+            "[FOOTBALL][TIME] match buckets: live_matches=%s near_matches=%s too_far_matches=%s",
+            live_matches,
+            near_matches,
+            too_far_matches,
+        )
 
         ranked = sorted(football_candidates, key=self._candidate_rank_key, reverse=True)
         whitelisted: list[ProviderSignalCandidate] = []
@@ -145,11 +159,12 @@ class FootballSignalSendFilterService:
         if not capped:
             logger.warning("[FOOTBALL][FILTER][WARNING] no signals after filtering")
         logger.info(
-            "[FOOTBALL][FILTER][DROP REASONS]: blocked_family=%s, low_score=%s, dedup_family=%s, cap_per_match=%s",
+            "[FOOTBALL][FILTER][DROP REASONS]: blocked_family=%s, low_score=%s, dedup_family=%s, cap_per_match=%s, too_far_in_time=%s",
             drop_reasons["blocked_family"],
             drop_reasons["low_score"],
             drop_reasons["dedup_family"],
             drop_reasons["cap_per_match"],
+            drop_reasons["too_far_in_time"],
         )
 
         return FootballSendFilterResult(
@@ -163,6 +178,9 @@ class FootballSignalSendFilterService:
                 drop_reasons=dict(drop_reasons),
                 families_left=families_left,
                 selected_per_match=selected_per_match,
+                live_matches=live_matches,
+                near_matches=near_matches,
+                too_far_matches_dropped=too_far_matches,
             ),
         )
 
@@ -213,6 +231,7 @@ class FootballSignalSendFilterService:
         family = self.get_market_family(candidate)
         tier = self.get_market_tier(candidate)
         score = self._FAMILY_PRIORITY.get(family, 0.0) - (tier - 1) * 25.0
+        score += self._build_time_priority_score(candidate)
 
         score += self._numeric_value(getattr(candidate, "signal_score", None)) * 100.0
         score += self._numeric_value(getattr(candidate, "predicted_prob", None)) * 80.0
@@ -234,6 +253,17 @@ class FootballSignalSendFilterService:
         return (score, family_priority)
 
     def _is_allowed_for_auto_send(self, candidate: ProviderSignalCandidate) -> tuple[bool, str | None]:
+        is_live, hours_to_start = self._time_window_info(candidate)
+        if not is_live and hours_to_start is not None and hours_to_start > self.MAX_PREMATCH_HOURS:
+            logger.info(
+                "[FOOTBALL][TIME] drop too_far_in_time: match=%s event_start_at=%s is_live=%s hours_to_start=%.2f priority_score=%.2f",
+                getattr(getattr(candidate, "match", None), "match_name", "—"),
+                getattr(getattr(candidate, "match", None), "event_start_at", None),
+                str(is_live).lower(),
+                hours_to_start,
+                self.build_football_signal_score(candidate),
+            )
+            return False, "too_far_in_time"
         family = self.get_market_family(candidate)
         if family in self._BLOCKED_AUTO_FAMILIES:
             return False, "blocked_family"
@@ -281,6 +311,74 @@ class FootballSignalSendFilterService:
         selection = str(getattr(getattr(candidate, "market", None), "selection", "") or "")
         odds = getattr(getattr(candidate, "market", None), "odds_value", None)
         family = self.get_market_family(candidate)
+        is_live, hours_to_start = self._time_window_info(candidate)
+        priority_score = self.build_football_signal_score(candidate)
         suffix = f" ({selection})" if selection else ""
         odds_text = f"@{odds}" if odds is not None else "@?"
-        return f"{match_name} -> {family} [{market_label}{suffix}] {odds_text}"
+        if is_live:
+            time_part = "live"
+        elif hours_to_start is None:
+            time_part = "start=unknown"
+        else:
+            time_part = f"hours_to_start={hours_to_start:.2f}"
+        logger.info(
+            "[FOOTBALL][TIME] candidate: match=%s event_start_at=%s is_live=%s hours_to_start=%s priority_score=%.2f",
+            match_name,
+            getattr(getattr(candidate, "match", None), "event_start_at", None),
+            str(is_live).lower(),
+            "—" if hours_to_start is None else f"{hours_to_start:.2f}",
+            priority_score,
+        )
+        return f"{match_name} -> {family} [{market_label}{suffix}] {odds_text} [{time_part}; score={priority_score:.2f}]"
+
+    def _build_time_priority_score(self, candidate: ProviderSignalCandidate) -> float:
+        is_live, hours_to_start = self._time_window_info(candidate)
+        if is_live:
+            return 10000.0
+        if hours_to_start is None:
+            return -250.0
+        if hours_to_start <= 0:
+            return 6000.0
+        if hours_to_start <= 1:
+            return 4000.0 - hours_to_start * 50.0
+        if hours_to_start <= self.NEAR_MATCH_HOURS:
+            return 3000.0 - hours_to_start * 40.0
+        if hours_to_start <= self.MAX_PREMATCH_HOURS:
+            return 1500.0 - hours_to_start * 20.0
+        return -5000.0 - hours_to_start * 10.0
+
+    def _time_window_info(self, candidate: ProviderSignalCandidate) -> tuple[bool, float | None]:
+        match = getattr(candidate, "match", None)
+        is_live = bool(getattr(match, "is_live", False))
+        event_start_at = getattr(match, "event_start_at", None)
+        if is_live:
+            return True, 0.0
+        if event_start_at is None:
+            return False, None
+        dt = event_start_at
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return False, (dt - now).total_seconds() / 3600.0
+
+    def _summarize_match_timing(self, candidates: list[ProviderSignalCandidate]) -> tuple[int, int, int]:
+        buckets: dict[str, str] = {}
+        for candidate in candidates:
+            match = getattr(candidate, "match", None)
+            event_id = str(getattr(match, "external_event_id", "") or "")
+            if not event_id or event_id in buckets:
+                continue
+            is_live, hours_to_start = self._time_window_info(candidate)
+            if is_live:
+                buckets[event_id] = "live"
+            elif hours_to_start is not None and 0 <= hours_to_start <= self.NEAR_MATCH_HOURS:
+                buckets[event_id] = "near"
+            elif hours_to_start is not None and hours_to_start > self.MAX_PREMATCH_HOURS:
+                buckets[event_id] = "too_far"
+            else:
+                buckets[event_id] = "prematch"
+        return (
+            sum(1 for bucket in buckets.values() if bucket == "live"),
+            sum(1 for bucket in buckets.values() if bucket == "near"),
+            sum(1 for bucket in buckets.values() if bucket == "too_far"),
+        )

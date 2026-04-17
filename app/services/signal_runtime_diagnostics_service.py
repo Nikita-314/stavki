@@ -38,6 +38,12 @@ class SignalRuntimeDiagnosticsState:
     football_after_filter_count: int = 0
     football_after_integrity_count: int = 0
     dropped_invalid_market_mapping_count: int = 0
+    dropped_invalid_total_scope_count: int = 0
+    dropped_too_far_in_time_count: int = 0
+    live_matches_count: int = 0
+    near_matches_count: int = 0
+    too_far_matches_count: int = 0
+    selected_match_reason: str | None = None
     football_sent_count: int = 0
     final_signals_count: int = 0
     messages_sent_count: int = 0
