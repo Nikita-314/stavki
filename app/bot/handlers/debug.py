@@ -44,6 +44,7 @@ from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
 from app.services.auto_signal_service import AutoSignalService
+from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.schemas.provider_client import ProviderClientConfig
 from app.services.remote_smoke_service import RemoteSmokeService
@@ -186,21 +187,24 @@ def _sport_toggle_label(key: str, enabled: bool) -> str:
 
 def _format_signal_runtime_status_lines() -> list[str]:
     state = SignalRuntimeSettingsService().get_state()
+    diag = SignalRuntimeDiagnosticsService().get_state()
     active = []
     if state.get("football_enabled"):
         active.append("футбол")
-    if state.get("cs2_enabled"):
-        active.append("cs2")
-    if state.get("dota_enabled"):
-        active.append("dota")
+    source = diag.get("football_source") or "—"
+    if diag.get("fallback_used"):
+        source = f"{source} -> fallback ({diag.get('football_fallback_source') or 'manual'})"
     return [
         "📊 Статус сигналов",
         f"- Пауза: {'да' if state.get('paused') else 'нет'}",
-        f"- Футбол: {_fmt_yes_no(bool(state.get('football_enabled')))}",
-        f"- CS2: {_fmt_yes_no(bool(state.get('cs2_enabled')))}",
-        f"- Dota: {_fmt_yes_no(bool(state.get('dota_enabled')))}",
-        f"- Активно направлений: {len(active)}",
-        f"- Активные направления: {', '.join(active) if active else '—'}",
+        f"- Активный режим: {', '.join(active) if active else '—'}",
+        f"- Источник футбола: {source}",
+        f"- Последний fetch: {diag.get('last_fetch_status') or '—'}",
+        f"- Последние raw events: {diag.get('raw_events_count') or 0}",
+        f"- Последние candidates: {diag.get('candidates_after_filter_count') or 0}",
+        f"- Последние final signals: {diag.get('final_signals_count') or 0}",
+        f"- Последняя отправка: {diag.get('messages_sent_count') or 0} сообщений",
+        f"- Режим preview-only: {_fmt_yes_no(bool(diag.get('preview_only')))}",
     ]
 
 
@@ -511,37 +515,11 @@ async def cmd_signal_football(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
-    state = SignalRuntimeSettingsService().toggle_sport("football")
-    await message.answer(
-        _sport_toggle_label("football", bool(state.get("football_enabled"))),
-        reply_markup=get_signal_control_keyboard(),
-    )
-
-
-@router.message(_text_is("🎮 CS2"))
-@router.message(Command("signal_cs2"))
-async def cmd_signal_cs2(message: Message) -> None:
-    if not _is_allowed(message):
-        await _deny(message)
-        return
-    state = SignalRuntimeSettingsService().toggle_sport("cs2")
-    await message.answer(
-        _sport_toggle_label("cs2", bool(state.get("cs2_enabled"))),
-        reply_markup=get_signal_control_keyboard(),
-    )
-
-
-@router.message(_text_is("🎮 Dota"))
-@router.message(Command("signal_dota"))
-async def cmd_signal_dota(message: Message) -> None:
-    if not _is_allowed(message):
-        await _deny(message)
-        return
-    state = SignalRuntimeSettingsService().toggle_sport("dota2")
-    await message.answer(
-        _sport_toggle_label("dota", bool(state.get("dota_enabled"))),
-        reply_markup=get_signal_control_keyboard(),
-    )
+    runtime = SignalRuntimeSettingsService()
+    runtime.enable_sport("football")
+    runtime.disable_sport("cs2")
+    runtime.disable_sport("dota2")
+    await message.answer("⚽ Футбол: основной рабочий режим включён", reply_markup=get_signal_control_keyboard())
 
 
 @router.message(_text_is("Автосигналы"))
@@ -553,28 +531,29 @@ async def cmd_auto_signal_status(message: Message) -> None:
 
     settings = get_settings()
     runtime = SignalRuntimeSettingsService()
-    state = runtime.get_state()
+    diag = SignalRuntimeDiagnosticsService().get_state()
     provider_configured = bool(settings.odds_provider_base_url)
     signal_chat_configured = settings.signal_chat_id is not None
     await message.answer(
         "\n".join(
             [
-                "🤖 Автосигналы",
+                "⚽ Футбольный контур",
                 f"- Включено: {_fmt_yes_no(settings.auto_signal_polling_enabled)}",
                 f"- Интервал: {settings.auto_signal_polling_interval_seconds} сек.",
                 f"- Только preview: {_fmt_yes_no(settings.auto_signal_preview_only)}",
                 f"- Лимит за цикл: {settings.auto_signal_max_created_per_cycle}",
                 f"- Provider настроен: {_fmt_yes_no(provider_configured)}",
                 f"- Чат сигналов настроен: {_fmt_yes_no(signal_chat_configured)}",
-                f"- Пауза runtime: {_fmt_yes_no(bool(state.get('paused')))}",
-                f"- Активные направления: {', '.join(s.value.lower() for s in runtime.active_sports()) or '—'}",
+                f"- Активный режим: {', '.join(s.value.lower() for s in runtime.active_sports()) or '—'}",
+                f"- Источник футбола: {diag.get('football_source') or '—'}",
+                f"- Последний fetch: {diag.get('last_fetch_status') or '—'}",
             ]
         ),
         reply_markup=get_debug_keyboard(),
     )
 
 
-@router.message(_text_is("Запустить цикл"))
+@router.message(_text_is("⚽ Футбольный прогон", "Запустить цикл"))
 @router.message(Command("auto_signal_run_once"))
 async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -585,23 +564,15 @@ async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_session
     await message.answer(
         "\n".join(
             [
-                "🔄 Автосигналы: один цикл",
-                f"- Endpoint: {res.endpoint}",
-                f"- Fetch успешен: {_fmt_yes_no(res.fetch_ok)}",
-                f"- Пауза runtime: {_fmt_yes_no(res.runtime_paused)}",
-                f"- Активные направления: {', '.join(res.runtime_active_sports) or '—'}",
-                f"- Raw events: {res.raw_events_count}",
-                f"- Normalized markets: {res.normalized_markets_count}",
-                f"- Candidates before filter: {res.candidates_before_filter_count}",
-                f"- Candidates after filter: {res.candidates_after_filter_count}",
-                f"- Кандидатов после preview: {res.preview_candidates}",
-                f"- Отброшено на preview: {res.preview_skipped_items}",
-                f"- Создано сигналов: {res.created_signals_count}",
-                f"- Пропущено кандидатов: {res.skipped_candidates_count}",
-                f"- Отправлено уведомлений: {res.notifications_sent_count}",
-                f"- Только preview: {_fmt_yes_no(res.preview_only)}",
-                f"- ID новых сигналов: {res.created_signal_ids}",
-                f"- Сообщение: {res.message}",
+                "⚽ Футбольный прогон",
+                f"- источник: {res.source_name or '—'}",
+                f"- fallback: {_fmt_yes_no(bool(res.fallback_used))}",
+                f"- raw events: {res.raw_events_count}",
+                f"- candidates: {res.candidates_after_filter_count}",
+                f"- final signals: {res.created_signals_count}",
+                f"- отправлено: {res.notifications_sent_count}",
+                f"- preview-only: {_fmt_yes_no(bool(res.preview_only))}",
+                f"- ошибка: {res.message if not res.fetch_ok and not res.fallback_used else (res.rejection_reason or ('preview_only включён' if res.preview_only else '—'))}",
             ]
         )
     )

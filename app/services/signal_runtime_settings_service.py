@@ -9,8 +9,8 @@ from app.core.enums import SportType
 @dataclass
 class SignalRuntimeState:
     football_enabled: bool = True
-    cs2_enabled: bool = True
-    dota_enabled: bool = True
+    cs2_enabled: bool = False
+    dota_enabled: bool = False
     paused: bool = False
 
 

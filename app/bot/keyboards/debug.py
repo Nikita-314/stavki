@@ -29,8 +29,8 @@ def get_winline_manual_flow_keyboard() -> ReplyKeyboardMarkup:
 def get_signal_control_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
-            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="📊 Статус сигналов")],
+            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="⚽ Футбольный прогон")],
+            [KeyboardButton(text="📊 Статус сигналов")],
             [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза")],
         ],
         resize_keyboard=True,
@@ -47,10 +47,9 @@ def get_debug_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Отчёт за период"), KeyboardButton(text="Отчёт за период ₽")],
             [KeyboardButton(text="Быстрая проверка"), KeyboardButton(text="Проверка данных")],
             [KeyboardButton(text="Помощь"), KeyboardButton(text="Кто я")],
-            [KeyboardButton(text="Автосигналы"), KeyboardButton(text="Запустить цикл")],
-            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
-            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="📊 Статус сигналов")],
-            [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза")],
+            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="⚽ Футбольный прогон")],
+            [KeyboardButton(text="📊 Статус сигналов"), KeyboardButton(text="⏸ Пауза")],
+            [KeyboardButton(text="▶️ Старт")],
             [
                 KeyboardButton(text="Winline статус"),
                 KeyboardButton(text="Winline превью"),

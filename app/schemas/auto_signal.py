@@ -20,4 +20,8 @@ class AutoSignalCycleResult(BaseModel):
     candidates_after_filter_count: int = 0
     runtime_paused: bool = False
     runtime_active_sports: list[str] = []
+    source_name: str | None = None
+    fallback_used: bool = False
+    fallback_source_name: str | None = None
+    rejection_reason: str | None = None
 
