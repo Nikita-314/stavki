@@ -27,6 +27,7 @@ def get_winline_manual_flow_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_signal_control_keyboard() -> ReplyKeyboardMarkup:
+    """Компактная основная клавиатура (только рабочие кнопки, русский)."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
@@ -40,18 +41,16 @@ def get_signal_control_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_debug_keyboard() -> ReplyKeyboardMarkup:
+    """Расширенная клавиатура: диагностика + Winline / manual (только из /debug)."""
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text="🏠 Основная клавиатура")],
             [KeyboardButton(text="Проверка бота"), KeyboardButton(text="Статус системы")],
             [KeyboardButton(text="Последние сигналы"), KeyboardButton(text="Последние результаты")],
             [KeyboardButton(text="Баланс"), KeyboardButton(text="Баланс ₽")],
             [KeyboardButton(text="Отчёт за период"), KeyboardButton(text="Отчёт за период ₽")],
             [KeyboardButton(text="Быстрая проверка"), KeyboardButton(text="Проверка данных")],
             [KeyboardButton(text="Помощь"), KeyboardButton(text="Кто я")],
-            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
-            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="⚽ Футбольный прогон")],
-            [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Стоп")],
-            [KeyboardButton(text="📊 Статус сигналов")],
             [
                 KeyboardButton(text="Winline статус"),
                 KeyboardButton(text="Winline превью"),

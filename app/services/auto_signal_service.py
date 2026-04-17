@@ -12,14 +12,18 @@ from app.core.config import Settings, get_settings
 from app.providers.odds_http_client import OddsHttpClient
 from app.schemas.candidate_filter import CandidateFilterConfig
 from app.schemas.auto_signal import AutoSignalCycleResult
+from app.schemas.provider_models import ProviderSignalCandidate
 from app.schemas.provider_client import ProviderClientConfig
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.candidate_filter_service import CandidateFilterService
 from app.services.deduplication_service import DeduplicationService
+from app.services.football_analytics_service import FootballAnalyticsService
+from app.services.football_learning_service import FootballLearningService
 from app.services.football_signal_integrity_service import FootballSignalIntegrityService
+from app.services.football_signal_scoring_service import FootballSignalScoringService
+from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 from app.services.ingestion_service import IngestionService
 from app.services.orchestration_service import OrchestrationService
-from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.services.winline_manual_cycle_service import WinlineManualCycleService
@@ -102,6 +106,12 @@ class AutoSignalService:
             too_far_matches_count=0,
             selected_match_reason=None,
             football_sent_count=0,
+            football_analytics_enabled=bool(settings.football_analytics_enabled),
+            football_learning_enabled=bool(settings.football_learning_enabled),
+            football_learning_families_tracked=0,
+            football_live_fields_in_last_cycle=False,
+            football_injuries_data_available=False,
+            football_line_movement_available=False,
         )
         if runtime.is_paused():
             logger.info("[FOOTBALL][BLOCK] skipped due to paused")
@@ -659,6 +669,69 @@ class AutoSignalService:
 
         logger.info("[FOOTBALL] final signals to send: %s", len(candidates_to_ingest))
         self._log_final_candidates(candidates_to_ingest)
+
+        analytics_enabled = bool(settings.football_analytics_enabled)
+        learning_enabled = bool(settings.football_learning_enabled)
+        learning_multipliers: dict[str, float] = {}
+        learning_aggregates: list = []
+        if learning_enabled and candidates_to_ingest:
+            async with sessionmaker() as learn_session:
+                learning_multipliers, learning_aggregates = await FootballLearningService().compute_family_multipliers(
+                    learn_session
+                )
+
+        analytics_svc = FootballAnalyticsService()
+        scoring_svc = FootballSignalScoringService()
+        family_svc = FootballSignalSendFilterService()
+        learning_helper = FootballLearningService()
+        live_fields_seen = False
+        enriched: list[ProviderSignalCandidate] = []
+        for idx, cand in enumerate(candidates_to_ingest):
+            family = family_svc.get_market_family(cand)
+            analytics = analytics_svc.build_snapshot(cand, market_family=family)
+            if analytics.get("score_home") is not None or analytics.get("minute") is not None:
+                live_fields_seen = True
+            lf = learning_helper.multiplier_for_family(learning_multipliers, family) if learning_enabled else 1.0
+            breakdown = scoring_svc.score(
+                candidate=cand,
+                analytics=analytics,
+                market_family=family,
+                learning_factor=lf,
+            )
+            prev_fs = dict(cand.feature_snapshot_json or {})
+            prev_expl = dict(cand.explanation_json or {})
+            summary = [a.as_dict() for a in learning_aggregates[:20]] if learning_aggregates else []
+            learning_payload: dict = {"enabled": learning_enabled, "family_multiplier": lf}
+            if idx == 0 and summary:
+                learning_payload["aggregates_top"] = summary
+            fs_out: dict = {
+                **prev_fs,
+                "football_scoring": breakdown.as_dict(),
+                "football_learning": learning_payload,
+            }
+            if analytics_enabled:
+                fs_out["football_analytics"] = analytics
+            new_cand = cand.model_copy(
+                update={
+                    "signal_score": scoring_svc.to_signal_score_decimal(breakdown),
+                    "feature_snapshot_json": fs_out,
+                    "explanation_json": {
+                        **prev_expl,
+                        "football_scoring_reason_codes": breakdown.reason_codes,
+                    },
+                }
+            )
+            enriched.append(new_cand)
+        candidates_to_ingest = enriched
+
+        diagnostics.update(
+            football_analytics_enabled=analytics_enabled,
+            football_learning_enabled=learning_enabled,
+            football_learning_families_tracked=len(learning_aggregates),
+            football_live_fields_in_last_cycle=bool(live_fields_seen),
+            football_injuries_data_available=False,
+            football_line_movement_available=False,
+        )
 
         async with sessionmaker() as session:
             ingest_res = await IngestionService().ingest_candidates(

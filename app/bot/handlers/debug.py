@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.keyboards.debug import get_debug_keyboard, get_signal_control_keyboard, get_winline_manual_flow_keyboard
 from app.core.enums import BetResult, EntryStatus
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.schemas.entry import EntryCreate
 from app.schemas.settlement import SettlementCreate
 from app.schemas.candidate_filter import CandidateFilterConfig
@@ -268,6 +268,14 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено: {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {delivery_reason}",
+        "",
+        "— Аналитика и обучение (флаги, без выдуманных данных) —",
+        f"Сбор признаков в снимке: {_fmt_yes_no(bool(diag.get('football_analytics_enabled')))}",
+        f"Правка score по истории: {_fmt_yes_no(bool(diag.get('football_learning_enabled')))}",
+        f"Семейств в истории (последний цикл): {diag.get('football_learning_families_tracked') or 0}",
+        f"Live-поля в снимке (счёт/минута): {_fmt_yes_no(bool(diag.get('football_live_fields_in_last_cycle')))}",
+        f"Источник травм подключён: {_fmt_yes_no(bool(diag.get('football_injuries_data_available')))}",
+        f"Движение линии подключено: {_fmt_yes_no(bool(diag.get('football_line_movement_available')))}",
     ]
 
 
@@ -498,7 +506,7 @@ async def cmd_start(message: Message) -> None:
         "Это бот для сигналов и диагностики системы.\n\n"
         "Нажмите кнопки ниже\n"
         "или откройте список команд через /debug_help",
-        reply_markup=get_debug_keyboard(),
+        reply_markup=get_signal_control_keyboard(),
     )
 
 
@@ -507,7 +515,7 @@ async def cmd_help(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
-    await message.answer("ℹ️ Используйте /debug_help для списка команд.", reply_markup=get_debug_keyboard())
+    await message.answer("ℹ️ Используйте /debug_help для списка команд.", reply_markup=get_signal_control_keyboard())
 
 
 @router.message(_text_is("Проверка бота"))
@@ -609,6 +617,30 @@ async def cmd_signal_dota(message: Message) -> None:
     )
 
 
+def _format_auto_signal_env_lines(settings: Settings, runtime: SignalRuntimeSettingsService) -> list[str]:
+    provider_configured = bool(settings.odds_provider_base_url)
+    signal_chat_configured = settings.signal_chat_id is not None
+    return [
+        "",
+        "— Настройки автоконтура (.env) —",
+        f"Автопуллинг: {_fmt_yes_no(settings.auto_signal_polling_enabled)}",
+        f"Интервал, сек: {settings.auto_signal_polling_interval_seconds}",
+        f"Только preview: {_fmt_yes_no(settings.auto_signal_preview_only)}",
+        f"Лимит сигналов за цикл: {settings.auto_signal_max_created_per_cycle or '—'}",
+        f"HTTP provider настроен: {_fmt_yes_no(provider_configured)}",
+        f"Чат сигналов настроен: {_fmt_yes_no(signal_chat_configured)}",
+        f"Активные виды спорта: {', '.join(s.value.lower() for s in runtime.active_sports()) or '—'}",
+    ]
+
+
+@router.message(_text_is("🏠 Основная клавиатура"))
+async def cmd_main_keyboard(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("Основная клавиатура.", reply_markup=get_signal_control_keyboard())
+
+
 @router.message(_text_is("Автосигналы"))
 @router.message(Command("auto_signal_status"))
 async def cmd_auto_signal_status(message: Message) -> None:
@@ -618,52 +650,9 @@ async def cmd_auto_signal_status(message: Message) -> None:
 
     settings = get_settings()
     runtime = SignalRuntimeSettingsService()
-    diag = SignalRuntimeDiagnosticsService().get_state()
-    provider_configured = bool(settings.odds_provider_base_url)
-    signal_chat_configured = settings.signal_chat_id is not None
-    await message.answer(
-        "\n".join(
-            [
-                "⚽ Футбольный контур",
-                f"- Включено: {_fmt_yes_no(settings.auto_signal_polling_enabled)}",
-                f"- Интервал: {settings.auto_signal_polling_interval_seconds} сек.",
-                f"- Только preview: {_fmt_yes_no(settings.auto_signal_preview_only)}",
-                f"- Лимит за цикл: {settings.auto_signal_max_created_per_cycle}",
-                f"- Provider настроен: {_fmt_yes_no(provider_configured)}",
-                f"- Чат сигналов настроен: {_fmt_yes_no(signal_chat_configured)}",
-                f"- Активный режим: {', '.join(s.value.lower() for s in runtime.active_sports()) or '—'}",
-                f"- Live provider: {diag.get('live_provider_name') or diag.get('football_source') or '—'}",
-                f"- Live auth status: {diag.get('live_auth_status') or '—'}",
-                f"- Last live HTTP status: {diag.get('last_live_http_status') if diag.get('last_live_http_status') is not None else '—'}",
-                f"- Fallback source available: {_fmt_yes_no(bool(diag.get('fallback_source_available')))}",
-                f"- Manual production fallback allowed: {_fmt_yes_no(bool(diag.get('manual_production_fallback_allowed')))}",
-                f"- Source mode last run: {diag.get('source_mode') or '—'}",
-                f"- Is real source: {_fmt_yes_no(bool(diag.get('is_real_source')))}",
-                f"- Source origin: {diag.get('source_origin') or '—'}",
-                f"- Upload provenance present: {_fmt_yes_no(bool(diag.get('upload_provenance_present')))}",
-                f"- Uploaded at: {diag.get('uploaded_at') or '—'}",
-                f"- Source file path: {diag.get('source_file_path') or '—'}",
-                f"- Source checksum: {diag.get('source_checksum') or '—'}",
-                f"- Raw events count: {diag.get('raw_events_count') or 0}",
-                f"- Live matches count: {diag.get('live_matches_count') or 0}",
-                f"- Near matches count: {diag.get('near_matches_count') or 0}",
-                f"- Too far matches dropped: {diag.get('too_far_matches_count') or 0}",
-                f"- Normalized markets count: {diag.get('normalized_markets_count') or 0}",
-                f"- Football candidates count: {diag.get('football_candidates_count') or 0}",
-                f"- After send filter: {diag.get('football_after_filter_count') or 0}",
-                f"- After integrity check: {diag.get('football_after_integrity_count') or 0}",
-                f"- Final sendable signals: {diag.get('final_signals_count') or 0}",
-                f"- Sent count: {diag.get('messages_sent_count') or 0}",
-                f"- dropped_invalid_market_mapping: {diag.get('dropped_invalid_market_mapping_count') or 0}",
-                f"- dropped_invalid_total_scope: {diag.get('dropped_invalid_total_scope_count') or 0}",
-                f"- dropped_too_far_in_time: {diag.get('dropped_too_far_in_time_count') or 0}",
-                f"- Selected match reason: {diag.get('selected_match_reason') or '—'}",
-                f"- Delivery block reason: {diag.get('last_delivery_reason') or diag.get('note') or '—'}",
-                f"- Последний fetch: {diag.get('last_fetch_status') or '—'}",
-            ]
-        ),
-        reply_markup=get_debug_keyboard(),
-    )
+    lines = ["⚽ Футбольный контур и автосигналы", ""] + _format_signal_runtime_status_lines()
+    lines += _format_auto_signal_env_lines(settings, runtime)
+    await message.answer("\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 
 @router.message(_text_is("⚽ Футбольный прогон", "Запустить цикл"))
@@ -690,7 +679,8 @@ async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_session
                 f"- отправлено: {res.notifications_sent_count}",
                 f"- ошибка: {res.message if not res.fetch_ok and not res.fallback_used else (res.rejection_reason or ('preview_only включён' if res.preview_only else '—'))}",
             ]
-        )
+        ),
+        reply_markup=get_signal_control_keyboard(),
     )
 
 
@@ -3857,5 +3847,5 @@ async def fallback_unrecognized(message: Message) -> None:
     )
     await message.answer(
         "Не понял команду или сообщение.\nОткройте меню кнопкой /start\nИли посмотрите список команд через /debug_help",
-        reply_markup=get_debug_keyboard(),
+        reply_markup=get_signal_control_keyboard(),
     )

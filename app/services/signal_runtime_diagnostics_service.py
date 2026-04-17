@@ -50,6 +50,12 @@ class SignalRuntimeDiagnosticsState:
     preview_only: bool = False
     fallback_used: bool = False
     note: str | None = None
+    football_analytics_enabled: bool = True
+    football_learning_enabled: bool = True
+    football_learning_families_tracked: int = 0
+    football_live_fields_in_last_cycle: bool = False
+    football_injuries_data_available: bool = False
+    football_line_movement_available: bool = False
 
 
 _STATE = SignalRuntimeDiagnosticsState()

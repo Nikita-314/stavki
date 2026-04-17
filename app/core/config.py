@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     auto_signal_max_created_per_cycle: Annotated[int | None, BeforeValidator(_empty_str_to_none)] = None
     football_debug_disable_filter: bool = False
     football_allow_manual_production_fallback: bool = False
+    football_analytics_enabled: bool = True
+    football_learning_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
