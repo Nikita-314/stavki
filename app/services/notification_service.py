@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from decimal import Decimal
 
 from aiogram import Bot
@@ -9,6 +8,7 @@ from aiogram import Bot
 from app.core.constants import MAX_TELEGRAM_MESSAGE_LENGTH
 from app.schemas.analytics import SignalAnalyticsReport
 from app.schemas.signal_quality import SignalQualityReport
+from app.services.football_bet_formatter_service import FootballBetFormatterService
 
 
 logger = logging.getLogger(__name__)
@@ -46,41 +46,8 @@ class NotificationService:
         except Exception:
             return str(value)
 
-    def _extract_total_number(self, text: str) -> str | None:
-        match = re.search(r"([0-9]+(?:[.,][0-9]+)?)", text or "")
-        if not match:
-            return None
-        return match.group(1).replace(",", ".")
-
-    def _humanize_bet(self, market_type: str, market_label: str, selection: str) -> str:
-        mt = (market_type or "").strip().lower()
-        ml = (market_label or "").strip()
-        sel = (selection or "").strip()
-        sel_u = sel.upper()
-        text = f"{ml} {sel}".strip()
-
-        if mt == "total_goals":
-            num = self._extract_total_number(ml) or self._extract_total_number(sel)
-            if "under" in sel.lower() or "меньше" in sel.lower():
-                return f"Тотал меньше {num}" if num else "Тотал меньше"
-            if "over" in sel.lower() or "больше" in sel.lower():
-                return f"Тотал больше {num}" if num else "Тотал больше"
-        if mt == "1x2":
-            if sel_u in {"HOME", "1"}:
-                return "Победа хозяев"
-            if sel_u in {"AWAY", "2"}:
-                return "Победа гостей"
-            if sel_u in {"DRAW", "X"}:
-                return "Ничья"
-            return self._humanize_team(sel)
-        if mt == "both_teams_to_score":
-            if sel_u in {"YES", "ДА"}:
-                return "Обе забьют: да"
-            if sel_u in {"NO", "НЕТ"}:
-                return "Обе забьют: нет"
-        if mt == "handicap":
-            return f"Фора {sel}".strip()
-        return text or sel or ml or "Ставка"
+    def __init__(self) -> None:
+        self._football_bet_formatter = FootballBetFormatterService()
 
     def _source_badge(self, report: SignalAnalyticsReport) -> str | None:
         notes = (report.signal.notes or "").strip().lower()
@@ -108,7 +75,15 @@ class NotificationService:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
         tournament = (s.tournament_name or "").strip() or "Не указан"
-        bet = self._humanize_bet(s.market_type, s.market_label, s.selection)
+        bet_presentation = self._football_bet_formatter.format_bet(
+            market_type=s.market_type,
+            market_label=s.market_label,
+            selection=s.selection,
+            home_team=s.home_team,
+            away_team=s.away_team,
+            section_name=s.section_name,
+            subsection_name=s.subsection_name,
+        )
         odds = self._fmt_decimal(s.odds_at_signal, 2)
         bookmaker_raw = str(getattr(s.bookmaker, "value", s.bookmaker) or "").strip()
         bookmaker = "Winline" if bookmaker_raw.lower() == "winline" else bookmaker_raw
@@ -123,11 +98,13 @@ class NotificationService:
                 "",
                 f"🏆 Турнир: {tournament}",
                 f"⚽ Матч: {match_name}",
-                f"🎯 Ставка: {bet}",
+                f"🎯 Ставка: {bet_presentation.main_label}",
                 f"💰 Коэффициент: {odds}",
                 f"🏢 Букмекер: {bookmaker}",
             ]
         )
+        if bet_presentation.detail_label:
+            lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
         return "\n".join(lines)
 
     def format_result_message(self, signal_report: SignalAnalyticsReport, quality_report: SignalQualityReport) -> str:

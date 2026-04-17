@@ -72,18 +72,18 @@ class WinlineFinalSignalService:
         codes = {c.strip().lower() for c in (live_reason_codes or [])}
 
         if "late_lead" in codes and "opponent_red_card" in codes:
-            return "Late lead plus opponent red card; leading side remains preferred."
+            return "Команда ведёт в счёте, а соперник остался в меньшинстве."
         if "favorite_collapsed" in codes:
-            return "Favorite collapsed live; away or draw may now offer value."
+            return "По live-картине фаворит просел, текущий исход выглядит недооценённым."
         if "momentum_rounds" in codes and "win_streak" in codes:
-            return "Round momentum and win streak support the leading side."
+            return "Текущая динамика матча поддерживает выбранный исход."
         if "momentum_rounds" in codes or "win_streak" in codes:
-            return "In-game momentum supports the selected side."
+            return "Динамика матча сейчас на стороне выбранного исхода."
         if codes & {"economy_advantage", "strong_advantage", "objective_control", "late_game_lock"}:
-            return "Economy and map-state advantage support the current side."
+            return "Игровое преимущество подтверждает выбранный исход."
         if codes:
-            return "Live evaluation supports this selection; see reason codes."
-        return "Rule-based live signal; limited context."
+            return "Live-оценка поддерживает выбранную ставку."
+        return "Сигнал собран по правилам live-оценки."
 
     def build_final_signal(
         self,

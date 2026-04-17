@@ -8,6 +8,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from app.services.football_bet_formatter_service import FootballBetFormatterService
 from app.services.winline_final_signal_service import WinlineFinalSignal, WinlineFinalSignalService
 
 
@@ -20,6 +21,9 @@ class WinlineTelegramFormatterService:
         "Liverpool": "Ливерпуль",
         "Everton": "Эвертон",
     }
+
+    def __init__(self) -> None:
+        self._football_bet_formatter = FootballBetFormatterService()
 
     def _fmt_decimal(self, value: Decimal, *, places: int = 4) -> str:
         q = Decimal("1").scaleb(-places)
@@ -45,20 +49,6 @@ class WinlineTelegramFormatterService:
             return "🛡️"
         return "📌"
 
-    def _selection_humanize(self, selection: str) -> str:
-        s = (selection or "").strip().upper()
-        if s == "HOME":
-            return "Победа хозяев"
-        if s == "AWAY":
-            return "Победа гостей"
-        if s == "DRAW":
-            return "Ничья"
-        if s == "YES":
-            return "Да"
-        if s == "NO":
-            return "Нет"
-        return (selection or "").strip() or "?"
-
     def _humanize_team(self, value: str | None) -> str:
         text = (value or "").strip()
         return self._TEAM_TRANSLIT.get(text, text)
@@ -70,30 +60,6 @@ class WinlineTelegramFormatterService:
             return f"{home} — {away}"
         text = (signal.match_name or "").strip()
         return text.replace(" vs ", " — ")
-
-    def _humanize_bet(self, signal: WinlineFinalSignal) -> str:
-        mt = (signal.market_kind or "").strip().lower()
-        ml = (signal.market_label or "").strip()
-        sel = (signal.selection or "").strip()
-        sel_l = sel.lower()
-        number = None
-        for token in f"{ml} {sel}".replace(",", ".").split():
-            try:
-                float(token)
-                number = token
-                break
-            except Exception:
-                continue
-        if "total" in mt or "тотал" in ml.lower():
-            if "under" in sel_l or "меньше" in sel_l:
-                return f"Тотал меньше {number}".strip()
-            if "over" in sel_l or "больше" in sel_l:
-                return f"Тотал больше {number}".strip()
-        if "match" in mt or "result" in ml.lower():
-            return self._selection_humanize(sel)
-        if "btts" in mt or "both" in ml.lower():
-            return f"Обе забьют: {self._selection_humanize(sel).lower()}"
-        return f"{ml}: {self._selection_humanize(sel)}".strip(": ")
 
     def _source_badge(self, signal: WinlineFinalSignal) -> str | None:
         source = (signal.source_kind or "").strip().lower()
@@ -108,6 +74,13 @@ class WinlineTelegramFormatterService:
     def format_signal_text(self, signal: WinlineFinalSignal) -> str:
         """Full readable message with emojis; no markdown tables, no raw_json dump."""
         source_badge = self._source_badge(signal)
+        bet_presentation = self._football_bet_formatter.format_bet(
+            market_type=signal.market_kind,
+            market_label=signal.market_label,
+            selection=signal.selection,
+            home_team=signal.home_team,
+            away_team=signal.away_team,
+        )
         lines: list[str] = [
             "🚨 Футбольный сигнал",
         ]
@@ -118,11 +91,13 @@ class WinlineTelegramFormatterService:
                 "",
                 f"🏆 Турнир: {(signal.tournament_name or 'Не указан').strip()}",
                 f"⚽ Матч: {self._match_name(signal)}",
-                f"🎯 Ставка: {self._humanize_bet(signal)}",
+                f"🎯 Ставка: {bet_presentation.main_label}",
                 f"💰 Коэффициент: {self._fmt_optional_decimal(signal.odds_value, places=2)}",
                 "🏢 Букмекер: Winline",
             ]
         )
+        if bet_presentation.detail_label:
+            lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
 
         expl = (signal.short_explanation or "").strip()
         if expl:
@@ -132,14 +107,20 @@ class WinlineTelegramFormatterService:
 
     def format_compact_signal_text(self, signal: WinlineFinalSignal) -> str:
         """One-screen alert: summary line + key metrics."""
+        bet_presentation = self._football_bet_formatter.format_bet(
+            market_type=signal.market_kind,
+            market_label=signal.market_label,
+            selection=signal.selection,
+            home_team=signal.home_team,
+            away_team=signal.away_team,
+        )
         header = f"🚨 {self._match_name(signal)}"
         tournament = (signal.tournament_name or "").strip()
-        bet = self._humanize_bet(signal)
         odds = self._fmt_optional_decimal(signal.odds_value, places=2)
         lines = [header]
         if tournament:
             lines.append(f"🏆 {tournament}")
-        lines.append(f"🎯 {bet} @ {odds}")
+        lines.append(f"🎯 {bet_presentation.detail_label or bet_presentation.main_label} @ {odds}")
         badge = self._source_badge(signal)
         if badge:
             lines.append(badge)
