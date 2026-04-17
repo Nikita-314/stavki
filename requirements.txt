@@ -3,4 +3,5 @@ pydantic-settings>=2.0,<3.0
 SQLAlchemy>=2.0,<3.0
 asyncpg>=0.29
 alembic>=1.13
+websockets>=12.0
 

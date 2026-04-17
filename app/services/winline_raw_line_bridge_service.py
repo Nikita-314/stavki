@@ -244,6 +244,9 @@ class WinlineRawLineBridgeService:
         raw_id = str(line.get("idTipMarket", "")).strip()
         raw_tip_event = str(line.get("idTipEvent", "")).strip()
         raw_text = self._line_text_blob(line)
+        # TipRadar ids are overloaded across sports/periods; rely on TipLine template text first.
+        if "@1ht@" in raw_text and ("1x2" in raw_text or "исход" in raw_text):
+            return "1x2", "rule:half_time_1x2_template_text"
         for rule in WINLINE_LINE_MARKET_TYPE_RULES:
             ids = rule.get("id_tip_market")
             if ids and raw_id in ids:

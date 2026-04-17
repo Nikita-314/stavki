@@ -3,7 +3,9 @@
   "source_origin": "operator_uploaded_json",
   "source_mode": "semi_live_manual",
   "is_real_source": true,
-  "uploaded_at": "2026-04-17T17:10:00+00:00",
-  "checksum": "a5b092ace1f47bfd224e473d5e3287f1577ee47fe5703727f7fbf39b9df9fc2e",
-  "file_path": "/root/stavki/runtime/manual_winline/line_payload.json"
+  "fixture_match": false,
+  "uploaded_at": "2026-04-17T19:47:09+00:00",
+  "checksum": "58f9687dd2159ba5d9cbc5b65b23005dab2853f43ba56ac84e3c4622bb1d6d8b",
+  "file_path": "/root/stavki/runtime/manual_winline/line_payload.json",
+  "event_id": 15547811
 }
