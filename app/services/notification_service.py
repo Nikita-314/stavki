@@ -5,6 +5,10 @@ from aiogram import Bot
 from app.core.constants import MAX_TELEGRAM_MESSAGE_LENGTH
 from app.schemas.analytics import SignalAnalyticsReport
 from app.schemas.signal_quality import SignalQualityReport
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationService:
@@ -57,6 +61,12 @@ class NotificationService:
 
     async def send_signal_notification(self, bot: Bot, chat_id: int, report: SignalAnalyticsReport) -> None:
         text = self.format_signal_message(report)
+        logger.info(
+            "[WINLINE] send_message signal chat_id=%s signal_id=%s text_len=%s",
+            chat_id,
+            getattr(getattr(report, "signal", None), "id", None),
+            len(text),
+        )
         await bot.send_message(chat_id=chat_id, text=self._trim(text))
 
     async def send_result_notification(
@@ -67,6 +77,12 @@ class NotificationService:
         quality_report: SignalQualityReport,
     ) -> None:
         text = self.format_result_message(signal_report, quality_report)
+        logger.info(
+            "[WINLINE] send_message result chat_id=%s signal_id=%s text_len=%s",
+            chat_id,
+            getattr(getattr(signal_report, "signal", None), "id", None),
+            len(text),
+        )
         await bot.send_message(chat_id=chat_id, text=self._trim(text))
 
     def _trim(self, text: str) -> str:

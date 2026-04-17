@@ -16,6 +16,7 @@ from app.services.deduplication_service import DeduplicationService
 from app.services.ingestion_service import IngestionService
 from app.services.notification_service import NotificationService
 from app.services.result_ingestion_service import ResultIngestionService
+from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_service import SignalService
 
@@ -67,6 +68,12 @@ class OrchestrationService:
         if settings.signal_chat_id is None:
             return False
         report = await AnalyticsService().get_signal_report(session, signal_id)
+        runtime = SignalRuntimeSettingsService()
+        if runtime.is_paused():
+            return False
+        signal_sport = getattr(getattr(report, "signal", None), "sport", None)
+        if signal_sport is not None and not runtime.is_sport_enabled(signal_sport):
+            return False
         await NotificationService().send_signal_notification(bot, settings.signal_chat_id, report)
         return True
 

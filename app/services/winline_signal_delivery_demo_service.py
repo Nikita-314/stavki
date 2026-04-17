@@ -6,6 +6,7 @@ Safe for testing formatter + `bot.send_message` path without changing main.py or
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from aiogram import Bot
@@ -13,6 +14,9 @@ from aiogram import Bot
 from app.core.constants import MAX_TELEGRAM_MESSAGE_LENGTH
 from app.services.winline_final_signal_service import WinlineFinalSignalPreview, WinlineFinalSignalService
 from app.services.winline_telegram_formatter_service import WinlineTelegramFormatterService
+
+
+logger = logging.getLogger(__name__)
 
 
 class WinlineSignalDeliveryDemoService:
@@ -56,7 +60,9 @@ class WinlineSignalDeliveryDemoService:
 
     def _get_sendable_previews(self, messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         msgs = messages if messages is not None else self.build_demo_messages()
-        return [m for m in msgs if m.get("has_signal") and m.get("signal") is not None]
+        sendable = [m for m in msgs if m.get("has_signal") and m.get("signal") is not None]
+        logger.info("[WINLINE] final signals: %s", len(sendable))
+        return sendable
 
     def preview_messages(self) -> None:
         """Print FULL + COMPACT for each sendable case (no Telegram I/O)."""
@@ -105,9 +111,11 @@ class WinlineSignalDeliveryDemoService:
             text = str(m["compact_text"] or "")
             if len(text) > MAX_TELEGRAM_MESSAGE_LENGTH:
                 text = text[: MAX_TELEGRAM_MESSAGE_LENGTH - 3] + "..."
+            logger.info("[WINLINE] send_message demo case=%s chat_id=%s", m.get("case_name"), chat_id)
             await bot.send_message(chat_id=chat_id, text=text)
             sent += 1
             case_names_sent.append(str(m.get("case_name", "")))
+        logger.info("[WINLINE] messages sent: %s", sent)
 
         return {
             "status": "ok",
@@ -171,9 +179,11 @@ class WinlineSignalDeliveryDemoService:
             text = str(m["compact_text"] or "")
             if len(text) > MAX_TELEGRAM_MESSAGE_LENGTH:
                 text = text[: MAX_TELEGRAM_MESSAGE_LENGTH - 3] + "..."
+            logger.info("[WINLINE] send_message manual case=%s chat_id=%s", m.get("case_name"), chat_id)
             await bot.send_message(chat_id=chat_id, text=text)
             sent += 1
             case_names_sent.append(str(m.get("case_name", "")))
+        logger.info("[WINLINE] messages sent: %s", sent)
 
         return {
             "status": "ok",

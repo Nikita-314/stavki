@@ -12,7 +12,7 @@ from aiogram.filters import BaseFilter, Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bot.keyboards.debug import get_debug_keyboard, get_winline_manual_flow_keyboard
+from app.bot.keyboards.debug import get_debug_keyboard, get_signal_control_keyboard, get_winline_manual_flow_keyboard
 from app.core.enums import BetResult, EntryStatus
 from app.core.config import get_settings
 from app.schemas.entry import EntryCreate
@@ -44,6 +44,7 @@ from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
 from app.services.auto_signal_service import AutoSignalService
+from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.schemas.provider_client import ProviderClientConfig
 from app.services.remote_smoke_service import RemoteSmokeService
 
@@ -173,6 +174,34 @@ def _fmt_decimal(v: Decimal | None) -> str:
 
 def _fmt_yes_no(v: bool) -> str:
     return "Да" if v else "Нет"
+
+
+def _sport_toggle_label(key: str, enabled: bool) -> str:
+    if key == "football":
+        return f"⚽ Футбол: {'включён' if enabled else 'выключен'}"
+    if key == "cs2":
+        return f"🎮 CS2: {'включён' if enabled else 'выключен'}"
+    return f"🎮 Dota: {'включена' if enabled else 'выключена'}"
+
+
+def _format_signal_runtime_status_lines() -> list[str]:
+    state = SignalRuntimeSettingsService().get_state()
+    active = []
+    if state.get("football_enabled"):
+        active.append("футбол")
+    if state.get("cs2_enabled"):
+        active.append("cs2")
+    if state.get("dota_enabled"):
+        active.append("dota")
+    return [
+        "📊 Статус сигналов",
+        f"- Пауза: {'да' if state.get('paused') else 'нет'}",
+        f"- Футбол: {_fmt_yes_no(bool(state.get('football_enabled')))}",
+        f"- CS2: {_fmt_yes_no(bool(state.get('cs2_enabled')))}",
+        f"- Dota: {_fmt_yes_no(bool(state.get('dota_enabled')))}",
+        f"- Активно направлений: {len(active)}",
+        f"- Активные направления: {', '.join(active) if active else '—'}",
+    ]
 
 
 def _chunk_answer_text(text: str, limit: int = 3800) -> list[str]:
@@ -447,6 +476,74 @@ async def cmd_whoami(message: Message) -> None:
     )
 
 
+@router.message(_text_is("📊 Статус сигналов"))
+@router.message(Command("signal_status"))
+async def cmd_signal_status(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("\n".join(_format_signal_runtime_status_lines()), reply_markup=get_signal_control_keyboard())
+
+
+@router.message(_text_is("⏸ Пауза"))
+@router.message(Command("signal_pause"))
+async def cmd_signal_pause(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    SignalRuntimeSettingsService().pause()
+    await message.answer("⏸ Бот поставлен на паузу", reply_markup=get_signal_control_keyboard())
+
+
+@router.message(_text_is("▶️ Старт"))
+@router.message(Command("signal_start"))
+async def cmd_signal_start(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    SignalRuntimeSettingsService().start()
+    await message.answer("▶️ Бот снова запущен", reply_markup=get_signal_control_keyboard())
+
+
+@router.message(_text_is("⚽ Футбол"))
+@router.message(Command("signal_football"))
+async def cmd_signal_football(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    state = SignalRuntimeSettingsService().toggle_sport("football")
+    await message.answer(
+        _sport_toggle_label("football", bool(state.get("football_enabled"))),
+        reply_markup=get_signal_control_keyboard(),
+    )
+
+
+@router.message(_text_is("🎮 CS2"))
+@router.message(Command("signal_cs2"))
+async def cmd_signal_cs2(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    state = SignalRuntimeSettingsService().toggle_sport("cs2")
+    await message.answer(
+        _sport_toggle_label("cs2", bool(state.get("cs2_enabled"))),
+        reply_markup=get_signal_control_keyboard(),
+    )
+
+
+@router.message(_text_is("🎮 Dota"))
+@router.message(Command("signal_dota"))
+async def cmd_signal_dota(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    state = SignalRuntimeSettingsService().toggle_sport("dota2")
+    await message.answer(
+        _sport_toggle_label("dota", bool(state.get("dota_enabled"))),
+        reply_markup=get_signal_control_keyboard(),
+    )
+
+
 @router.message(_text_is("Автосигналы"))
 @router.message(Command("auto_signal_status"))
 async def cmd_auto_signal_status(message: Message) -> None:
@@ -455,6 +552,8 @@ async def cmd_auto_signal_status(message: Message) -> None:
         return
 
     settings = get_settings()
+    runtime = SignalRuntimeSettingsService()
+    state = runtime.get_state()
     provider_configured = bool(settings.odds_provider_base_url)
     signal_chat_configured = settings.signal_chat_id is not None
     await message.answer(
@@ -467,6 +566,8 @@ async def cmd_auto_signal_status(message: Message) -> None:
                 f"- Лимит за цикл: {settings.auto_signal_max_created_per_cycle}",
                 f"- Provider настроен: {_fmt_yes_no(provider_configured)}",
                 f"- Чат сигналов настроен: {_fmt_yes_no(signal_chat_configured)}",
+                f"- Пауза runtime: {_fmt_yes_no(bool(state.get('paused')))}",
+                f"- Активные направления: {', '.join(s.value.lower() for s in runtime.active_sports()) or '—'}",
             ]
         ),
         reply_markup=get_debug_keyboard(),
@@ -487,6 +588,12 @@ async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_session
                 "🔄 Автосигналы: один цикл",
                 f"- Endpoint: {res.endpoint}",
                 f"- Fetch успешен: {_fmt_yes_no(res.fetch_ok)}",
+                f"- Пауза runtime: {_fmt_yes_no(res.runtime_paused)}",
+                f"- Активные направления: {', '.join(res.runtime_active_sports) or '—'}",
+                f"- Raw events: {res.raw_events_count}",
+                f"- Normalized markets: {res.normalized_markets_count}",
+                f"- Candidates before filter: {res.candidates_before_filter_count}",
+                f"- Candidates after filter: {res.candidates_after_filter_count}",
                 f"- Кандидатов после preview: {res.preview_candidates}",
                 f"- Отброшено на preview: {res.preview_skipped_items}",
                 f"- Создано сигналов: {res.created_signals_count}",
@@ -2877,7 +2984,7 @@ async def cmd_demo_cycle_sport_scenario(message: Message, sessionmaker: async_se
 
 
 @router.message(Command("winline_manual_upload_line"))
-@router.message(_text_is("Winline upload line"))
+@router.message(_text_is("Winline загрузить JSON линии", "Winline загрузить line", "Winline upload line"))
 async def cmd_winline_manual_upload_line(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -2890,7 +2997,7 @@ async def cmd_winline_manual_upload_line(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_upload_result"))
-@router.message(_text_is("Winline upload result"))
+@router.message(_text_is("Winline загрузить JSON результата", "Winline загрузить result", "Winline upload result"))
 async def cmd_winline_manual_upload_result(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -2903,7 +3010,7 @@ async def cmd_winline_manual_upload_result(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_clear_line"))
-@router.message(_text_is("Winline clear line"))
+@router.message(_text_is("Winline очистить линию", "Winline очистить line", "Winline clear line"))
 async def cmd_winline_manual_clear_line(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -2918,7 +3025,7 @@ async def cmd_winline_manual_clear_line(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_clear_result"))
-@router.message(_text_is("Winline clear result"))
+@router.message(_text_is("Winline очистить результат", "Winline очистить result", "Winline clear result"))
 async def cmd_winline_manual_clear_result(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -2933,7 +3040,7 @@ async def cmd_winline_manual_clear_result(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_file_status"))
-@router.message(_text_is("Winline file status"))
+@router.message(_text_is("Winline статус файлов", "Winline file status"))
 async def cmd_winline_manual_file_status(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -2977,7 +3084,7 @@ async def cmd_winline_manual_file_status(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_show_line"))
-@router.message(_text_is("Winline show line"))
+@router.message(_text_is("Winline показать JSON линии", "Winline показать line", "Winline show line"))
 async def cmd_winline_manual_show_line(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -2990,7 +3097,7 @@ async def cmd_winline_manual_show_line(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_show_result"))
-@router.message(_text_is("Winline show result"))
+@router.message(_text_is("Winline показать JSON результата", "Winline показать result", "Winline show result"))
 async def cmd_winline_manual_show_result(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -3080,24 +3187,24 @@ async def handle_winline_manual_json_document(message: Message, bot: Bot) -> Non
         await message.answer("\n".join(_format_manual_line_preview_lines()))
         await message.answer(
             "Что дальше можно сделать:\n"
-            "- Winline manual line — посмотреть line preview\n"
-            "- Winline manual ingest — загрузить сигналы в систему\n"
-            "- Winline manual full — попробовать полный цикл",
+            "- Winline превью линии — посмотреть line preview\n"
+            "- Winline загрузить сигналы — загрузить сигналы в систему\n"
+            "- Winline полный цикл — попробовать полный цикл",
             reply_markup=get_winline_manual_flow_keyboard(),
         )
     else:
         await message.answer("\n".join(_format_manual_result_preview_lines()))
         await message.answer(
             "Что дальше можно сделать:\n"
-            "- Winline manual result — посмотреть preview result\n"
-            "- Winline manual process — обработать результаты\n"
-            "- Winline manual full — попробовать полный цикл",
+            "- Winline превью результата — посмотреть preview result\n"
+            "- Winline обработать результат — обработать результаты\n"
+            "- Winline полный цикл — попробовать полный цикл",
             reply_markup=get_winline_manual_flow_keyboard(),
         )
 
 
 @router.message(Command("winline_manual_status"))
-@router.message(_text_is("Winline manual статус"))
+@router.message(_text_is("Winline ручной статус", "Winline manual статус"))
 async def cmd_winline_manual_status(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -3132,7 +3239,7 @@ async def cmd_winline_manual_status(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_line_preview"))
-@router.message(_text_is("Winline manual line"))
+@router.message(_text_is("Winline превью линии", "Winline line превью", "Winline manual line"))
 async def cmd_winline_manual_line_preview(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -3148,7 +3255,7 @@ async def cmd_winline_manual_line_preview(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_line_ingest"))
-@router.message(_text_is("Winline manual ingest"))
+@router.message(_text_is("Winline загрузить сигналы", "Winline ingest линии", "Winline ingest line", "Winline manual ingest"))
 async def cmd_winline_manual_line_ingest(
     message: Message, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -3176,7 +3283,7 @@ async def cmd_winline_manual_line_ingest(
 
 
 @router.message(Command("winline_manual_result_preview"))
-@router.message(_text_is("Winline manual result"))
+@router.message(_text_is("Winline превью результата", "Winline result превью", "Winline manual result"))
 async def cmd_winline_manual_result_preview(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
@@ -3192,7 +3299,7 @@ async def cmd_winline_manual_result_preview(message: Message) -> None:
 
 
 @router.message(Command("winline_manual_result_process"))
-@router.message(_text_is("Winline manual process"))
+@router.message(_text_is("Winline обработать результат", "Winline process result", "Winline manual process"))
 async def cmd_winline_manual_result_process(
     message: Message, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -3224,7 +3331,7 @@ async def cmd_winline_manual_result_process(
 
 
 @router.message(Command("winline_manual_full_cycle"))
-@router.message(_text_is("Winline manual full"))
+@router.message(_text_is("Winline полный цикл", "Winline manual full"))
 async def cmd_winline_manual_full_cycle(
     message: Message, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -3261,7 +3368,7 @@ async def cmd_winline_manual_full_cycle(
 
 
 @router.message(Command("winline_manual_run_ready"))
-@router.message(_text_is("Winline run ready"))
+@router.message(_text_is("Winline умный запуск", "Winline run ready"))
 async def cmd_winline_manual_run_ready(
     message: Message, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -3461,7 +3568,7 @@ async def cmd_winline_demo_send(message: Message) -> None:
 
 
 @router.message(Command("winline_demo_settlement"))
-@router.message(_text_is("Winline settlement"))
+@router.message(_text_is("Winline расчёт", "Winline settlement"))
 async def cmd_winline_demo_settlement(
     message: Message, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -3495,7 +3602,7 @@ async def cmd_winline_demo_settlement(
 
 
 @router.message(Command("winline_demo_full_cycle"))
-@router.message(_text_is("Winline full cycle"))
+@router.message(_text_is("Winline полный демо-цикл", "Winline полный demo цикл", "Winline full cycle"))
 async def cmd_winline_demo_full_cycle(
     message: Message, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:

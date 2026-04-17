@@ -14,4 +14,10 @@ class AutoSignalCycleResult(BaseModel):
     notifications_sent_count: int
     preview_only: bool
     message: str
+    raw_events_count: int = 0
+    normalized_markets_count: int = 0
+    candidates_before_filter_count: int = 0
+    candidates_after_filter_count: int = 0
+    runtime_paused: bool = False
+    runtime_active_sports: list[str] = []
 

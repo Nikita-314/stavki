@@ -8,18 +8,30 @@ def get_winline_manual_flow_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="Winline manual line"),
-                KeyboardButton(text="Winline manual ingest"),
+                KeyboardButton(text="Winline превью линии"),
+                KeyboardButton(text="Winline загрузить сигналы"),
             ],
             [
-                KeyboardButton(text="Winline manual result"),
-                KeyboardButton(text="Winline manual process"),
+                KeyboardButton(text="Winline превью результата"),
+                KeyboardButton(text="Winline обработать результат"),
             ],
             [
-                KeyboardButton(text="Winline manual full"),
-                KeyboardButton(text="Winline run ready"),
+                KeyboardButton(text="Winline полный цикл"),
+                KeyboardButton(text="Winline умный запуск"),
             ],
-            [KeyboardButton(text="Winline file status")],
+            [KeyboardButton(text="Winline статус файлов")],
+        ],
+        resize_keyboard=True,
+        selective=True,
+    )
+
+
+def get_signal_control_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
+            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="📊 Статус сигналов")],
+            [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза")],
         ],
         resize_keyboard=True,
         selective=True,
@@ -36,41 +48,44 @@ def get_debug_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Быстрая проверка"), KeyboardButton(text="Проверка данных")],
             [KeyboardButton(text="Помощь"), KeyboardButton(text="Кто я")],
             [KeyboardButton(text="Автосигналы"), KeyboardButton(text="Запустить цикл")],
+            [KeyboardButton(text="⚽ Футбол"), KeyboardButton(text="🎮 CS2")],
+            [KeyboardButton(text="🎮 Dota"), KeyboardButton(text="📊 Статус сигналов")],
+            [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⏸ Пауза")],
             [
                 KeyboardButton(text="Winline статус"),
                 KeyboardButton(text="Winline превью"),
             ],
             [
                 KeyboardButton(text="Winline отправка"),
-                KeyboardButton(text="Winline settlement"),
+                KeyboardButton(text="Winline расчёт"),
             ],
-            [KeyboardButton(text="Winline full cycle")],
+            [KeyboardButton(text="Winline полный демо-цикл")],
             [
-                KeyboardButton(text="Winline manual статус"),
-                KeyboardButton(text="Winline manual line"),
-            ],
-            [
-                KeyboardButton(text="Winline manual ingest"),
-                KeyboardButton(text="Winline manual result"),
+                KeyboardButton(text="Winline ручной статус"),
+                KeyboardButton(text="Winline превью линии"),
             ],
             [
-                KeyboardButton(text="Winline manual process"),
-                KeyboardButton(text="Winline manual full"),
+                KeyboardButton(text="Winline загрузить сигналы"),
+                KeyboardButton(text="Winline превью результата"),
             ],
             [
-                KeyboardButton(text="Winline upload line"),
-                KeyboardButton(text="Winline upload result"),
+                KeyboardButton(text="Winline обработать результат"),
+                KeyboardButton(text="Winline полный цикл"),
             ],
             [
-                KeyboardButton(text="Winline clear line"),
-                KeyboardButton(text="Winline clear result"),
+                KeyboardButton(text="Winline загрузить JSON линии"),
+                KeyboardButton(text="Winline загрузить JSON результата"),
             ],
-            [KeyboardButton(text="Winline file status")],
             [
-                KeyboardButton(text="Winline show line"),
-                KeyboardButton(text="Winline show result"),
+                KeyboardButton(text="Winline очистить линию"),
+                KeyboardButton(text="Winline очистить результат"),
             ],
-            [KeyboardButton(text="Winline run ready")],
+            [KeyboardButton(text="Winline статус файлов")],
+            [
+                KeyboardButton(text="Winline показать JSON линии"),
+                KeyboardButton(text="Winline показать JSON результата"),
+            ],
+            [KeyboardButton(text="Winline умный запуск")],
         ],
         resize_keyboard=True,
         selective=True,
