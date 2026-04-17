@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
 class FootballBetPresentation:
     main_label: str
     detail_label: str | None = None
+    detected_special_scope: str | None = None
+    detected_period_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,48 @@ class FootballBetFormatterService:
             x for x in [market_type_l, market_label_s.lower(), selection_s.lower(), section_s.lower(), subsection_s.lower()] if x
         )
 
+        scope_blob = " ".join(x for x in [section_s, subsection_s, market_label_s, selection_s] if x)
+        inferred_period_scope = self._detect_period_scope(scope_blob)
+
+        pres = self._format_bet_body(
+            market_type_l=market_type_l,
+            market_label_s=market_label_s,
+            selection_s=selection_s,
+            section_s=section_s,
+            subsection_s=subsection_s,
+            combined_text=combined_text,
+            home_team=home_team,
+            away_team=away_team,
+            inferred_period_scope=inferred_period_scope,
+        )
+        return self._attach_scope_defaults(pres, inferred_period_scope=inferred_period_scope)
+
+    def _attach_scope_defaults(
+        self,
+        pres: FootballBetPresentation,
+        *,
+        inferred_period_scope: str,
+    ) -> FootballBetPresentation:
+        if pres.detected_period_scope is None:
+            return replace(pres, detected_period_scope=inferred_period_scope)
+        return pres
+
+    def _format_bet_body(
+        self,
+        *,
+        market_type_l: str,
+        market_label_s: str,
+        selection_s: str,
+        section_s: str,
+        subsection_s: str,
+        combined_text: str,
+        home_team: str | None,
+        away_team: str | None,
+        inferred_period_scope: str,
+    ) -> FootballBetPresentation:
+        clean_ml = self._strip_winline_markers(market_label_s)
+        special_scope = self._detect_special_scope(section_s, subsection_s, market_label_s, selection_s)
+
         if self._is_time_match_total(market_type_l, market_label_s, selection_s):
             combo = self._format_time_match_total(selection_s or market_label_s)
             if combo:
@@ -70,6 +114,19 @@ class FootballBetFormatterService:
                 return FootballBetPresentation(main_label=f"Тайм/матч: {combo}")
 
         period = self._detect_period(section_s, subsection_s, market_label_s)
+
+        if special_scope == "corners":
+            return self._format_corners_family(
+                market_type_l=market_type_l,
+                market_label_raw=market_label_s,
+                market_label_clean=clean_ml,
+                selection_s=selection_s,
+                section_s=section_s,
+                subsection_s=subsection_s,
+                detected_period_scope=inferred_period_scope,
+                home_team=home_team,
+                away_team=away_team,
+            )
 
         if self._is_double_chance(market_type_l, market_label_s, selection_s):
             dc = self._normalize_double_chance(selection_s or market_label_s)
@@ -153,6 +210,325 @@ class FootballBetFormatterService:
             away_team=away_team,
         )
         return FootballBetPresentation(main_label=fallback)
+
+    def _strip_winline_markers(self, text: str) -> str:
+        if not text:
+            return ""
+        s = str(text)
+        s = re.sub(r"\[a\]", "", s, flags=re.I)
+        s = re.sub(r"@(?:NP|1HT|2HT|1|2)@", "", s, flags=re.I)
+        s = re.sub(r"\(\s*\)", "", s)
+        s = re.sub(r"\s+", " ", s).strip(" :|")
+        return s
+
+    def _detect_special_scope(
+        self,
+        section_name: str,
+        subsection_name: str,
+        market_label: str,
+        selection: str,
+    ) -> str | None:
+        blob = " ".join(x for x in [section_name, subsection_name, market_label, selection] if x).lower()
+        if self._has_corner_market_keyword(blob):
+            return "corners"
+        if any(token in blob for token in ("карточ", "booking")):
+            return "cards"
+        return None
+
+    def _has_corner_market_keyword(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        return "углов" in lowered or "corner" in lowered
+
+    def _format_corners_family(
+        self,
+        *,
+        market_type_l: str,
+        market_label_raw: str,
+        market_label_clean: str,
+        selection_s: str,
+        section_s: str,
+        subsection_s: str,
+        detected_period_scope: str,
+        home_team: str | None,
+        away_team: str | None,
+    ) -> FootballBetPresentation:
+        meta = {"detected_special_scope": "corners", "detected_period_scope": detected_period_scope}
+
+        if self._is_corner_total_candidate(market_type_l, market_label_raw, market_label_clean, selection_s):
+            line = self._format_corner_total_line(
+                market_type_l=market_type_l,
+                market_label=market_label_raw,
+                selection=selection_s,
+                home_team=home_team,
+                away_team=away_team,
+                section_s=section_s,
+                subsection_s=subsection_s,
+            )
+            if line:
+                return FootballBetPresentation(main_label=line, **meta)
+
+        if self._is_corner_handicap_candidate(market_type_l, market_label_clean, selection_s):
+            line = self._format_corner_handicap_line(
+                market_label=market_label_clean,
+                selection=selection_s,
+                home_team=home_team,
+                away_team=away_team,
+                detected_period_scope=detected_period_scope,
+            )
+            if line:
+                return FootballBetPresentation(main_label=line, **meta)
+
+        if self._is_double_chance(market_type_l, market_label_clean, selection_s):
+            dc = self._normalize_double_chance(selection_s or market_label_clean)
+            if dc:
+                suffix = self._corner_half_sentence_suffix(detected_period_scope)
+                text = f"Двойной шанс по угловым: {dc}{suffix}"
+                return FootballBetPresentation(main_label=text, **meta)
+
+        if self._is_corners_match_winner_family(market_type_l, market_label_clean):
+            line = self._format_corner_match_winner(selection_s, home_team, away_team, detected_period_scope)
+            if line:
+                return FootballBetPresentation(main_label=line, **meta)
+
+        fb = self._format_corner_fallback(
+            market_label_clean=market_label_clean,
+            selection_s=selection_s,
+            home_team=home_team,
+            away_team=away_team,
+            detected_period_scope=detected_period_scope,
+        )
+        return FootballBetPresentation(main_label=fb, **meta)
+
+    def _corner_half_sentence_suffix(self, detected_period_scope: str) -> str:
+        if detected_period_scope == "first_half":
+            return " в 1-м тайме"
+        if detected_period_scope == "second_half":
+            return " во 2-м тайме"
+        return ""
+
+    def _is_corner_total_candidate(self, market_type_l: str, market_label_raw: str, market_label_clean: str, selection_s: str) -> bool:
+        blob = f"{market_label_raw} {market_label_clean} {selection_s}".lower()
+        if not self._has_corner_market_keyword(blob):
+            return False
+        if self._is_total(market_type_l, market_label_raw, selection_s) or self._is_total(market_type_l, market_label_clean, selection_s):
+            return True
+        return self._looks_like_corner_total_line(market_type_l, market_label_raw, market_label_clean, selection_s)
+
+    def _looks_like_corner_total_line(self, market_type_l: str, market_label_raw: str, market_label_clean: str, selection_s: str) -> bool:
+        blob = f"{market_label_raw} {market_label_clean} {selection_s}".lower()
+        if not self._has_corner_market_keyword(blob):
+            return False
+        side = self._normalize_total_side(selection_s) or self._normalize_total_side(market_label_raw) or self._normalize_total_side(market_label_clean)
+        line = self._extract_numeric_value(selection_s) or self._extract_numeric_value(market_label_raw) or self._extract_numeric_value(market_label_clean)
+        return bool(side and line)
+
+    def _format_corner_total_line(
+        self,
+        *,
+        market_type_l: str,
+        market_label: str,
+        selection: str,
+        home_team: str | None,
+        away_team: str | None,
+        section_s: str,
+        subsection_s: str,
+    ) -> str | None:
+        ctx = self._describe_corner_total_context(
+            market_type=market_type_l,
+            market_label=market_label,
+            selection=selection,
+            home_team=home_team,
+            away_team=away_team,
+            section_name=section_s,
+            subsection_name=subsection_s,
+        )
+        return ctx
+
+    def _describe_corner_total_context(
+        self,
+        *,
+        market_type: str | None,
+        market_label: str | None,
+        selection: str | None,
+        home_team: str | None,
+        away_team: str | None,
+        section_name: str | None,
+        subsection_name: str | None,
+    ) -> str | None:
+        market_type_l = (market_type or "").strip().lower()
+        market_label_s = (market_label or "").strip()
+        selection_s = (selection or "").strip()
+        clean_ml = self._strip_winline_markers(market_label_s)
+        combined = " ".join(
+            value for value in [market_label_s, selection_s, section_name or "", subsection_name or ""] if value
+        )
+        if not self._has_corner_market_keyword(combined):
+            return None
+        if not (
+            self._is_total(market_type_l, market_label_s, selection_s)
+            or self._is_total(market_type_l, clean_ml, selection_s)
+            or self._looks_like_corner_total_line(market_type_l, market_label_s, clean_ml, selection_s)
+        ):
+            return None
+        period_scope = self._detect_period_scope(combined)
+        team_name = self._extract_team_reference(combined, home_team=home_team, away_team=away_team)
+        target_scope = self._detect_total_target_scope(
+            text=combined,
+            team_name=team_name,
+            home_team=home_team,
+            away_team=away_team,
+        )
+        total_side = self._normalize_total_side(selection_s) or self._normalize_total_side(market_label_s) or self._normalize_total_side(clean_ml)
+        total_line = self._extract_numeric_value(selection_s) or self._extract_numeric_value(market_label_s) or self._extract_numeric_value(clean_ml)
+        return self._render_corner_total_context(
+            period_scope=period_scope,
+            target_scope=target_scope,
+            team_name=team_name,
+            total_side=total_side,
+            total_line=total_line,
+        )
+
+    def _render_corner_total_context(
+        self,
+        *,
+        period_scope: str,
+        target_scope: str,
+        team_name: str | None,
+        total_side: str | None,
+        total_line: str | None,
+    ) -> str:
+        if total_side == "ТБ":
+            side_text = "больше"
+        elif total_side == "ТМ":
+            side_text = "меньше"
+        else:
+            side_text = None
+
+        period_prefix = ""
+        if period_scope == "first_half":
+            period_prefix = "1-й тайм: "
+        elif period_scope == "second_half":
+            period_prefix = "2-й тайм: "
+
+        corner_total_word = "тотал угловых" if period_prefix else "Тотал угловых"
+
+        if target_scope in {"home_team", "away_team", "team_total"}:
+            target = team_name or "команды"
+            base = f"{period_prefix}{corner_total_word} {target}".strip()
+        else:
+            base = f"{period_prefix}{corner_total_word}".strip()
+
+        if side_text and total_line:
+            return f"{base} {side_text} {total_line}"
+        if total_line:
+            return f"{base} {total_line}"
+        return base
+
+    def _is_corner_handicap_candidate(self, market_type_l: str, market_label_clean: str, selection_s: str) -> bool:
+        blob = f"{market_label_clean} {selection_s}".lower()
+        if not self._has_corner_market_keyword(blob):
+            return False
+        if self._is_handicap(market_type_l, market_label_clean):
+            return True
+        return bool(self._extract_signed_value(selection_s) or self._extract_signed_value(market_label_clean))
+
+    def _format_corner_handicap_line(
+        self,
+        *,
+        market_label: str,
+        selection: str,
+        home_team: str | None,
+        away_team: str | None,
+        detected_period_scope: str,
+    ) -> str | None:
+        text = f"{market_label} {selection}"
+        value = self._extract_signed_value(selection) or self._extract_signed_value(market_label)
+        team = self._extract_team_reference(text, home_team=home_team, away_team=away_team)
+        suffix = self._corner_half_sentence_suffix(detected_period_scope)
+        if team and value:
+            return f"Фора по угловым {team} {value}{suffix}".strip()
+        if team:
+            return f"Фора по угловым {team}{suffix}".strip()
+        if value:
+            return f"Фора по угловым {value}{suffix}".strip()
+        return None
+
+    def _is_corners_match_winner_family(self, market_type_l: str, market_label_clean: str) -> bool:
+        ll = market_label_clean.lower()
+        if not self._has_corner_market_keyword(ll):
+            return False
+        if market_type_l in {"1x2", "match_winner"}:
+            return True
+        compact = ll.replace(" ", "")
+        if "1x2" in compact or "1х2" in compact:
+            return True
+        if "исход" in ll:
+            return True
+        if "match result" in ll:
+            return True
+        return False
+
+    def _format_corner_match_winner(
+        self,
+        selection_s: str,
+        home_team: str | None,
+        away_team: str | None,
+        detected_period_scope: str,
+    ) -> str | None:
+        suffix = self._corner_half_sentence_suffix(detected_period_scope)
+        resolved = self._corner_resolve_match_winner(selection_s, home_team, away_team)
+        if resolved == "draw":
+            return f"Ничья по угловым{suffix}"
+        if isinstance(resolved, tuple) and resolved[0] == "team":
+            return f"{resolved[1]} победит по угловым{suffix}"
+        return None
+
+    def _corner_resolve_match_winner(
+        self,
+        selection_s: str,
+        home_team: str | None,
+        away_team: str | None,
+    ) -> str | tuple[str, str]:
+        raw = (selection_s or "").strip()
+        if not raw:
+            return "unknown"
+        ot = self._normalize_outcome_token(raw)
+        if ot == "Х":
+            return "draw"
+        home_h = self._humanize_team(home_team)
+        away_h = self._humanize_team(away_team)
+        if ot == "П1" and home_h:
+            return ("team", home_h)
+        if ot == "П2" and away_h:
+            return ("team", away_h)
+        low = raw.lower()
+        if home_h:
+            if home_h.lower() == low or home_h.lower() in low:
+                return ("team", home_h)
+        if away_h:
+            if away_h.lower() == low or away_h.lower() in low:
+                return ("team", away_h)
+        if low in {"ничья", "ничью"} or raw.upper() in self._DRAW_TOKENS:
+            return "draw"
+        return "unknown"
+
+    def _format_corner_fallback(
+        self,
+        *,
+        market_label_clean: str,
+        selection_s: str,
+        home_team: str | None,
+        away_team: str | None,
+        detected_period_scope: str,
+    ) -> str:
+        suffix = self._corner_half_sentence_suffix(detected_period_scope)
+        pretty = self._prettify_selection(selection_s, home_team=home_team, away_team=away_team)
+        if pretty:
+            return f"Рынок по угловым — {pretty}{suffix}".strip()
+        rest = self._strip_winline_markers(market_label_clean).strip(" :|")
+        if rest:
+            return f"Рынок по угловым — {rest}{suffix}".strip()
+        return f"Рынок по угловым{suffix}".strip()
 
     def describe_total_context(
         self,
@@ -439,7 +815,7 @@ class FootballBetFormatterService:
         away_team: str | None,
     ) -> str:
         selection_pretty = self._prettify_selection(selection, home_team=home_team, away_team=away_team)
-        label = market_label.strip()
+        label = self._strip_winline_markers(market_label.strip())
         if "+" in selection_pretty or "/" in selection_pretty:
             basis = selection_pretty or label
             return f"Комбинированный рынок — {basis}".strip()

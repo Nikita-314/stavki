@@ -35,6 +35,8 @@ class FootballSignalIntegrityCheck:
     family_match: bool
     integrity_check_passed: bool
     integrity_check_reason: str
+    detected_special_scope: str | None = None
+    detected_period_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,8 @@ class FootballSignalIntegrityService:
                         "final_total_line": check.final_total_line,
                         "integrity_check_passed": check.integrity_check_passed,
                         "integrity_check_reason": check.integrity_check_reason,
+                        "detected_special_scope": check.detected_special_scope,
+                        "detected_period_scope": check.detected_period_scope,
                     }
                 }
             )
@@ -203,17 +207,21 @@ class FootballSignalIntegrityService:
             family_match=family_match,
             integrity_check_passed=reason == "ok",
             integrity_check_reason=reason,
+            detected_special_scope=final_bet.detected_special_scope,
+            detected_period_scope=final_bet.detected_period_scope,
         )
 
     def _log_check(self, check: FootballSignalIntegrityCheck, candidate: ProviderSignalCandidate) -> None:
         logger.info(
-            "[FOOTBALL][INTEGRITY] selected signal candidate: event_id=%s match=%s source_market_type=%s source_market_label=%s source_selection=%s source_odds=%s final_bet_text=%s",
+            "[FOOTBALL][INTEGRITY] selected signal candidate: event_id=%s match=%s source_market_type=%s source_market_label=%s source_selection=%s source_odds=%s detected_special_scope=%s detected_period_scope=%s final_bet_text=%s",
             candidate.match.external_event_id,
             candidate.match.match_name,
             check.source_market_type,
             check.source_market_label,
             check.source_selection,
             check.source_odds_value,
+            check.detected_special_scope,
+            check.detected_period_scope,
             check.final_bet_text,
         )
         logger.info(
