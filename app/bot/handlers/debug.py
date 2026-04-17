@@ -3096,18 +3096,30 @@ async def cmd_winline_manual_file_status(message: Message) -> None:
         return
     try:
         from app.services.winline_manual_cycle_service import WinlineManualCycleService
+        from app.services.winline_manual_payload_service import WinlineManualPayloadService
 
         svc = WinlineManualCycleService()
         r = svc.get_operator_readiness()
         st = r.get("storage") or {}
+        payloads = WinlineManualPayloadService()
+        truth = payloads.get_line_source_truth()
         lines = [
             "📁 Winline manual files",
+            f"- effective line path: {payloads.get_line_payload_path()}",
+            f"- uploaded line path: {payloads.get_uploaded_line_payload_path()}",
+            f"- example line path: {payloads.get_example_line_payload_path()}",
             f"- line exists: {_fmt_yes_no(bool(st.get('line_exists')))}",
             f"- line size: {st.get('line_size_bytes')} B",
             f"- line readable: {_fmt_yes_no(bool(st.get('line_readable')))}",
             f"- line keys: {', '.join(st.get('line_keys') or []) or '—'}",
             f"- line shape: {(r.get('line_preview_meta') or {}).get('detected_shape') or '—'}",
             f"- line ingestible: {_fmt_yes_no(bool(r.get('line_ready_for_ingest')))}",
+            f"- source_mode: {truth.get('source_mode') or '—'}",
+            f"- is_real_source: {_fmt_yes_no(bool(truth.get('is_real_source')))}",
+            f"- source_origin: {truth.get('source_origin') or '—'}",
+            f"- upload provenance present: {_fmt_yes_no(bool(truth.get('provenance_present')))}",
+            f"- uploaded_at: {truth.get('uploaded_at') or '—'}",
+            f"- checksum: {truth.get('checksum') or '—'}",
             f"- result exists: {_fmt_yes_no(bool(st.get('result_exists')))}",
             f"- result size: {st.get('result_size_bytes')} B",
             f"- result readable: {_fmt_yes_no(bool(st.get('result_readable')))}",
