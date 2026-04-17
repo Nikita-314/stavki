@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +30,10 @@ class WinlineManualFileStorageService:
         self._paths = WinlineManualPayloadService(manual_dir=manual_dir)
 
     def get_line_payload_path(self) -> Path:
-        return self._paths.get_line_payload_path()
+        return self._paths.get_uploaded_line_payload_path()
 
     def get_result_payload_path(self) -> Path:
-        return self._paths.get_result_payload_path()
+        return self._paths.get_uploaded_result_payload_path()
 
     def get_line_metadata_path(self) -> Path:
         return self.get_line_payload_path().with_suffix(".meta.json")
@@ -90,21 +91,26 @@ class WinlineManualFileStorageService:
         v["path"] = str(path)
         if not v["ok"]:
             return v
+        checksum = hashlib.sha256(data).hexdigest()
         self._atomic_write(path, data.decode("utf-8"))
         self._atomic_write(
             self.get_line_metadata_path(),
             json.dumps(
                 {
                     "origin": "telegram_upload",
+                    "source_origin": "operator_uploaded_json",
                     "source_mode": "semi_live_manual",
                     "is_real_source": True,
                     "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "checksum": checksum,
+                    "file_path": str(path),
                 },
                 ensure_ascii=False,
                 indent=2,
             )
             + "\n",
         )
+        v["checksum"] = checksum
         return v
 
     def save_result_payload_bytes(self, data: bytes) -> dict[str, Any]:
@@ -113,21 +119,26 @@ class WinlineManualFileStorageService:
         v["path"] = str(path)
         if not v["ok"]:
             return v
+        checksum = hashlib.sha256(data).hexdigest()
         self._atomic_write(path, data.decode("utf-8"))
         self._atomic_write(
             self.get_result_metadata_path(),
             json.dumps(
                 {
                     "origin": "telegram_upload",
+                    "source_origin": "operator_uploaded_json",
                     "source_mode": "semi_live_manual",
                     "is_real_source": True,
                     "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "checksum": checksum,
+                    "file_path": str(path),
                 },
                 ensure_ascii=False,
                 indent=2,
             )
             + "\n",
         )
+        v["checksum"] = checksum
         return v
 
     def read_line_payload_text(self) -> str | None:
@@ -195,6 +206,8 @@ class WinlineManualFileStorageService:
     def get_file_status(self) -> dict[str, Any]:
         lp = self.get_line_payload_path()
         rp = self.get_result_payload_path()
+        example_lp = self._paths.get_example_line_payload_path()
+        example_rp = self._paths.get_example_result_payload_path()
 
         def one(path: Path, label: str) -> dict[str, Any]:
             ex = path.is_file()
@@ -222,4 +235,6 @@ class WinlineManualFileStorageService:
         out: dict[str, Any] = {"ok": True}
         out.update(one(lp, "line"))
         out.update(one(rp, "result"))
+        out["example_line_exists"] = example_lp.is_file()
+        out["example_result_exists"] = example_rp.is_file()
         return out

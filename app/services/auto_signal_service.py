@@ -80,6 +80,11 @@ class AutoSignalService:
             manual_production_fallback_allowed=bool(settings.football_allow_manual_production_fallback),
             source_mode="unknown",
             is_real_source=False,
+            source_origin=None,
+            upload_provenance_present=False,
+            uploaded_at=None,
+            source_file_path=None,
+            source_checksum=None,
             preview_only=bool(settings.auto_signal_preview_only),
             fallback_used=False,
             last_error=None,
@@ -219,7 +224,16 @@ class AutoSignalService:
         if fetch_res.ok and isinstance(fetch_res.payload, dict):
             payload = fetch_res.payload
             source_name = str(fetch_res.source_name or source_name)
-            diagnostics.update(last_fetch_status="ok", source_mode="live", is_real_source=True)
+            diagnostics.update(
+                last_fetch_status="ok",
+                source_mode="live",
+                is_real_source=True,
+                source_origin="live_provider",
+                upload_provenance_present=False,
+                uploaded_at=None,
+                source_file_path=None,
+                source_checksum=None,
+            )
         else:
             err = str(fetch_res.error or "fetch_error")
             diagnostics.update(
@@ -238,6 +252,11 @@ class AutoSignalService:
                         diagnostics.update(
                             source_mode=manual_source_mode,
                             is_real_source=False,
+                            source_origin=str(fallback.get("source_origin") or fallback.get("source_reason") or "manual"),
+                            upload_provenance_present=bool(fallback.get("provenance_present")),
+                            uploaded_at=fallback.get("uploaded_at"),
+                            source_file_path=fallback.get("file_path"),
+                            source_checksum=fallback.get("checksum"),
                             last_delivery_reason=f"non_real_source_blocked: {manual_source_mode}",
                             note=str(fallback.get("source_reason") or "manual source is not real"),
                         )
@@ -269,6 +288,11 @@ class AutoSignalService:
                         fallback_used=True,
                         source_mode=manual_source_mode,
                         is_real_source=manual_is_real,
+                        source_origin=str(fallback.get("source_origin") or fallback.get("source_reason") or "manual"),
+                        upload_provenance_present=bool(fallback.get("provenance_present")),
+                        uploaded_at=fallback.get("uploaded_at"),
+                        source_file_path=fallback.get("file_path"),
+                        source_checksum=fallback.get("checksum"),
                         last_delivery_reason=None,
                         note=str(fallback.get("source_reason") or "temporary production fallback enabled: Winline JSON"),
                     )
@@ -280,6 +304,7 @@ class AutoSignalService:
                     diagnostics.update(
                         source_mode="blocked",
                         is_real_source=False,
+                        source_origin="live_provider_unavailable",
                         last_delivery_reason=f"live_unavailable_manual_fallback_disabled: {live_auth_status}",
                         note="manual production fallback disabled",
                     )
@@ -305,6 +330,7 @@ class AutoSignalService:
                     diagnostics.update(
                         source_mode="blocked",
                         is_real_source=False,
+                        source_origin="live_provider_unavailable",
                         last_delivery_reason=f"live_unavailable_no_manual_fallback: {live_auth_status}",
                     )
                     logger.info("[FOOTBALL] provider unauthorized and no football fallback payload available")
@@ -328,7 +354,7 @@ class AutoSignalService:
                     )
                 logger.info("[FOOTBALL] fetch source=%s unauthorized; fallback source=%s", source_name, fallback_source_name)
             else:
-                diagnostics.update(source_mode="blocked", fallback_source_available=False)
+                diagnostics.update(source_mode="blocked", fallback_source_available=False, source_origin="live_provider_error")
                 return AutoSignalCycleResult(
                     endpoint=fetch_res.endpoint,
                     fetch_ok=False,
@@ -787,6 +813,11 @@ class AutoSignalService:
             "source_mode": str(source_truth.get("source_mode") or "manual_example"),
             "is_real_source": bool(source_truth.get("is_real_source", False)),
             "source_reason": str(source_truth.get("reason") or "manual payload"),
+            "source_origin": str(source_truth.get("source_origin") or "manual payload"),
+            "provenance_present": bool(source_truth.get("provenance_present", False)),
+            "uploaded_at": source_truth.get("uploaded_at"),
+            "file_path": source_truth.get("file_path"),
+            "checksum": source_truth.get("checksum"),
         }
 
     def _resolve_zero_candidate_reason(

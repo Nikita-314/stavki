@@ -199,6 +199,9 @@ def _format_signal_runtime_status_lines() -> list[str]:
     manual_fallback_allowed = _fmt_yes_no(bool(diag.get("manual_production_fallback_allowed")))
     source_mode = diag.get("source_mode") or "—"
     is_real_source = _fmt_yes_no(bool(diag.get("is_real_source")))
+    source_origin = diag.get("source_origin") or "—"
+    upload_provenance_present = _fmt_yes_no(bool(diag.get("upload_provenance_present")))
+    uploaded_at = diag.get("uploaded_at") or "—"
     last_fetch = diag.get("last_fetch_status") or "—"
     if last_fetch == "fallback_manual_payload" and diag.get("last_error"):
         last_fetch = f"{diag.get('last_error')} -> fallback"
@@ -218,6 +221,9 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🛠 Manual production fallback: {manual_fallback_allowed}",
         f"🧭 Source mode: {source_mode}",
         f"✅ Real source: {is_real_source}",
+        f"🧾 Source origin: {source_origin}",
+        f"📎 Upload provenance: {upload_provenance_present}",
+        f"⏱ Uploaded at: {uploaded_at}",
         f"📥 Последний fetch: {last_fetch}",
         f"📊 Raw events: {diag.get('raw_events_count') or 0}",
         f"🧠 Кандидатов: {diag.get('candidates_after_filter_count') or 0}",
@@ -601,6 +607,11 @@ async def cmd_auto_signal_status(message: Message) -> None:
                 f"- Manual production fallback allowed: {_fmt_yes_no(bool(diag.get('manual_production_fallback_allowed')))}",
                 f"- Source mode last run: {diag.get('source_mode') or '—'}",
                 f"- Is real source: {_fmt_yes_no(bool(diag.get('is_real_source')))}",
+                f"- Source origin: {diag.get('source_origin') or '—'}",
+                f"- Upload provenance present: {_fmt_yes_no(bool(diag.get('upload_provenance_present')))}",
+                f"- Uploaded at: {diag.get('uploaded_at') or '—'}",
+                f"- Source file path: {diag.get('source_file_path') or '—'}",
+                f"- Source checksum: {diag.get('source_checksum') or '—'}",
                 f"- Raw events count: {diag.get('raw_events_count') or 0}",
                 f"- Normalized markets count: {diag.get('normalized_markets_count') or 0}",
                 f"- Football candidates count: {diag.get('football_candidates_count') or 0}",

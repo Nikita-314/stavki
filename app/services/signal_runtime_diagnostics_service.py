@@ -21,6 +21,11 @@ class SignalRuntimeDiagnosticsState:
     manual_production_fallback_allowed: bool = False
     source_mode: str | None = None
     is_real_source: bool = False
+    source_origin: str | None = None
+    upload_provenance_present: bool = False
+    uploaded_at: str | None = None
+    source_file_path: str | None = None
+    source_checksum: str | None = None
     last_fetch_status: str | None = None
     last_error: str | None = None
     last_delivery_reason: str | None = None
