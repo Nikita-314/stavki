@@ -60,7 +60,7 @@ async def main() -> None:
 
     for idx in (1, 2):
         print(f"[E2E] cycle={idx} begin", flush=True)
-        res = await asyncio.wait_for(svc.run_single_cycle(sessionmaker, bot, dry_run=False), timeout=60)
+        res = await asyncio.wait_for(svc.run_single_cycle(sessionmaker, bot, dry_run=False), timeout=150)
         svc.log_football_cycle_trace(res)
         diag = diag_svc.get_state()
 

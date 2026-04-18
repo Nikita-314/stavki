@@ -123,6 +123,16 @@ class SignalRuntimeDiagnosticsState:
     football_last_combat_rejected_total: int = 0
     football_last_combat_session_idea_dedup: int = 0
     football_last_combat_db_dedup_skipped: int = 0
+    football_primary_live_source: str | None = None
+    """winline_live | the_odds_api | manual_winline_json | —"""
+    football_winline_ws_active_last_cycle: bool = False
+    """True if the last cycle actually used a successful Winline live fetch (not only attempted)."""
+    football_winline_football_event_count: int = 0
+    football_winline_line_count_raw: int = 0
+    football_winline_error_last: str | None = None
+    """Last Winline error token if primary fetch failed."""
+    football_winline_football_candidate_count: int = 0
+    """ProviderSignalCandidate count (football) in preview after Winline+bridge in last cycle."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()

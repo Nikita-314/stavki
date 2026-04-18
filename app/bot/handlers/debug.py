@@ -299,6 +299,15 @@ def _format_signal_runtime_status_lines() -> list[str]:
     return [
         "📊 Статус сигналов",
         "",
+        "— Football live-источник (runtime) —",
+        f"• Приоритет: Winline WebSocket (primary), The Odds API — только при fallback (см. .env)",
+        f"• Текущий primary: {diag.get('football_primary_live_source') or '—'}",
+        f"• Winline live в последнем цикле: {_fmt_yes_no(bool(diag.get('football_winline_ws_active_last_cycle')))}",
+        f"• Live-матчей (Winline, events): {diag.get('football_winline_football_event_count') or 0}",
+        f"• Сырых линий (Winline, lines): {diag.get('football_winline_line_count_raw') or 0}",
+        f"• Кандидатов футбол (Winline→bridge): {diag.get('football_winline_football_candidate_count') or 0}",
+        f"• Ошибка Winline (токен): {diag.get('football_winline_error_last') or '—'}",
+        "",
         "⚽ Football live-сессия",
         f"• Активна: {_fmt_yes_no(bool(diag.get('football_live_session_active')))}",
         f"• Старт: {started_s}",
@@ -832,6 +841,7 @@ def _humanize_live_bottleneck_ru(token: str | None) -> str:
         "blocked_stale_manual_live_source": "ручной live JSON слишком старый",
         "blocked_stale_live_source": "снимок live устарел по задержке обработки",
         "blocked_stale_live_events": "все live-матчи признаны протухшими",
+        "blocked_winline_live_unavailable": "Winline live (WebSocket) недоступен",
     }
     return m.get(token, token.replace("_", " "))
 
@@ -994,6 +1004,12 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
 
     lines.extend(
         [
+            "— Winline live (последний цикл в памяти) —",
+            f"• primary: {diag.get('football_primary_live_source') or '—'}",
+            f"• Winline активен: {_fmt_yes_no(bool(diag.get('football_winline_ws_active_last_cycle')))}",
+            f"• матчей/ивентов: {diag.get('football_winline_football_event_count') or 0} • линий: {diag.get('football_winline_line_count_raw') or 0} • кандидатов: {diag.get('football_winline_football_candidate_count') or 0}",
+            f"• ошибка WS: {diag.get('football_winline_error_last') or '—'}",
+            "",
             "📡 Источник:",
             f"• Режим: {mode_line}",
             f"• Статус Live API: {live_api_human}",

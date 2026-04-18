@@ -5,6 +5,8 @@ import json
 import logging
 from collections import Counter
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 from aiogram import Bot
@@ -36,8 +38,10 @@ from app.services.ingestion_service import IngestionService
 from app.services.orchestration_service import OrchestrationService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
+from app.services.winline_live_feed_service import WinlineLiveFeedService
 from app.services.winline_manual_cycle_service import WinlineManualCycleService
 from app.services.winline_manual_payload_service import WinlineManualPayloadService
+from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
 
 
 logger = logging.getLogger(__name__)
@@ -778,6 +782,8 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
         return "blocked_provider_not_configured"
     if msg == "football_live_session_inactive":
         return "blocked_no_live_session"
+    if msg == "blocked_winline_live_unavailable":
+        return "blocked_winline_live_unavailable"
     if msg == "blocked_stale_manual_live_source" or rr == "blocked_stale_manual_live_source":
         # If live API already failed (e.g. quota), that is the dominant operator-facing reason.
         lauth = str((diag or {}).get("live_auth_status") or "").lower()
@@ -856,6 +862,7 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_stale_manual_live_source": "ручной live JSON слишком старый",
         "blocked_stale_live_source": "снимок live устарел по задержке обработки",
         "blocked_stale_live_events": "все live-матчи признаны протухшими",
+        "blocked_winline_live_unavailable": "Winline live feed недоступен (WS/данные/тип-лайн)",
     }
     return m.get(str(token), str(token).replace("_", " "))
 
@@ -949,6 +956,9 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
         "fresh_live_matches": lq.get("fresh_live_matches"),
         "live_send_stats": lss,
         "session_idea_dedup_this_cycle": dbg.get("session_idea_dedup_this_cycle"),
+        "football_primary_source": diag.get("football_primary_live_source"),
+        "winline_football_events": diag.get("football_winline_football_event_count"),
+        "winline_football_candidates": diag.get("football_winline_football_candidate_count"),
     }
     try:
         logger.info("[FOOTBALL][LIVE_SESSION_REPORT] %s", json.dumps(payload, default=str, ensure_ascii=False)[:32000])
@@ -1200,7 +1210,11 @@ class AutoSignalService:
                 )
 
         logger.info("[FOOTBALL] fetch started")
-        logger.info("[FOOTBALL] fetch source=%s endpoint=%s", self._detect_provider_name(settings), config.base_url)
+        logger.info(
+            "[FOOTBALL] fetch order winline_primary=%s odds_fb=%s",
+            str(settings.football_live_winline_primary).lower(),
+            str(bool(settings.football_live_odds_api_fallback)).lower(),
+        )
         diagnostics.update(
             football_live_cycle_live_matches_found=0,
             football_live_cycle_candidates_before_filter=0,
@@ -1212,26 +1226,12 @@ class AutoSignalService:
             football_live_cycle_bottleneck=None,
             football_live_last_notify_path=None,
             football_live_effective_source=None,
-        )
-        fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
-        live_auth_status = self._render_live_auth_status(fetch_res.auth_status, fetch_res.response_body_snippet)
-        diagnostics.update(
-            live_provider_name=self._detect_provider_name(settings),
-            live_auth_status=live_auth_status,
-            last_live_http_status=fetch_res.status_code,
-            last_live_endpoint=fetch_res.endpoint,
-            last_live_error_body=fetch_res.response_body_snippet,
-        )
-        logger.info(
-            "[FOOTBALL][LIVE] provider=%s endpoint=%s key_present=%s key_length=%s key_masked=%s http_status=%s auth_status=%s params=%s",
-            self._detect_provider_name(settings),
-            fetch_res.endpoint,
-            "yes" if fetch_res.key_present else "no",
-            fetch_res.key_length,
-            fetch_res.key_masked or "—",
-            fetch_res.status_code,
-            live_auth_status,
-            self._provider_query_params(fetch_res.endpoint),
+            football_winline_ws_active_last_cycle=False,
+            football_winline_football_event_count=0,
+            football_winline_line_count_raw=0,
+            football_winline_football_candidate_count=0,
+            football_winline_error_last=None,
+            football_primary_live_source=None,
         )
         preview = None
         payload = None
@@ -1242,11 +1242,145 @@ class AutoSignalService:
         live_payload_fetched_at_utc: datetime | None = None
         line_manual_uploaded_at: str | None = None
         manual_freshness_result = None
+        fetch_res: Any = None
+        live_auth_status: str = "ok"
+        winline_werr: str | None = None
+        if settings.football_live_winline_primary and (settings.winline_live_ws_url or "").strip():
+            wr, winline_werr = await WinlineLiveFeedService().fetch_football_live_raw_payload(settings)
+            if wr and not winline_werr:
+                try:
+                    norm = WinlineRawLineBridgeService().normalize_raw_winline_line_payload(wr)
+                    pvw = AdapterIngestionService().preview_payload(norm)
+                except Exception as wbe:
+                    norm, pvw, winline_werr = None, None, f"winline_bridge:{wbe!s}"
+            else:
+                norm, pvw = None, None
+            if norm is not None and pvw is not None and wr is not None:
+                preview = pvw
+                payload = norm
+                source_name = "winline_live"
+                source_kind = "live"
+                live_payload_fetched_at_utc = datetime.now(tz=timezone.utc)
+                live_auth_status = self._render_live_auth_status("ok", None)
+                fetch_res = SimpleNamespace(
+                    ok=True,
+                    payload=norm,
+                    endpoint=str(settings.winline_live_ws_url),
+                    error=None,
+                    status_code=101,
+                    source_name="winline_live",
+                    key_present=False,
+                    key_length=0,
+                    key_masked="—",
+                    response_body_snippet=None,
+                    auth_status="ok",
+                )
+                diagnostics.update(
+                    last_fetch_status="ok",
+                    source_mode="live",
+                    is_real_source=True,
+                    source_origin="winline_websocket",
+                    upload_provenance_present=True,
+                    uploaded_at=live_payload_fetched_at_utc.isoformat(),
+                    source_file_path=None,
+                    source_checksum=None,
+                    live_provider_name="winline_live",
+                    live_auth_status=live_auth_status,
+                    last_live_http_status=101,
+                    last_live_endpoint=str(settings.winline_live_ws_url),
+                    last_live_error_body=None,
+                    football_winline_ws_active_last_cycle=True,
+                    football_winline_football_event_count=len(norm.get("events") or []),
+                    football_winline_line_count_raw=len(wr.get("lines") or []),
+                    football_winline_football_candidate_count=len(
+                        [
+                            c
+                            for c in pvw.candidates
+                            if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL
+                        ]
+                    ),
+                    football_primary_live_source="winline_live",
+                    football_live_effective_source="winline_live",
+                )
+                logger.info(
+                    "[FOOTBALL][WINLINE_LIVE] source=winline_live events=%s lines_raw=%s markets_norm=%s football_cand=%s",
+                    len(norm.get("events") or []),
+                    len(wr.get("lines") or []),
+                    len(norm.get("markets") or []),
+                    len(
+                        [
+                            c
+                            for c in pvw.candidates
+                            if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL
+                        ]
+                    ),
+                )
+            elif winline_werr and winline_werr != "winline_disabled" and not settings.football_live_odds_api_fallback:
+                diagnostics.update(
+                    last_fetch_status=str(winline_werr or "winline_failed"),
+                    last_error=winline_werr,
+                    last_delivery_reason="blocked_winline_live_unavailable",
+                    football_winline_error_last=winline_werr,
+                )
+                return AutoSignalCycleResult(
+                    endpoint=str(settings.winline_live_ws_url or ""),
+                    fetch_ok=False,
+                    preview_candidates=0,
+                    preview_skipped_items=0,
+                    created_signal_ids=[],
+                    created_signals_count=0,
+                    skipped_candidates_count=0,
+                    notifications_sent_count=0,
+                    preview_only=False,
+                    message="blocked_winline_live_unavailable",
+                    runtime_paused=False,
+                    runtime_active_sports=active_sports,
+                    source_name="winline_live",
+                    live_auth_status="winline_unavailable",
+                    last_live_http_status=101,
+                    last_live_error_body=winline_werr,
+                    rejection_reason=str(winline_werr or "winline_unavailable"),
+                )
+            elif winline_werr and winline_werr != "winline_disabled" and settings.football_live_odds_api_fallback:
+                diagnostics.update(football_winline_error_last=winline_werr, last_error=winline_werr)
+                logger.info(
+                    "[FOOTBALL][WINLINE_LIVE] failed (fallback to odds) err=%s",
+                    winline_werr,
+                )
 
-        if fetch_res.ok and isinstance(fetch_res.payload, dict):
+        if preview is None:
+            fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
+            live_auth_status = self._render_live_auth_status(
+                fetch_res.auth_status, fetch_res.response_body_snippet
+            )
+            diagnostics.update(
+                live_provider_name=self._detect_provider_name(settings),
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                last_live_endpoint=fetch_res.endpoint,
+                last_live_error_body=fetch_res.response_body_snippet,
+            )
+            if fetch_res and fetch_res.__class__.__name__ != "SimpleNamespace":
+                diagnostics.update(
+                    football_primary_live_source=self._detect_provider_name(settings),
+                )
+            logger.info(
+                "[FOOTBALL][LIVE] provider=%s endpoint=%s key_present=%s key_length=%s key_masked=%s http_status=%s auth_status=%s params=%s",
+                self._detect_provider_name(settings),
+                fetch_res.endpoint,
+                "yes" if fetch_res.key_present else "no",
+                fetch_res.key_length,
+                fetch_res.key_masked or "—",
+                fetch_res.status_code,
+                live_auth_status,
+                self._provider_query_params(fetch_res.endpoint),
+            )
+
+        if preview is None and fetch_res is not None and fetch_res.ok and isinstance(fetch_res.payload, dict):
             payload = fetch_res.payload
-            live_payload_fetched_at_utc = datetime.now(timezone.utc)
+            live_payload_fetched_at_utc = datetime.now(tz=timezone.utc)
             source_name = str(fetch_res.source_name or source_name)
+            source_kind = "live"
             diagnostics.update(
                 last_fetch_status="ok",
                 source_mode="live",
@@ -1256,8 +1390,10 @@ class AutoSignalService:
                 uploaded_at=None,
                 source_file_path=None,
                 source_checksum=None,
+                football_primary_live_source=source_name,
+                football_live_effective_source=source_name,
             )
-        else:
+        elif preview is None and fetch_res is not None:
             err = str(fetch_res.error or "fetch_error")
             diagnostics.update(
                 last_fetch_status=err,
@@ -1275,7 +1411,9 @@ class AutoSignalService:
                         diagnostics.update(
                             source_mode=manual_source_mode,
                             is_real_source=False,
-                            source_origin=str(fallback.get("source_origin") or fallback.get("source_reason") or "manual"),
+                            source_origin=str(
+                                fallback.get("source_origin") or fallback.get("source_reason") or "manual"
+                            ),
                             upload_provenance_present=bool(fallback.get("provenance_present")),
                             uploaded_at=fallback.get("uploaded_at"),
                             source_file_path=fallback.get("file_path"),
@@ -1348,13 +1486,20 @@ class AutoSignalService:
                         fallback_used=True,
                         source_mode=manual_source_mode,
                         is_real_source=manual_is_real,
-                        source_origin=str(fallback.get("source_origin") or fallback.get("source_reason") or "manual"),
+                        source_origin=str(
+                            fallback.get("source_origin") or fallback.get("source_reason") or "manual"
+                        ),
                         upload_provenance_present=bool(fallback.get("provenance_present")),
                         uploaded_at=fallback.get("uploaded_at"),
                         source_file_path=fallback.get("file_path"),
                         source_checksum=fallback.get("checksum"),
                         last_delivery_reason=None,
-                        note=str(fallback.get("source_reason") or "temporary production fallback enabled: Winline JSON"),
+                        note=str(
+                            fallback.get("source_reason")
+                            or "temporary production fallback enabled: Winline JSON"
+                        ),
+                        football_primary_live_source="manual_winline_json",
+                        football_live_effective_source="manual_winline_json",
                     )
                     logger.info(
                         "[FOOTBALL] live source unavailable; temporary production fallback source=%s",
@@ -1412,9 +1557,13 @@ class AutoSignalService:
                         last_live_http_status=fetch_res.status_code,
                         rejection_reason=f"live_unavailable_no_manual_fallback: {live_auth_status}",
                     )
-                logger.info("[FOOTBALL] fetch source=%s unauthorized; fallback source=%s", source_name, fallback_source_name)
+                logger.info(
+                    "[FOOTBALL] fetch source=%s unauthorized; fallback source=%s", source_name, fallback_source_name
+                )
             else:
-                diagnostics.update(source_mode="blocked", fallback_source_available=False, source_origin="live_provider_error")
+                diagnostics.update(
+                    source_mode="blocked", fallback_source_available=False, source_origin="live_provider_error"
+                )
                 return AutoSignalCycleResult(
                     endpoint=fetch_res.endpoint,
                     fetch_ok=False,
