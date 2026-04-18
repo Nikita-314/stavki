@@ -955,6 +955,12 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         if row.get("final_status") == "selected":
             selected_row = row
             break
+    best_kind = None
+    if selected_row is not None:
+        if bool(selected_row.get("best_candidate_is_corner_like")):
+            best_kind = "corners"
+        else:
+            best_kind = "main market"
 
     tournament_display = (selected_row or {}).get("tournament_name")
     event_start_display = None
@@ -968,6 +974,7 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         lines.extend(
             [
                 "🏆 Лучший кандидат:",
+                f"• Лучшая идея: {best_kind or '—'}",
                 f"• Матч: {sel_match}",
                 f"• Турнир: {tournament_display or '—'}",
                 f"• Начало: {event_start_display or '—'}",

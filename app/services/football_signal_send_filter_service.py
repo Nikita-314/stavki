@@ -75,7 +75,8 @@ class FootballSignalSendFilterService:
                 exotic_only += 1
         return buckets, exotic_only
 
-    _ALLOWED_AUTO_FAMILIES = {"result", "double_chance", "totals", "btts", "handicap"}
+    # "corners" is allowed but intentionally low-priority vs main football markets.
+    _ALLOWED_AUTO_FAMILIES = {"result", "double_chance", "totals", "btts", "handicap", "corners"}
     _SOFT_ALLOWED_AUTO_FAMILIES = {"combo"}
     _BLOCKED_AUTO_FAMILIES = {
         "correct_score",
@@ -92,6 +93,7 @@ class FootballSignalSendFilterService:
         "btts": 110.0,
         "handicap": 100.0,
         "combo": 80.0,
+        "corners": 35.0,
         "correct_score": 20.0,
         "winning_margin": 15.0,
         "odd_even": 10.0,
@@ -106,12 +108,16 @@ class FootballSignalSendFilterService:
         "btts": "goals_family",
         "handicap": "handicap_family",
         "combo": "combo_family",
+        "corners": "corners_family",
         "correct_score": "exotic_family",
         "winning_margin": "exotic_family",
         "odd_even": "exotic_family",
         "special": "special_family",
         "exotic": "exotic_family",
     }
+
+    def family_priority_weight(self, family: str) -> float:
+        return float(self._FAMILY_PRIORITY.get(str(family or ""), 0.0))
 
     def filter_auto_send_candidates(
         self,
@@ -272,6 +278,10 @@ class FootballSignalSendFilterService:
         return out
 
     def get_market_family(self, candidate: ProviderSignalCandidate) -> str:
+        # Corner-like markets should not compete with main football families (1x2/totals/etc.)
+        # even if provider encodes them as market_type=1x2/total_goals with "углов" in label.
+        if self.is_corner_market(candidate):
+            return "corners"
         market_type = str(getattr(getattr(candidate, "market", None), "market_type", "") or "").strip().lower()
         market_label = str(getattr(getattr(candidate, "market", None), "market_label", "") or "").strip().lower()
         selection = str(getattr(getattr(candidate, "market", None), "selection", "") or "").strip().lower()
@@ -312,6 +322,8 @@ class FootballSignalSendFilterService:
             return 1
         if family == "combo":
             return 2
+        if family == "corners":
+            return 3
         return 3
 
     def build_football_signal_score(self, candidate: ProviderSignalCandidate) -> float:

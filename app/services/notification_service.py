@@ -136,6 +136,23 @@ class NotificationService:
         ]
         return lines
 
+    def _football_live_minute_line(self, report: SignalAnalyticsReport) -> str | None:
+        prediction_logs = report.prediction_logs or []
+        if not prediction_logs:
+            return None
+        snap = prediction_logs[0].feature_snapshot_json or {}
+        analytics = snap.get("football_analytics") or {}
+        minute = analytics.get("minute")
+        if minute is None:
+            return None
+        try:
+            m = int(minute)
+        except (TypeError, ValueError):
+            return None
+        if m <= 0:
+            return "🕒 Идёт: live"
+        return f"🕒 Идёт: {m} мин (live)"
+
     def format_signal_message(self, report: SignalAnalyticsReport) -> str:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
@@ -154,8 +171,29 @@ class NotificationService:
         bookmaker_raw = str(getattr(s.bookmaker, "value", s.bookmaker) or "").strip()
         bookmaker = "Winline" if bookmaker_raw.lower() == "winline" else bookmaker_raw
         source_badge = self._source_badge(report)
+        prediction_logs = report.prediction_logs or []
+        idea_kind = "main market"
+        if bet_presentation.detected_special_scope == "corners":
+            idea_kind = "corners"
+        snap = prediction_logs[0].feature_snapshot_json if prediction_logs else {}
+        fs = (snap or {}).get("football_scoring") or {}
+        try:
+            final = float(fs.get("final_score")) if fs.get("final_score") is not None else None
+        except (TypeError, ValueError):
+            final = None
+        if final is not None:
+            if final >= 75:
+                prio = "высокий"
+            elif final >= 60:
+                prio = "средний"
+            else:
+                prio = "низкий"
+        else:
+            prio = "—"
+        live_line = self._football_live_minute_line(report)
+        title = "🚨 Live-сигнал" if bool(getattr(s, "is_live", False)) else "🚨 Футбольный сигнал"
         lines = [
-            "🚨 Футбольный сигнал",
+            title,
         ]
         if source_badge:
             lines.extend(["", source_badge])
@@ -164,7 +202,8 @@ class NotificationService:
                 "",
                 f"🏆 Турнир: {tournament}",
                 f"⚽ Матч: {match_name}",
-                f"🕒 Начало матча: {match_start}",
+                *( [live_line] if live_line else [] ),
+                f"🗓 Начало матча: {match_start}",
                 f"🎯 Ставка: {bet_presentation.main_label}",
                 f"💰 Коэффициент: {odds}",
                 f"🏢 Букмекер: {bookmaker}",
@@ -173,7 +212,26 @@ class NotificationService:
         )
         if bet_presentation.detail_label:
             lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
-        lines.extend(self._football_analysis_lines(report))
+        lines.extend(
+            [
+                "",
+                "🧠 Анализ:",
+                f"- Тип: {'LIVE' if bool(getattr(s, 'is_live', False)) else 'PREMATCH'}",
+                f"- Идея: {idea_kind}",
+                f"- Приоритет: {prio}",
+            ]
+        )
+        # Reasons (if any) from scoring
+        extra = self._football_analysis_lines(report)
+        if extra:
+            # _football_analysis_lines includes its own "🧠 Анализ:" header; keep only reasons section.
+            # We take only the "- Причины:" + lines.
+            if "- Причины:" in extra:
+                idx = extra.index("- Причины:")
+                lines.extend(["- Причины:", *extra[idx + 1 :]])
+        else:
+            # no reasons available
+            pass
         return "\n".join(lines)
 
     def format_result_message(self, signal_report: SignalAnalyticsReport, quality_report: SignalQualityReport) -> str:

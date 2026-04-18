@@ -98,6 +98,7 @@ def compile_football_cycle_debug(
     for eid, rep in sorted(preview_by_eid.items(), key=lambda kv: (kv[1].match.match_name or "")):
         match = rep.match
         is_live, hours_to_start = family_svc._time_window_info(rep)
+        is_corner_like = bool(family_svc.is_corner_market(rep))
         raw_keys = {
             (
                 str(c.market.market_type or ""),
@@ -116,9 +117,11 @@ def compile_football_cycle_debug(
         best_sc, best_c = best_by_eid.get(eid, (0.0, None))
         best_market = None
         best_odds = None
+        best_is_corner_like = None
         if best_c is not None:
             best_market = str(best_c.market.market_label or best_c.market.market_type or "")
             best_odds = str(best_c.market.odds_value) if best_c.market.odds_value is not None else None
+            best_is_corner_like = bool(family_svc.is_corner_market(best_c))
 
         final_status = "blocked_unknown"
         if n_preview == 0:
@@ -148,6 +151,7 @@ def compile_football_cycle_debug(
                 "match_name": str(match.match_name or ""),
                 "tournament_name": tn or None,
                 "is_live": bool(getattr(match, "is_live", False)),
+                "is_corner_like": is_corner_like,
                 "event_start_at": match.event_start_at.isoformat() if getattr(match, "event_start_at", None) else None,
                 "hours_to_start": None if hours_to_start is None else round(float(hours_to_start), 3),
                 "raw_markets_count": len(raw_keys),
@@ -159,6 +163,7 @@ def compile_football_cycle_debug(
                 "best_candidate_market": best_market,
                 "best_candidate_odds": best_odds,
                 "best_candidate_score": round(best_sc, 2) if best_c is not None else None,
+                "best_candidate_is_corner_like": best_is_corner_like,
                 "final_status": final_status,
             }
         )
@@ -1170,11 +1175,17 @@ class AutoSignalService:
             reverse=True,
         )
         for rank, c in enumerate(scored_sorted, start=1):
+            fam = family_svc.get_market_family(c)
+            is_corner_like = bool(family_svc.is_corner_market(c))
+            fam_w = family_svc.family_priority_weight(fam)
             logger.info(
-                "[FOOTBALL][SCORING] rank=%s match=%s market_type=%s score=%s min=%s",
+                "[FOOTBALL][SCORING] rank=%s match=%s market_type=%s family=%s corners=%s family_w=%.1f score=%s min=%s",
                 rank,
                 c.match.match_name,
                 c.market.market_type,
+                fam,
+                str(is_corner_like).lower(),
+                fam_w,
                 float(c.signal_score or 0),
                 min_score,
             )
