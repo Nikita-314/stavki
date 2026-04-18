@@ -204,6 +204,32 @@ def _fmt_yes_no(v: bool) -> str:
     return "Да" if v else "Нет"
 
 
+def _fmt_football_live_source_label_ru(diag: dict) -> str:
+    """Понятная подпись вместо технических fresh/unknown в диагностике."""
+    if bool(diag.get("football_live_stale_source")):
+        return "Источник устарел"
+    raw = (diag.get("football_live_source_freshness") or "").strip().lower()
+    if raw == "fresh":
+        return "Источник свежий"
+    if raw == "unknown":
+        return "Нет данных о свежести источника"
+    if not raw or raw == "—":
+        return "—"
+    return str(diag.get("football_live_source_freshness") or "—")
+
+
+def _fmt_source_age_for_ui(seconds: object) -> str:
+    if seconds is None:
+        return "—"
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if abs(s) < 180:
+        return f"{s:.0f} с"
+    return f"{s / 60.0:.1f} мин"
+
+
 def _sport_toggle_label(key: str, enabled: bool) -> str:
     if key == "football":
         return f"⚽ Футбол: {'включён' if enabled else 'выключен'}"
@@ -247,9 +273,8 @@ def _format_signal_runtime_status_lines() -> list[str]:
     started_s = diag.get("football_live_session_started_at") or "—"
     expires_s = diag.get("football_live_session_expires_at") or "—"
     bn = diag.get("football_live_cycle_bottleneck") or "—"
-    src_age = diag.get("football_live_source_age_seconds")
-    src_age_txt = f"{round(float(src_age), 1)} с" if src_age is not None else "—"
-    ff = diag.get("football_live_source_freshness") or "—"
+    src_age_txt = _fmt_source_age_for_ui(diag.get("football_live_source_age_seconds"))
+    ff_ru = _fmt_football_live_source_label_ru(diag)
     return [
         "📊 Статус сигналов",
         "",
@@ -259,19 +284,19 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Истекает: {expires_s}",
         f"• Осталось: {rem_txt} мин",
         f"• Live-матчей (последний цикл): {live_m}",
-        f"• Свежесть источника: {ff}",
+        "— Проверка свежести (live-only) —",
+        f"• {ff_ru}",
         f"• Возраст источника: {src_age_txt}",
-        f"• Источник протухший: {_fmt_yes_no(bool(diag.get('football_live_stale_source')))}",
-        f"• Live-кандидатов до freshness: {diag.get('football_live_freshness_candidates_before') or 0}",
-        f"• Live-матчей принято (freshness): {diag.get('football_live_freshness_live_events_accepted') or 0}",
-        f"• Протухших матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
-        f"• Рынков отсеяно со stale-матчей: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
+        f"• Кандидатов до проверки свежести: {diag.get('football_live_freshness_candidates_before') or 0}",
+        f"• Live-матчей принято: {diag.get('football_live_freshness_live_events_accepted') or 0}",
+        f"• Устаревших live-матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
+        f"• Рынков на устаревших матчах отсеяно: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
         f"• Новых идей к отправке (последний цикл): {new_ideas}",
         f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
         f"• Отправлено в Telegram (сессия): {diag.get('football_live_telegram_sent_session') or 0}",
         f"• Записано сигналов в БД (сессия): {diag.get('football_live_signals_sent_session') or 0}",
         f"• Последний цикл: {last_cy}",
-        f"• Узкое место (последний цикл): {bn}",
+        f"• Узкое место цикла: {bn}",
         "",
         f"▶️ Режим: {'запущен' if not state.get('paused') else 'остановлен'}",
         f"⚽ Футбол: {'включён' if state.get('football_enabled') else 'выключен'}",
@@ -894,8 +919,8 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         lines.append(f"⚠️ Режим источника: {sm} (не чистый live).")
         lines.append("")
 
-    src_age_v = diag.get("football_live_source_age_seconds")
-    src_age_line = f"{round(float(src_age_v), 1)} с" if src_age_v is not None else "—"
+    src_age_line = _fmt_source_age_for_ui(diag.get("football_live_source_age_seconds"))
+    ff_ru = _fmt_football_live_source_label_ru(diag)
 
     lines.extend(
         [
@@ -904,14 +929,13 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             f"• Статус Live API: {live_api_human}",
             f"• Эффективный источник данных: {eff}",
             "",
-            "🧪 Freshness (live-only):",
-            f"• Свежесть источника: {diag.get('football_live_source_freshness') or '—'}",
+            "— Проверка свежести (live-only) —",
+            f"• {ff_ru}",
             f"• Возраст источника: {src_age_line}",
-            f"• Источник stale: {_fmt_yes_no(bool(diag.get('football_live_stale_source')))}",
-            f"• Live-кандидатов до freshness: {diag.get('football_live_freshness_candidates_before') or 0}",
-            f"• Live-матчей принято (freshness): {diag.get('football_live_freshness_live_events_accepted') or 0}",
-            f"• Протухших матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
-            f"• Рынков отсеяно со stale-матчей: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
+            f"• Кандидатов до проверки свежести: {diag.get('football_live_freshness_candidates_before') or 0}",
+            f"• Live-матчей принято: {diag.get('football_live_freshness_live_events_accepted') or 0}",
+            f"• Устаревших live-матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
+            f"• Рынков на устаревших матчах отсеяно: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
             "",
             "📊 Сводка (live-only цепочка):",
             f"• Матчей найдено: {matches_found}",

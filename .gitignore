@@ -1,5 +1,8 @@
 .env
+# Python bytecode / caches (never commit)
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
 .pytest_cache/
 .mypy_cache/
