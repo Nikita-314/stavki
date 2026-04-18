@@ -129,6 +129,40 @@ class FootballLearningService:
     def multiplier_for_family(self, multipliers: dict[str, float], family: str) -> float:
         return float(multipliers.get(family, 1.0))
 
+    async def aggregate_outcome_reason_losses(
+        self, session: AsyncSession, *, lookback: int = 200
+    ) -> list[dict[str, Any]]:
+        """Counts of `outcome_reason_code` for settled football losses (from `football_outcome_audit`)."""
+        stmt = (
+            select(Signal, Settlement)
+            .join(Settlement, Settlement.signal_id == Signal.id)
+            .where(Signal.sport == SportType.FOOTBALL)
+            .where(Settlement.result == BetResult.LOSE)
+            .options(selectinload(Signal.prediction_logs))
+            .order_by(Settlement.id.desc())
+            .limit(int(lookback))
+        )
+        result = await session.execute(stmt)
+        rows = list(result.all())
+        counts: dict[str, int] = defaultdict(int)
+        for signal, _st in rows:
+            if not signal.prediction_logs:
+                continue
+            pl0 = min(signal.prediction_logs, key=lambda p: p.id)
+            snap = pl0.feature_snapshot_json
+            if not isinstance(snap, dict):
+                continue
+            aud = snap.get("football_outcome_audit")
+            if not isinstance(aud, dict):
+                continue
+            code = aud.get("outcome_reason_code")
+            if not code:
+                continue
+            counts[str(code)] += 1
+        return [
+            {"outcome_reason_code": k, "count": v} for k, v in sorted(counts.items(), key=lambda x: -x[1])
+        ]
+
     def _multiplier_from_rate(self, win_rate: float | None, n: int) -> float:
         if win_rate is None or n < self._MIN_SAMPLES:
             return 1.0
@@ -142,7 +176,8 @@ class FootballLearningService:
     def _candidate_from_signal(self, signal: Signal) -> ProviderSignalCandidate:
         snap: dict[str, Any] = {}
         if signal.prediction_logs:
-            snap = dict(signal.prediction_logs[0].feature_snapshot_json or {})
+            pl0 = min(signal.prediction_logs, key=lambda p: p.id)
+            snap = dict(pl0.feature_snapshot_json or {})
         match = ProviderMatch(
             external_event_id=str(signal.event_external_id or ""),
             sport=SportType.FOOTBALL,

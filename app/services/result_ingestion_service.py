@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import BetResult
+from app.core.enums import BetResult, SportType
 from app.db.repositories.signal_repository import SignalRepository
 from app.schemas.event_result import EventResultInput, EventResultProcessingResult
 from app.schemas.settlement import SettlementCreate
 from app.services.failure_review_service import FailureReviewService
+from app.services.football_signal_outcome_reason_service import FootballSignalOutcomeReasonService
 from app.services.settlement_service import SettlementService
+
+logger = logging.getLogger(__name__)
 
 
 class ResultIngestionService:
@@ -55,6 +59,11 @@ class ResultIngestionService:
                     bankroll_after=None,
                 ),
             )
+            if s.sport == SportType.FOOTBALL:
+                try:
+                    await FootballSignalOutcomeReasonService().apply_to_signal(session, s, result, data)
+                except Exception:
+                    logger.exception("football outcome reason apply failed (signal_id=%s)", s.id)
             settled_count += 1
             processed_ids.append(int(s.id))
 

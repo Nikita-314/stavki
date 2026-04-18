@@ -13,7 +13,10 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.keyboards.debug import get_debug_keyboard, get_signal_control_keyboard, get_winline_manual_flow_keyboard
-from app.core.enums import BetResult, EntryStatus
+from sqlalchemy import select
+
+from app.core.enums import BetResult, EntryStatus, SportType
+from app.db.models.signal import Signal
 from app.core.config import Settings, get_settings
 from app.schemas.entry import EntryCreate
 from app.schemas.settlement import SettlementCreate
@@ -26,6 +29,7 @@ from app.services.entry_service import EntryService
 from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
+from app.services.football_signal_outcome_reason_service import FootballSignalOutcomeReasonService
 from app.services.settlement_service import SettlementService
 from app.services.result_ingestion_service import ResultIngestionService
 from app.schemas.event_result import EventResultInput
@@ -308,6 +312,21 @@ def _format_signal_runtime_status_lines() -> list[str]:
     ]
     if _san_br:
         sanity_status_lines.append(f"• Сильный отсев: {_san_br[:400]}")
+    n_pm = int(diag.get("football_postmatch_settled_count") or 0)
+    tlr_loss = (diag.get("football_postmatch_top_loss_reasons") or "").strip()
+    if n_pm or tlr_loss:
+        postmatch_block: list[str] = [
+            "",
+            "— Football post-match (сеттл / объяснения) —",
+            f"• Последняя выборка settled: n={n_pm} "
+            f"(W {int(diag.get('football_postmatch_wins_last') or 0)} / "
+            f"L {int(diag.get('football_postmatch_losses_last') or 0)} / "
+            f"V {int(diag.get('football_postmatch_voids_last') or 0)})",
+        ]
+        if tlr_loss:
+            postmatch_block.append(f"• Топ причин минуса: {tlr_loss[:600]}")
+    else:
+        postmatch_block = []
     return [
         "📊 Статус сигналов",
         "",
@@ -397,6 +416,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено (цикл→канал): {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {delivery_reason}",
+        *postmatch_block,
         "",
         "— Аналитика и обучение (флаги, без выдуманных данных) —",
         f"Сбор признаков в снимке: {_fmt_yes_no(bool(diag.get('football_analytics_enabled')))}",
@@ -1723,6 +1743,12 @@ async def cmd_settle_signal(message: Message, sessionmaker: async_sessionmaker[A
                 bankroll_after=None,
             ),
         )
+        sig_row = (await session.execute(select(Signal).where(Signal.id == int(signal_id)))).scalar_one_or_none()
+        if sig_row and sig_row.sport == SportType.FOOTBALL:
+            try:
+                await FootballSignalOutcomeReasonService().apply_to_signal(session, sig_row, result, None)
+            except Exception:
+                logger.exception("football outcome reason after /settle_signal (signal_id=%s)", signal_id)
         await session.commit()
 
     await message.answer(

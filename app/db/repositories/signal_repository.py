@@ -185,6 +185,25 @@ class SignalRepository:
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_latest_settled_football_with_logs(
+        self, session: AsyncSession, *, limit: int = 20
+    ) -> list[Signal]:
+        """Latest football signals with a settlement, ordered by settle time desc, logs preloaded."""
+        effective_dt = func.coalesce(Settlement.settled_at, Settlement.created_at)
+        stmt = (
+            select(Signal)
+            .join(Settlement, Settlement.signal_id == Signal.id)
+            .where(Signal.sport == SportType.FOOTBALL)
+            .options(
+                selectinload(Signal.settlement),
+                selectinload(Signal.prediction_logs),
+            )
+            .order_by(effective_dt.desc(), Settlement.id.desc())
+            .limit(int(limit))
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_latest_failed_signals(self, session: AsyncSession, limit: int = 10) -> list[Signal]:
         """Return latest signals with Settlement result LOSE or VOID, ordered by effective settle time desc."""
         effective_dt = func.coalesce(Settlement.settled_at, Settlement.created_at)

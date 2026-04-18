@@ -143,6 +143,15 @@ class SignalRuntimeDiagnosticsState:
     """e.g. blocked_invalid_live_market_text | blocked_impossible_live_outcome — first drop if any."""
     football_live_sanity_last_best_rejected: str | None = None
     """Human line: best-score rejected candidate and reason."""
+    football_postmatch_settled_count: int = 0
+    """How many latest settled football rows were scanned for post-match summary."""
+    football_postmatch_wins_last: int = 0
+    football_postmatch_losses_last: int = 0
+    football_postmatch_voids_last: int = 0
+    football_postmatch_top_loss_reasons: str | None = None
+    """Short joined list of top loss reason codes in the last sample."""
+    football_postmatch_status_lines_json: str | None = None
+    """JSON blob: sample wins/losses/voids and loss_by_reason."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()

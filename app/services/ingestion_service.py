@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.enums import SportType
 from app.schemas.candidate_filter import CandidateFilterConfig
 from app.schemas.provider_models import ProviderBatchIngestResult, ProviderSignalCandidate
 from app.schemas.signal import PredictionLogCreate, SignalCreate, SignalCreateBundle
@@ -131,6 +133,35 @@ class IngestionService:
         match = candidate.match
         market = candidate.market
 
+        fs0: dict[str, Any] = dict(candidate.feature_snapshot_json or {})
+        ex0: dict[str, Any] = dict(candidate.explanation_json or {})
+        if match.sport == SportType.FOOTBALL:
+            sp = ex0.get("football_live_send_path")
+            audit: dict[str, Any] = {
+                "main_market": f"{market.market_type}:{(market.market_label or '')[:120]}",
+                "selection": (market.selection or "")[:200],
+                "is_live": bool(match.is_live),
+            }
+            if sp in ("soft", "normal"):
+                audit["send_path"] = sp
+            elif sp is not None and str(sp).strip():
+                audit["send_path"] = str(sp)[:48]
+            ls = ex0.get("live_sanity")
+            if isinstance(ls, dict) and ls:
+                slim = {k: ls[k] for k in ("plausibility", "plausibility_score", "block_token") if k in ls}
+                if slim:
+                    audit["live_sanity"] = slim
+            for key in ("score_home", "score_away", "live_minute", "match_minute"):
+                v = fs0.get(key)
+                if v is not None:
+                    audit[key] = v
+            prev = fs0.get("football_send_audit")
+            if isinstance(prev, dict):
+                merged = {**prev, **audit}
+            else:
+                merged = audit
+            fs0["football_send_audit"] = merged
+
         signal = SignalCreate(
             sport=match.sport,
             bookmaker=market.bookmaker,
@@ -159,7 +190,7 @@ class IngestionService:
         )
 
         prediction_log = PredictionLogCreate(
-            feature_snapshot_json=candidate.feature_snapshot_json,
+            feature_snapshot_json=fs0,
             raw_model_output_json=candidate.raw_model_output_json,
             explanation_json=candidate.explanation_json,
         )
