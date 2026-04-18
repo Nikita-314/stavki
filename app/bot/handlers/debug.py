@@ -840,6 +840,22 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
 
     _snap = _Fls().snapshot()
     _rem = _Fls().remaining_seconds()
+    if not _snap.active:
+        lines.extend(
+            [
+                "ℹ️ Подсказка:",
+                "• Чтобы бот начал слать live-сигналы 15 минут, нажмите ▶️ Старт.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "ℹ️ Подсказка:",
+                "• Live-сессия активна — новые идеи будут отправляться автоматически.",
+                "",
+            ]
+        )
     lines.extend(
         [
             "🎚 Память live-сессии (только если жмёте ▶️ Старт для боя):",

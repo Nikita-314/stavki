@@ -113,7 +113,7 @@ class FootballLiveSessionService:
             _DUP_BLOCKED = 0
             _SENT_IDEA_KEYS = set()
             logger.info("[FOOTBALL][LIVE_SESSION] started expires_at=%s duration_min=%s", _EXPIRES_AT.isoformat(), dm)
-            return self.snapshot()
+        return self.snapshot()
 
     def stop_session(self, *, manual: bool = True) -> FootballLiveSessionSnapshot:
         global _ACTIVE, _STOPPED_MANUALLY
@@ -121,7 +121,7 @@ class FootballLiveSessionService:
             _ACTIVE = False
             _STOPPED_MANUALLY = manual
             logger.info("[FOOTBALL][LIVE_SESSION] stopped manual=%s", str(manual).lower())
-            return self.snapshot()
+        return self.snapshot()
 
     def touch_cycle(self) -> None:
         global _LAST_CYCLE_AT
