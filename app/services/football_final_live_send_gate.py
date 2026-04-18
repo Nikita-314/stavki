@@ -75,6 +75,22 @@ def final_live_whitelist_ok(
     return False, f"blocked_family_{fam}"
 
 
+def _decision_when_no_whitelist(fail_lines: list[str]) -> str:
+    if not fail_lines:
+        return "blocked_no_whitelisted_candidate"
+    toks = []
+    for fl in fail_lines:
+        t = fl.split(":", 1)[0].strip() if ":" in fl else fl
+        toks.append(t)
+    if all(t == "blocked_cards_or_special" for t in toks):
+        return "blocked_cards_or_special"
+    if all(t == "blocked_broken_next_goal_text" for t in toks):
+        return "blocked_broken_next_goal"
+    if all(t.startswith("blocked_family") or t == "blocked_corners" for t in toks):
+        return "blocked_family_or_corners"
+    return "blocked_no_whitelisted_candidate"
+
+
 def apply_final_live_send_gate(
     finalists: list[ProviderSignalCandidate],
     family_svc: FootballSignalSendFilterService,
@@ -102,15 +118,24 @@ def apply_final_live_send_gate(
     per_match: list[dict[str, Any]] = []
     drop_by_eid: dict[str, str] = {}
     drop_reasons: dict[str, str] = {}
+    whitelist_token_hits: dict[str, int] = {}
 
     for eid, group in sorted(by_eid.items(), key=lambda kv: (kv[0] == "—", kv[0])):
         mname = str(group[0].match.match_name or "—") if group else "—"
         # Highest model score first
         sorted_g = sorted(group, key=lambda x: float(x.signal_score or 0.0), reverse=True)
+        best0 = sorted_g[0]
+        best_bet = _bet_line(best0)
+        best_fam = family_svc.get_market_family(best0)
+        best_sc = round(float(best0.signal_score or 0.0), 2)
+        tn = str(getattr(best0.match, "tournament_name", "") or "").strip() or "—"
+        best_wl_ok, best_wl_tok = final_live_whitelist_ok(best0, family_svc)
+
         wl_pass: list[tuple[ProviderSignalCandidate, str]] = []
         wl_fail_reasons: list[str] = []
         for c in sorted_g:
             ok, tok = final_live_whitelist_ok(c, family_svc)
+            whitelist_token_hits[tok] = int(whitelist_token_hits.get(tok, 0) or 0) + 1
             if ok:
                 wl_pass.append((c, tok))
             else:
@@ -119,11 +144,21 @@ def apply_final_live_send_gate(
         row: dict[str, Any] = {
             "event_id": eid,
             "match_name": mname,
-            "finalists_found": len(group),
+            "tournament": tn,
+            "best_scored_candidate_bet": best_bet,
+            "best_scored_candidate_family": best_fam,
+            "best_scored_candidate_score": best_sc,
+            "best_scored_whitelist_ok": bool(best_wl_ok),
+            "best_scored_whitelist_token": best_wl_tok,
+            "finalists_found_before_gate": len(group),
             "candidates_after_whitelist": len(wl_pass),
+            "final_gate_whitelist_passed": bool(wl_pass),
             "whitelist_rejected": wl_fail_reasons[:12],
             "chosen_final_candidate": None,
             "chosen_reason": None,
+            "final_sent_bet": None,
+            "final_gate_sanity_passed": None,
+            "final_gate_decision": None,
             "dropped_other_finalists_count": max(0, len(wl_pass) - 1) if wl_pass else 0,
             "dropped_other_finalists_reasons": [],
             "match_send_skipped": False,
@@ -133,6 +168,8 @@ def apply_final_live_send_gate(
         if not wl_pass:
             row["match_send_skipped"] = True
             row["skip_reason"] = "all_finalists_failed_final_whitelist"
+            row["final_gate_sanity_passed"] = False
+            row["final_gate_decision"] = _decision_when_no_whitelist(wl_fail_reasons)
             per_match.append(row)
             continue
 
@@ -162,6 +199,8 @@ def apply_final_live_send_gate(
             row["skip_reason"] = "top_whitelist_candidate_failed_live_sanity_no_fallback"
             row["chosen_final_candidate"] = _bet_line(top_c)
             row["chosen_reason"] = f"blocked:{res.block_token}"
+            row["final_gate_sanity_passed"] = False
+            row["final_gate_decision"] = "blocked_live_sanity"
             if eid and eid != "—":
                 drop_by_eid[eid] = res.block_token
                 drop_reasons[eid] = res.reason_ru
@@ -176,6 +215,9 @@ def apply_final_live_send_gate(
 
         row["chosen_final_candidate"] = _bet_line(top2)
         row["chosen_reason"] = f"selected:{top_why}+sanity_ok"
+        row["final_sent_bet"] = row["chosen_final_candidate"]
+        row["final_gate_sanity_passed"] = True
+        row["final_gate_decision"] = "sent"
         out.append(top2)
         per_match.append(row)
         logger.info(
@@ -185,10 +227,23 @@ def apply_final_live_send_gate(
             row["chosen_final_candidate"][:160],
         )
 
+    n_blocked_gate = sum(1 for r in per_match if r.get("match_send_skipped"))
+    n_sent_decision = sum(1 for r in per_match if r.get("final_gate_decision") == "sent")
     debug_blob = {
         "per_match": per_match,
         "matches_with_send": len(out),
-        "matches_skipped": sum(1 for r in per_match if r.get("match_send_skipped")),
+        "matches_skipped": n_blocked_gate,
         "allowed_families": sorted(ALLOWED_LIVE_FAMILIES),
+        "live_matches_total": len(by_eid),
+        "matches_reaching_final_gate": len(by_eid),
+        "matches_blocked_by_final_gate": n_blocked_gate,
+        "matches_sent_after_final_gate": n_sent_decision,
+        "whitelist_token_hits": dict(sorted(whitelist_token_hits.items(), key=lambda x: -x[1])),
+        "blocked_cards_or_special_hits": int(whitelist_token_hits.get("blocked_cards_or_special", 0)),
+        "blocked_broken_next_goal_hits": int(whitelist_token_hits.get("blocked_broken_next_goal_text", 0)),
+        "blocked_corners_hits": int(whitelist_token_hits.get("blocked_corners", 0)),
+        "blocked_family_hits": sum(
+            v for k, v in whitelist_token_hits.items() if k.startswith("blocked_family_")
+        ),
     }
     return out, debug_blob, drop_by_eid, drop_reasons

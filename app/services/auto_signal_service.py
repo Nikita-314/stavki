@@ -461,6 +461,45 @@ async def _combat_e2e_delivery_rows(
     return rows
 
 
+def _enrich_final_live_gate_with_delivery(
+    final_live_gate: dict[str, Any], trace_rows: list[dict[str, Any]]
+) -> None:
+    """Attach combat delivery outcome per event_id; full_pipeline_decision includes post-gate DB/notify."""
+    if not isinstance(final_live_gate, dict):
+        return
+    by_eid: dict[str, dict[str, Any]] = {}
+    for tr in trace_rows or []:
+        if not isinstance(tr, dict):
+            continue
+        eid = str(tr.get("event_id") or "").strip()
+        if eid and eid != "—":
+            by_eid[eid] = tr
+    for row in final_live_gate.get("per_match") or []:
+        if not isinstance(row, dict):
+            continue
+        eid = str(row.get("event_id") or "").strip()
+        tr = by_eid.get(eid) if eid else None
+        row["delivery_trace_row"] = tr
+        gate_d = str(row.get("final_gate_decision") or "")
+        if gate_d != "sent":
+            row["full_pipeline_decision"] = gate_d
+            continue
+        if not tr:
+            row["full_pipeline_decision"] = "sent_gate_no_delivery_trace"
+            continue
+        fo = str(tr.get("final_outcome") or "")
+        if fo == "sent":
+            row["full_pipeline_decision"] = "sent"
+        elif fo == "blocked_db_dedup":
+            row["full_pipeline_decision"] = "blocked_db_dedup"
+        elif fo in {"blocked_notify", "blocked_notify_signal_chat", "blocked_notify_runtime_paused"}:
+            row["full_pipeline_decision"] = "blocked_notify"
+        elif fo == "blocked_before_ingest":
+            row["full_pipeline_decision"] = "blocked_before_ingest"
+        else:
+            row["full_pipeline_decision"] = f"post_gate:{fo}"
+
+
 def compile_football_cycle_debug(
     *,
     fb_preview: list[ProviderSignalCandidate],
@@ -1315,8 +1354,18 @@ def format_football_session_start_user_message(
     fg = d.get("final_live_send_gate") or {}
     if isinstance(fg, dict) and fg.get("per_match") is not None:
         lines.append("🧱 Final live send gate (макс. 1 сигнал на матч за цикл):")
+        chk = int(fg.get("live_matches_total") or len(fg.get("per_match") or []) or 0)
+        mskip = int(fg.get("matches_skipped") or 0)
+        mpass = int(fg.get("matches_sent_after_final_gate") or fg.get("matches_with_send") or 0)
         lines.append(
-            f"   матчей с отправкой: {fg.get('matches_with_send')} · "
+            f"   Матчей проверено: {chk} · отсеяно gate: {mskip} · допущено к отправке: {mpass}"
+        )
+        bc = int(fg.get("blocked_cards_or_special_hits") or 0)
+        bng = int(fg.get("blocked_broken_next_goal_hits") or 0)
+        if bc or bng:
+            lines.append(f"   Карточки/мусор (кандидат-хиты whitelist): {bc} · broken next goal: {bng}")
+        lines.append(
+            f"   Итого после gate (кандидатов): {fg.get('matches_with_send')} · "
             f"отсеяно gate: {fg.get('matches_skipped')}"
         )
         af = fg.get("allowed_families")
@@ -1329,9 +1378,11 @@ def format_football_session_start_user_message(
             sk = row.get("match_send_skipped")
             tail = row.get("skip_reason") or row.get("chosen_reason") or "—"
             ch = (row.get("chosen_final_candidate") or "—")[:90]
+            fpd = row.get("full_pipeline_decision")
+            extra = f" | → {fpd}" if fpd else ""
             lines.append(
                 f"  • {row.get('event_id')} {str(row.get('match_name') or '')[:36]} | "
-                f"{'SKIP' if sk else 'OK'} | {ch} | {str(tail)[:100]}"
+                f"{'SKIP' if sk else 'OK'} | {ch} | {str(tail)[:100]}{extra}"
             )
         lines.append("")
 
@@ -3068,6 +3119,9 @@ class AutoSignalService:
         )
         if isinstance(cycle_dbg, dict):
             cycle_dbg["combat_delivery_trace"] = _trace_rows
+            _fg0 = cycle_dbg.get("final_live_send_gate")
+            if isinstance(_fg0, dict):
+                _enrich_final_live_gate_with_delivery(_fg0, _trace_rows)
         _tj = json.dumps(_trace_rows, default=str, ensure_ascii=False)[:60000]
         SignalRuntimeDiagnosticsService().update(
             football_live_combat_delivery_trace_json=_tj,
