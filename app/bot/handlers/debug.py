@@ -29,6 +29,7 @@ from app.services.entry_service import EntryService
 from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
+from app.services.auto_signal_service import AutoSignalService, format_football_session_start_user_message
 from app.services.football_signal_outcome_reason_service import (
     FootballSignalOutcomeReasonService,
     build_football_postmatch_verify_report,
@@ -51,7 +52,6 @@ from app.services.http_fetch_service import HttpFetchService
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.providers.odds_http_client import OddsHttpClient
 from app.schemas.auto_signal import AutoSignalCycleResult
-from app.services.auto_signal_service import AutoSignalService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.schemas.provider_client import ProviderClientConfig
@@ -453,9 +453,15 @@ def _chunk_answer_text(text: str, limit: int = 3800) -> list[str]:
     return chunks or [""]
 
 
-async def _answer_long_message(message: Message, text: str) -> None:
-    for part in _chunk_answer_text(text):
-        await message.answer(part)
+async def _answer_long_message(
+    message: Message, text: str, *, reply_markup: object | None = None
+) -> None:
+    parts = _chunk_answer_text(text)
+    for i, part in enumerate(parts):
+        await message.answer(
+            part,
+            reply_markup=reply_markup if i == 0 and reply_markup is not None else None,
+        )
 
 
 def _utc_now() -> datetime:
@@ -739,16 +745,22 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
 
     settings = get_settings()
     dm = int(settings.football_live_session_duration_minutes or 15)
+    rts = SignalRuntimeSettingsService()
+    rts.enable_sport("football")
+    rts.start()
     FootballLiveSessionService().start_session(duration_minutes=dm)
-    SignalRuntimeSettingsService().start()
     cres = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=False)
     AutoSignalService().log_football_cycle_trace(cres)
-    await message.answer(
-        f"▶️ Футбольная live-сессия запущена на {dm} минут (истекает по таймеру).\n"
-        "Live-only: в контуре только матчи с признаком live, prematch не отправляется.\n"
-        "Повтор той же идеи по матчу в рамках сессии блокируется; другая идея по тому же матчу — разрешена.\n"
-        "Первый цикл уже выполнен — детали в логах [FOOTBALL][LIVE_SESSION_REPORT].",
-        reply_markup=get_signal_control_keyboard(),
+    text = format_football_session_start_user_message(cres, duration_minutes=dm)
+    text = (
+        text
+        + "\n\n"
+        + "—\n"
+        + "Live-only: только матчи с признаком live. Повтор той же идеи в сессии блокируется.\n"
+        + "Полные JSON: лог [FOOTBALL][CYCLE_DEBUG_JSON], отчёт сессии: [FOOTBALL][LIVE_SESSION_REPORT]."
+    )
+    await _answer_long_message(
+        message, text, reply_markup=get_signal_control_keyboard()
     )
 
 

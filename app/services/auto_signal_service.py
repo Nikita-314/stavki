@@ -1211,6 +1211,146 @@ def _combat_bottleneck_ru(token: str | None) -> str:
     return m.get(str(token), str(token).replace("_", " "))
 
 
+def format_football_session_start_user_message(
+    cres: AutoSignalCycleResult, *, duration_minutes: int
+) -> str:
+    """User-facing text after «▶️ Старт»: first combat live-cycle funnel + per-match + bottleneck."""
+    from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
+
+    head = f"⚽ Live-сессия запущена на {int(duration_minutes)} мин"
+    d = cres.football_cycle_debug
+    if not isinstance(d, dict) or not d:
+        lines = [head, ""]
+        lines.append("Первый боевой live-цикл завершён, подробной разбивки по матчам в ответе нет.")
+        if cres.message:
+            lines.append(f"Статус: {cres.message}")
+        if cres.rejection_reason:
+            lines.append(f"Деталь: {cres.rejection_reason}")
+        diag0 = SignalRuntimeDiagnosticsService().get_state()
+        bn0 = str(diag0.get("football_last_combat_bottleneck") or _infer_football_live_cycle_bottleneck(cres, diag0))
+        lines.append(f"Узкое место: {_combat_bottleneck_ru(bn0)}")
+        return "\n".join(lines)
+
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    agg = d.get("football_pipeline_aggregate") or {}
+    lq = d.get("live_quality_summary") or {}
+    matches: list[dict] = list(d.get("matches") or [])
+
+    live_n = int(agg.get("total_live_matches_tracked") or 0)
+    w_c = int(agg.get("with_candidates_pre_send_pipeline") or 0)
+    af = int(agg.get("after_send_filter") or 0)
+    ai = int(agg.get("after_integrity") or 0)
+    asc = int(agg.get("after_scoring_pool") or 0)
+    s_norm = int(agg.get("normal_sendable_matches") or 0)
+    s_soft = int(agg.get("soft_sendable_matches") or 0)
+    s_total = s_norm + s_soft
+    strong = int(lq.get("matches_with_strong_idea") or 0)
+    after_sanity = int(diag.get("football_live_sanity_blocked_last_cycle") or 0)
+
+    n_sent = int(cres.notifications_sent_count or 0)
+    n_db = int(cres.created_signals_count or 0)
+
+    lines: list[str] = [
+        head,
+        "",
+        f"📊 Сейчас в live: {live_n} матч(ей) (в снимке контура)",
+        f"🧩 С кандидатами (после препроцессинга): {w_c}",
+        f"⬇️ После send filter: {af} матч(ей) с кандидатами",
+        f"⬇️ После integrity: {ai}",
+        f"⬇️ После scoring (пул): {asc}",
+        f"🎯 Сильных идей (score ≥ порога): {strong}",
+        f"✅ Sendable: normal {s_norm} · soft {s_soft} (всего {s_total})",
+    ]
+    if after_sanity:
+        lines.append(f"🛡 Live sanity: отсеяно кандидатов на pre-send: {after_sanity}")
+    lines.append(f"💾 Создано в БД: {n_db}  ·  📨 Ушло в Telegram: {n_sent}")
+    lines.append("")
+
+    if n_sent > 0:
+        lines.append("✅ Сигналы ушли в канал (см. chat_id сигналов).")
+    elif s_total == 0 and live_n > 0:
+        lines.append("❌ Сейчас сигналов нет (ни одна live-идея не прошла sendable-gate).")
+    elif s_total > 0 and n_db == 0:
+        lines.append("❌ Сигналы не записаны: отсеяны на этапе БД (dedup) или лимиты.")
+    elif s_total > 0 and n_db > 0 and n_sent == 0:
+        lines.append("❌ Сигналы в БД есть, но в Telegram не ушли (чат/оркестрация).")
+    else:
+        lines.append("ℹ️ Сигналов в этом прогоне нет — см. причины по матчам ниже.")
+    lines.append("")
+
+    bn = str(
+        diag.get("football_last_combat_bottleneck")
+        or diag.get("football_live_cycle_bottleneck")
+        or _infer_football_live_cycle_bottleneck(cres, diag)
+    )
+    lines.append("🔎 Главный bottleneck (цикл):")
+    lines.append(f"   {_combat_bottleneck_ru(bn)}  ({bn})")
+    bnp = d.get("bottleneck_no_sendable_pipeline_ru")
+    if isinstance(bnp, str) and bnp.strip() and s_total == 0:
+        lines.append(f"   {bnp.strip()}")
+    hint = lq.get("football_live_quality_hint_ru")
+    if isinstance(hint, str) and hint.strip() and "—" not in hint and "см. узкое" not in hint.lower():
+        lines.append(f"   Подсказка: {hint.strip()[:400]}")
+    lines.append("")
+
+    # Delivery trace (when ingest ran)
+    cdt = d.get("combat_delivery_trace")
+    if isinstance(cdt, list) and cdt:
+        lines.append("🧾 Доставка (ingest → notify):")
+        for tr in cdt[:5]:
+            if not isinstance(tr, dict):
+                continue
+            sid = tr.get("signal_id")
+            fin = tr.get("final_outcome")
+            ddb = tr.get("blocked_by_db_dedup")
+            ntf = tr.get("notify_attempted")
+            sent = tr.get("bot_send_message_effective")
+            lines.append(
+                f"  • id={sid}  outcome={fin}  db_dedup={ddb}  notify={ntf}  tg={sent}"
+            )
+        if len(cdt) > 5:
+            lines.append(f"  … +{len(cdt) - 5} ещё")
+        lines.append("")
+
+    if matches:
+        lines.append("— Все live-матчи (лучшая идея на матч) —")
+    max_rows = 40
+    ranked = sorted(
+        matches,
+        key=lambda r: float(r.get("best_candidate_score") or -1.0),
+        reverse=True,
+    )
+    for r in ranked[:max_rows]:
+        mname = str(r.get("match_name") or "—")[:56]
+        bet = (str(r.get("best_bet_text") or r.get("best_candidate_market") or "—"))[:64]
+        sc = r.get("best_candidate_score")
+        scs = f"{sc:.1f}" if sc is not None else "—"
+        fst = str(r.get("final_status") or "—")
+        eid = str(r.get("event_id") or "—")[:20]
+        why = (str(r.get("if_not_sendable") or r.get("why_not_sendable_ru") or "") or fst)[:120]
+        le = (str(r.get("league") or "—"))[:32]
+        mn = r.get("minute")
+        mpart = f"  {mn}'" if mn is not None else ""
+        lines.append(
+            f"• [{eid}] {mname}{mpart} ({le})"
+        )
+        lines.append(f"  {bet}  score={scs}  →  {fst}")
+        if why and why != fst:
+            lines.append(f"  {why}")
+    if len(matches) > max_rows:
+        lines.append(f"… и ещё {len(matches) - max_rows} матч(ей) (см. логи CYCLE_DEBUG_JSON)")
+
+    lsani = d.get("live_sanity_drops")
+    if isinstance(lsani, list) and lsani:
+        lines.append("")
+        lines.append("🛡 Live sanity (топ):")
+        for s in lsani[:5]:
+            if isinstance(s, dict):
+                lines.append(f"  • eid {s.get('eid', '—')[:24]}: {s.get('reason', '')[:180]}")
+
+    return "\n".join(lines).strip()
+
+
 def _apply_last_combat_cycle_diagnostics(res: AutoSignalCycleResult) -> None:
     if res.dry_run:
         return
