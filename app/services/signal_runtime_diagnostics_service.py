@@ -97,6 +97,19 @@ class SignalRuntimeDiagnosticsState:
     football_live_soft_sendable_count: int = 0
     football_live_soft_sendable_tight_count: int = 0
     football_live_soft_sendable_relief_single_count: int = 0
+    football_live_rejected_at_send_gate: int = 0
+    """Candidates scored but rejected by live send gate (classify: reject)."""
+    football_live_post_selection_hint_ru: str | None = None
+    """If bottleneck is after scoring (dedup), short RU line for status."""
+    football_last_cycle_ingest_normal: int = 0
+    football_last_cycle_ingest_soft: int = 0
+    """Counts among signals actually created in DB last non-dry cycle."""
+    football_last_cycle_send_mode: str = "none"
+    """last batch: normal | soft | mixed | none — by send_path of created signals."""
+    football_last_cycle_db_dedup_skipped: int = 0
+    """DB dedup skips in the last ingest batch (non-dry)."""
+    football_last_cycle_sent_traces_json: str | None = None
+    """JSON array: per created signal, match, bet, score, path, gap, family, was_main, codes."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()

@@ -155,6 +155,79 @@ def _sort_finalists_main_market_first(
     return sorted(finalists, key=_key, reverse=True)
 
 
+def _assert_finalist_safe_for_live_send(
+    c: ProviderSignalCandidate,
+    base: float,
+    fam_svc: FootballSignalSendFilterService,
+) -> bool:
+    """Defense: corners/exotic/below floor/missing reason_codes must never ship."""
+    sc = float(c.signal_score or 0.0)
+    if sc < max(_LIVE_ABS_SCORE_FLOOR, base - 3.0):
+        return False
+    if fam_svc.is_corner_market(c) or fam_svc.get_market_family(c) == "exotic":
+        return False
+    if not (c.explanation_json or {}).get("football_scoring_reason_codes"):
+        return False
+    return True
+
+
+def _build_live_ingest_traces(
+    created: list[ProviderSignalCandidate],
+    min_score_base: float,
+    family_svc: FootballSignalSendFilterService,
+    send_meta: dict[int, tuple[str, str | None]],
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for c in created:
+        path = (c.explanation_json or {}).get("football_live_send_path")
+        if not path:
+            t0 = send_meta.get(id(c), ("normal", None))
+            path = t0[0] if t0 else "normal"
+        fam = family_svc.get_market_family(c)
+        is_corner = bool(family_svc.is_corner_market(c))
+        is_main = (not is_corner) and (fam in _LIVE_MAIN_SOFT)
+        sc = float(c.signal_score or 0.0)
+        gap = max(0.0, round(min_score_base - sc, 2)) if sc < min_score_base else 0.0
+        codes = list((c.explanation_json or {}).get("football_scoring_reason_codes") or [])
+        out.append(
+            {
+                "match": c.match.match_name,
+                "tournament": (getattr(c.match, "tournament_name", None) or None),
+                "minute": _football_match_minute_from_candidate(c),
+                "market_family": fam,
+                "bet_text": _football_format_bet_line(c),
+                "odds": str(c.market.odds_value) if c.market.odds_value is not None else None,
+                "score": round(sc, 2),
+                "send_path": str(path),
+                "gap_to_base_threshold": float(gap),
+                "reason_codes": codes,
+                "was_main_market": "yes" if is_main else "no",
+            }
+        )
+    return out
+
+
+def _post_selection_bottleneck_ru(
+    *,
+    session_dup_blocked: int,
+    db_dedup_skipped: int,
+    created_n: int,
+) -> str | None:
+    if created_n:
+        return None
+    if db_dedup_skipped and db_dedup_skipped > 0 and session_dup_blocked == 0:
+        return (
+            "После score сигналы в БД не созданы: дедуп (похожий сигнал уже есть). "
+            "Порог score/soft здесь не при чём — упёрлись в post-selection."
+        )
+    if session_dup_blocked and session_dup_blocked > 0:
+        return (
+            "После score сигналы отсекались: повтор той же live-идеи в сессии. "
+            "Сначала смотрите сессию/dedup идеи, а не качество оценки."
+        )
+    return None
+
+
 def _attach_football_live_send_meta(
     c: ProviderSignalCandidate,
     meta: tuple[str, str | None] | None,
@@ -593,7 +666,7 @@ def compile_football_cycle_debug(
             selected_winner_detail["soft_label"] = slabel
             if stier == "soft":
                 selected_winner_detail["live_note"] = (
-                    "Сигнал отправлен несмотря на недобор score (live ситуация)"
+                    "Live-сигнал допущен по мягкому порогу (недобор score компенсирован live-контекстом)"
                 )
 
     def _prog_best_line(r: dict) -> str:
@@ -798,6 +871,12 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
         "created_signals_count": res.created_signals_count,
         "last_notify_path": diag.get("football_live_last_notify_path"),
         "last_delivery_reason": diag.get("last_delivery_reason"),
+        "rejected_at_send_gate": diag.get("football_live_rejected_at_send_gate"),
+        "ingest_normal_last": diag.get("football_last_cycle_ingest_normal"),
+        "ingest_soft_last": diag.get("football_last_cycle_ingest_soft"),
+        "last_send_mode": diag.get("football_last_cycle_send_mode"),
+        "db_dedup_skipped_last_ingest": diag.get("football_last_cycle_db_dedup_skipped"),
+        "post_selection_hint_ru": diag.get("football_live_post_selection_hint_ru"),
     }
     try:
         logger.info("[FOOTBALL][LIVE_SESSION_REPORT] %s", json.dumps(payload, default=str, ensure_ascii=False)[:32000])
@@ -1850,6 +1929,14 @@ class AutoSignalService:
             if tier != "reject":
                 scored_tuples.append((c, tier, sub))
 
+        rejected_total = 0
+        for c in scored_sorted:
+            t, _ = classify_live_sendable_candidate(
+                c, min_score_base, family_svc, single_relief_max_gap=single_gap_max
+            )
+            if t == "reject":
+                rejected_total += 1
+
         live_send_stats = {
             "normal_sendable": sum(1 for _, t, _ in scored_tuples if t == "normal"),
             "soft_sendable_total": sum(1 for _, t, _ in scored_tuples if t == "soft"),
@@ -1862,6 +1949,7 @@ class AutoSignalService:
             "soft_sendable_dc": sum(
                 1 for _, t, s in scored_tuples if t == "soft" and s == "soft_sendable_dc"
             ),
+            "rejected_total": int(rejected_total),
         }
 
         ordered = order_live_finalist_tuples(scored_tuples, min_score_base, family_svc)
@@ -1911,6 +1999,18 @@ class AutoSignalService:
             session_dup_blocked = max(0, n_after_min_score - len(kept_fin))
             finalists = _sort_finalists_main_market_first(kept_fin, family_svc)
 
+        _bfs = len(finalists)
+        finalists = [
+            c
+            for c in finalists
+            if _assert_finalist_safe_for_live_send(c, min_score_base, family_svc)
+        ]
+        if _bfs != len(finalists):
+            logger.warning(
+                "[FOOTBALL][LIVE_SAFETY] dropped %s candidates failing recheck (floor / codes / not corner-exotic)",
+                _bfs - len(finalists),
+            )
+
         finalist_set = set(id(x) for x in finalists)
         for c in finalists:
             logger.info(
@@ -1947,6 +2047,8 @@ class AutoSignalService:
             dry_run=dry_run,
         )
         lq_live = cycle_dbg.get("live_quality_summary") or {}
+        if isinstance(cycle_dbg, dict):
+            cycle_dbg["session_idea_dedup_this_cycle"] = int(session_dup_blocked)
 
         def _pick_bet_text(cand: ProviderSignalCandidate) -> str:
             from app.services.football_bet_formatter_service import FootballBetFormatterService
@@ -2000,7 +2102,26 @@ class AutoSignalService:
             football_live_soft_sendable_relief_single_count=int(
                 (lq_live.get("live_send_stats") or {}).get("soft_sendable_relief_single") or 0
             ),
+            football_live_rejected_at_send_gate=int(
+                (lq_live.get("live_send_stats") or {}).get("rejected_total") or 0
+            ),
         )
+
+        try:
+            logger.info(
+                "[FOOTBALL][LIVE_SEND_CONVERSION] %s",
+                json.dumps(
+                    {
+                        "live_send_stats": lq_live.get("live_send_stats") or {},
+                        "dry_run": dry_run,
+                        "bottleneck_code": lq_live.get("main_blocker_code"),
+                    },
+                    default=str,
+                    ensure_ascii=False,
+                )[:12000],
+            )
+        except Exception:
+            pass
 
         if not finalists:
             diagnostics.update(
@@ -2048,6 +2169,29 @@ class AutoSignalService:
             )
 
         if dry_run:
+            if best is not None:
+                _wsm = send_meta_final.get(id(best), ("normal", None))
+                _m = "soft" if _wsm[0] == "soft" else "normal"
+                _tr0 = _build_live_ingest_traces(
+                    [best], min_score_base, FootballSignalSendFilterService(), send_meta_final
+                )
+                diagnostics.update(
+                    football_last_cycle_send_mode=_m,
+                    football_last_cycle_ingest_normal=1 if _m == "normal" else 0,
+                    football_last_cycle_ingest_soft=1 if _m == "soft" else 0,
+                    football_last_cycle_db_dedup_skipped=0,
+                    football_last_cycle_sent_traces_json=(
+                        json.dumps(_tr0, default=str, ensure_ascii=False)[:20000] if _tr0 else None
+                    ),
+                    football_live_post_selection_hint_ru=None,
+                )
+            else:
+                diagnostics.update(
+                    football_last_cycle_send_mode="none",
+                    football_last_cycle_ingest_normal=0,
+                    football_last_cycle_ingest_soft=0,
+                    football_last_cycle_sent_traces_json=None,
+                )
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
@@ -2137,12 +2281,25 @@ class AutoSignalService:
             diagnostics.update(football_live_last_notify_path=None)
 
         if ingest_res.created_signals == 0 and finalists and int(ingest_res.skipped_candidates) > 0:
+            _db_sk = int(ingest_res.skipped_candidates)
+            logger.info(
+                "[FOOTBALL][LIVE_SEND_TRACE] all candidates blocked at DB dedup skipped=%s",
+                _db_sk,
+            )
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_sent_count=0,
                 last_delivery_reason="blocked_by_dedup",
                 note="candidates passed scoring but dedup skipped all",
+                football_last_cycle_ingest_normal=0,
+                football_last_cycle_ingest_soft=0,
+                football_last_cycle_send_mode="none",
+                football_last_cycle_db_dedup_skipped=_db_sk,
+                football_last_cycle_sent_traces_json=None,
+                football_live_post_selection_hint_ru=_post_selection_bottleneck_ru(
+                    session_dup_blocked=0, db_dedup_skipped=_db_sk, created_n=0
+                ),
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -2195,6 +2352,50 @@ class AutoSignalService:
                 else ("duplicate_in_db_or_no_new_signals" if post_integrity_count > 0 else "no_created_signals")
             ),
             note=None if ingest_res.created_signals else "no created football signals",
+        )
+
+        n_ing = int(ingest_res.created_signals)
+        n_norm_ing = sum(
+            1
+            for c in ingest_res.created_from_candidates
+            if send_meta_final.get(id(c), ("normal", None))[0] == "normal"
+        )
+        n_soft_ing = n_ing - n_norm_ing
+        if n_ing and n_norm_ing and n_soft_ing:
+            mmode = "mixed"
+        elif n_soft_ing and not n_norm_ing and n_ing:
+            mmode = "soft"
+        elif n_norm_ing and not n_soft_ing and n_ing:
+            mmode = "normal"
+        else:
+            mmode = "none"
+        tr_list = _build_live_ingest_traces(
+            list(ingest_res.created_from_candidates), min_score_base, family_svc, send_meta_final
+        )
+        for row in tr_list:
+            try:
+                logger.info("[FOOTBALL][LIVE_SEND_TRACE] %s", json.dumps(row, default=str, ensure_ascii=False)[:2000])
+            except Exception:
+                pass
+        try:
+            logger.info(
+                "[FOOTBALL][LIVE_SEND_CONVERSION] ingest_mode=%s normal_ingest=%s soft_ingest=%s db_dedup_skipped=%s",
+                mmode,
+                n_norm_ing,
+                n_soft_ing,
+                int(ingest_res.skipped_candidates),
+            )
+        except Exception:
+            pass
+        diagnostics.update(
+            football_last_cycle_ingest_normal=n_norm_ing,
+            football_last_cycle_ingest_soft=n_soft_ing,
+            football_last_cycle_send_mode=mmode,
+            football_last_cycle_db_dedup_skipped=int(ingest_res.skipped_candidates),
+            football_last_cycle_sent_traces_json=(
+                json.dumps(tr_list, default=str, ensure_ascii=False)[:20000] if tr_list else None
+            ),
+            football_live_post_selection_hint_ru=None,
         )
 
         return AutoSignalCycleResult(

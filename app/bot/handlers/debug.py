@@ -298,12 +298,19 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Главный блокер: {diag.get('football_live_quality_main_blocker_ru') or diag.get('football_live_quality_main_blocker') or '—'}",
         f"• Подсказка качества: {diag.get('football_live_quality_hint_ru') or '—'}",
         f"• Порог score (база): {diag.get('football_live_min_signal_score_base') or '—'}",
-        f"• Live send: нормальных (≥ порога): {diag.get('football_live_normal_sendable_count') or 0}",
-        f"• Live send: soft (недобор до {diag.get('football_live_min_signal_score_base') or '—'}): {diag.get('football_live_soft_sendable_count') or 0}",
-        f"• Soft gap ≤1.5: {diag.get('football_live_soft_sendable_tight_count') or 0}",
-        f"• Soft relief (gap до 2): {diag.get('football_live_soft_sendable_relief_single_count') or 0}",
-        f"• Режим порога: {diag.get('football_live_score_relief_note') or '—'}",
+        f"• Отклонено в send-gate (reject): {diag.get('football_live_rejected_at_send_gate') or 0}",
+        f"• К пулу: обычных (≥ порога): {diag.get('football_live_normal_sendable_count') or 0}",
+        f"• К пулу: мягких (soft) live: {diag.get('football_live_soft_sendable_count') or 0}",
+        f"• К пулу: soft gap ≤1.5: {diag.get('football_live_soft_sendable_tight_count') or 0}",
+        f"• К пулу: soft relief (main, gap до 2): {diag.get('football_live_soft_sendable_relief_single_count') or 0}",
+        f"• Схема порога: {diag.get('football_live_score_relief_note') or '—'}",
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
+        "— Последняя запись (не dry-run) —",
+        f"• Обычных сигналов записано в БД: {diag.get('football_last_cycle_ingest_normal') or 0}",
+        f"• Мягко допущенных (soft) live в БД: {diag.get('football_last_cycle_ingest_soft') or 0}",
+        f"• Основной режим пачки: {diag.get('football_last_cycle_send_mode') or '—'} (normal / soft / mixed / none)",
+        f"• DB dedup отсёк кандидатов (послед. ingest): {diag.get('football_last_cycle_db_dedup_skipped') or 0}",
+        f"• Post-selection: {diag.get('football_live_post_selection_hint_ru') or '—'}",
         f"• Новых идей к отправке (последний цикл): {new_ideas}",
         f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
         f"• Отправлено в Telegram (сессия): {diag.get('football_live_telegram_sent_session') or 0}",
@@ -1015,11 +1022,37 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             [
                 "— Live send (отбор кандидатов) —",
                 f"• Нормальных (≥ базового порога): {lss.get('normal_sendable', 0)}",
-                f"• Soft всего: {lss.get('soft_sendable_total', 0)}",
+                f"• Мягких (soft) live: {lss.get('soft_sendable_total', 0)}",
                 f"• Soft gap ≤1.5: {lss.get('soft_sendable_tight', 0)}",
-                f"• Soft relief (gap до 2, main): {lss.get('soft_sendable_relief_single', 0)}",
+                f"• Soft relief (main, gap до 2): {lss.get('soft_sendable_relief_single', 0)}",
+                f"• Отсеклось (reject) в send-gate: {lss.get('rejected_total', 0)}",
             ]
         )
+    d_last = SignalRuntimeDiagnosticsService().get_state()
+    _m = (d_last.get("football_last_cycle_send_mode") or "—") or "—"
+    if _m in ("normal", "soft", "mixed", "none"):
+        _m_ru = {"normal": "обычный (normal)", "soft": "мягкий (soft)", "mixed": "смешанный", "none": "нет"}.get(
+            _m, _m
+        )
+    else:
+        _m_ru = str(_m)
+    _sd = int(dbg.get("session_idea_dedup_this_cycle") or 0)
+    lines.extend(
+        [
+            "— Итог конверсии (текущий прогон) —",
+            f"• Обычных сигналов к пулу: {lss.get('normal_sendable', 0) if lss else 0}",
+            f"• Мягко допущенных (soft) к пулу: {lss.get('soft_sendable_total', 0) if lss else 0}",
+            f"• Повторов идей (сессия) в этом цикле: {_sd}",
+        ]
+    )
+    if res.dry_run:
+        lines.append(f"• Лучший кандидат: режим {_m_ru}")
+    else:
+        lines.append(f"• Последняя запись в БД: режим пачки {_m_ru}")
+    lines.append(
+        f"• Счётчик в БД (посл. бою): обычных {d_last.get('football_last_cycle_ingest_normal') or 0}, "
+        f"мягких {d_last.get('football_last_cycle_ingest_soft') or 0}"
+    )
     lines.extend(
         [
             "",
@@ -1137,7 +1170,7 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             )
             lines.append(
                 swd.get("live_note")
-                or "Сигнал отправлен несмотря на недобор score (live ситуация)"
+                or "Live-сигнал допущен по мягкому порогу (недобор score компенсирован live-контекстом)"
             )
         if res.dry_run:
             lines.extend(
