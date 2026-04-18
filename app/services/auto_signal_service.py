@@ -280,6 +280,30 @@ def _football_match_minute_from_candidate(candidate: ProviderSignalCandidate | N
     return None
 
 
+def _ru_why_reject_at_soft_send_gate(
+    c: ProviderSignalCandidate,
+    tier: str,
+    *,
+    min_base: float,
+    family_svc: FootballSignalSendFilterService,
+) -> str:
+    if tier in ("normal", "soft"):
+        return ""
+    sc = float(c.signal_score or 0.0)
+    floor = max(_LIVE_ABS_SCORE_FLOOR, min_base - 3.0)
+    if sc < floor:
+        return f"мягкий send-gate: score {sc:.1f} < пол {floor:.0f}"
+    if family_svc.is_corner_market(c):
+        return "мягкий send-gate: углы не берём в live-auto"
+    if family_svc.get_market_family(c) == "exotic":
+        return "мягкий send-gate: экзот"
+    if not (c.explanation_json or {}).get("football_scoring_reason_codes"):
+        return "мягкий send-gate: нет reason_codes в скоринге"
+    if sc < min_base:
+        return f"мягкий send-gate: gap {min_base - sc:.1f} (семейство/порог soft)"
+    return "мягкий send-gate: reject"
+
+
 def compile_football_cycle_debug(
     *,
     fb_preview: list[ProviderSignalCandidate],
@@ -300,6 +324,7 @@ def compile_football_cycle_debug(
     db_dedup_blocked_count: int = 0,
     live_send_stats: dict | None = None,
     finalist_send_meta: dict[int, tuple[str, str | None]] | None = None,
+    single_relief_max_gap: float = 2.0,
 ) -> dict:
     """Aggregated per-match football pipeline diagnostics for dry_run Telegram + logs."""
     base_for_display = float(min_score_base) if min_score_base is not None else float(min_score)
@@ -320,6 +345,7 @@ def compile_football_cycle_debug(
     post_send_counts = _count_by_event(fb_post_send)
     post_int_counts = _count_by_event(fb_post_integrity)
     finalist_counts = _count_by_event(finalists or [])
+    scored_eid_counts = _count_by_event(enriched_scored or [])
 
     preview_by_eid: dict[str, ProviderSignalCandidate] = {}
     for c in fb_preview:
@@ -438,10 +464,40 @@ def compile_football_cycle_debug(
         if best_c is not None and final_status == "blocked_low_score":
             gap_to_sendable = round(float(base_for_display) - float(best_sc), 2)
 
+        n_scored = int(scored_eid_counts.get(eid, 0))
+        best_bet_text: str | None
+        if best_c is not None:
+            best_bet_text = _football_format_bet_line(best_c)
+        else:
+            best_bet_text = None
+        best_tier, soft_sub = ("reject", None)
+        if n_int > 0 and best_c is not None:
+            best_tier, soft_sub = classify_live_sendable_candidate(
+                best_c, base_for_display, family_svc, single_relief_max_gap=float(single_relief_max_gap)
+            )
+        soft_reject_ru = ""
+        if n_int > 0 and best_c is not None and best_tier == "reject":
+            soft_reject_ru = _ru_why_reject_at_soft_send_gate(
+                best_c, best_tier, min_base=base_for_display, family_svc=family_svc
+            )
+        reject_reason_ru = why_ru
+        if n_send == 0:
+            reject_reason_ru = "send-filter: " + (why_ru or "")
+        elif n_int == 0 and n_send > 0:
+            reject_reason_ru = "integrity: " + (why_ru or "")
+        elif n_int > 0 and best_c and best_tier == "reject":
+            reject_reason_ru = (soft_reject_ru or why_ru) if final_status in {"blocked_low_score", "blocked_unknown"} else (why_ru or soft_reject_ru)
+        sendable_path_ru: str = str(reject_reason_ru)
+        if final_status == "blocked_duplicate_idea":
+            sendable_path_ru = "сессия: идея уже в памяти live (не ушла в пул) — " + (why_ru or "")
+        elif n_final > 0:
+            sendable_path_ru = "ok (есть в финалистах после live send-gate)"
+
         tn = str(getattr(match, "tournament_name", "") or "").strip()
         rows.append(
             {
                 "event_id": eid,
+                "league": tn or "—",
                 "match_name": str(match.match_name or ""),
                 "tournament_name": tn or None,
                 "minute": minute_val,
@@ -450,23 +506,29 @@ def compile_football_cycle_debug(
                 "event_start_at": match.event_start_at.isoformat() if getattr(match, "event_start_at", None) else None,
                 "hours_to_start": None if hours_to_start is None else round(float(hours_to_start), 3),
                 "raw_markets_count": len(raw_keys),
+                "freshness_accepted": True,
                 "candidates_after_freshness": n_preview,
                 "candidates_before_filter": n_preview,
                 "candidates_after_cvf": n_cvf,
                 "candidates_after_send_filter": n_send,
                 "candidates_after_integrity": n_int,
+                "candidates_after_scoring": n_scored,
                 "candidates_after_score_threshold": n_final,
                 "best_market_family": best_market_family,
                 "best_candidate_market": best_market,
+                "best_bet_text": best_bet_text,
                 "best_candidate_odds": best_odds,
                 "best_candidate_score": round(best_sc, 2) if best_c is not None else None,
                 "best_candidate_is_corner_like": best_is_corner_like,
+                "sendable_status": best_tier,
+                "soft_subreason": soft_sub,
                 "min_threshold_base": round(base_for_display, 2),
                 "min_threshold_effective": round(base_for_display, 2),
                 "gap_to_sendable": gap_to_sendable,
                 "final_status": final_status,
                 "why_not_sendable_code": why_code,
                 "why_not_sendable_ru": why_ru,
+                "if_not_sendable": sendable_path_ru,
             }
         )
 
@@ -572,6 +634,75 @@ def compile_football_cycle_debug(
                 if any(str(r.get("final_status")) == token for r in problem_status_rows):
                     main_blocker_status = token
                     break
+
+    m_with_send = sum(1 for r in rows if str(r.get("sendable_status") or "") in ("normal", "soft"))
+    m_norm_m = sum(1 for r in rows if r.get("sendable_status") == "normal")
+    m_soft_m = sum(1 for r in rows if r.get("sendable_status") == "soft")
+    m_rej_gate = sum(
+        1
+        for r in rows
+        if (r.get("candidates_after_integrity") or 0) > 0 and str(r.get("sendable_status") or "") == "reject"
+    )
+    football_pipeline_aggregate = {
+        "total_live_matches_tracked": len(rows),
+        "matches_after_freshness": len(rows),
+        "with_candidates_pre_send_pipeline": sum(1 for r in rows if (r.get("candidates_after_cvf") or 0) > 0),
+        "after_send_filter": sum(1 for r in rows if (r.get("candidates_after_send_filter") or 0) > 0),
+        "after_integrity": sum(1 for r in rows if (r.get("candidates_after_integrity") or 0) > 0),
+        "after_scoring_pool": sum(1 for r in rows if (r.get("candidates_after_scoring") or 0) > 0),
+        "matches_with_sendable_idea": m_with_send,
+        "normal_sendable_matches": m_norm_m,
+        "soft_sendable_matches": m_soft_m,
+        "rejected_at_soft_send_gate": m_rej_gate,
+        "funnel_by_final_status": dict(status_counts),
+    }
+
+    def _fmt_top10_line(r: dict) -> str:
+        bet = (r.get("best_bet_text") or r.get("best_candidate_market") or "—")
+        if len(bet) > 90:
+            bet = bet[:87] + "…"  # noqa: RUF001
+        fam = r.get("best_market_family") or "—"
+        st0 = r.get("sendable_status") or "—"
+        if st0 in ("normal", "soft"):
+            rsn = (r.get("soft_subreason") or "ok")[:80]
+        else:
+            rsn = (r.get("if_not_sendable") or "")[:100]
+        return (
+            f"[{r.get('event_id')}] {str(r.get('match_name', '—'))[:50]} | {fam} | {bet} | "
+            f"{r.get('best_candidate_odds', '—')} | {r.get('best_candidate_score', '—')} | {st0} | {rsn}"
+        )
+
+    top_cands = sorted(
+        (r for r in rows if r.get("best_candidate_score") is not None),
+        key=lambda r: float(r.get("best_candidate_score") or -1.0),
+        reverse=True,
+    )[:10]
+    top_10_live_pipeline_lines = [_fmt_top10_line(r) for r in top_cands]
+    sendable_only = [
+        r
+        for r in rows
+        if str(r.get("sendable_status") or "") in ("normal", "soft") and (r.get("candidates_after_integrity") or 0) > 0
+    ]
+    sendable_live_idea_lines = [_fmt_top10_line(r) for r in sendable_only[:20]]
+    bottleneck_no_sendable_ru: str | None = None
+    if m_with_send == 0 and len(rows) > 0:
+        ex2 = {k: int(v) for k, v in status_counts.items() if k not in ("selected", "no_candidates") and v > 0}
+        st_ru_map = {
+            "blocked_send_filter": "фильтр отправки (рынок/время/семейство)",
+            "blocked_integrity": "integrity (тотал/маппинг/линия)",
+            "blocked_low_score": "порог score + мягкий live send-gate",
+            "blocked_duplicate_idea": "сессия: эта идея уже в памяти",
+            "blocked_too_far_in_time": "слишком далеко по времени",
+            "blocked_unknown": "не классифицировано",
+        }
+        if ex2:
+            dom0 = max(ex2.items(), key=lambda kv: kv[1])
+            bottleneck_no_sendable_ru = (
+                f"главный поток уходит в «{st_ru_map.get(str(dom0[0]), str(dom0[0]))}» — "
+                f"{dom0[1]} из {len(rows)} live-матч."
+            )
+        else:
+            bottleneck_no_sendable_ru = "нет кандидатов с разобранной причиной — см. final_status по матчам"
     _bl_map = {
         "blocked_low_score": ("score", "порог score"),
         "blocked_duplicate_idea": ("duplicate_idea", "повтор идеи в сессии"),
@@ -675,7 +806,7 @@ def compile_football_cycle_debug(
 
     def _prog_best_line(r: dict) -> str:
         nm = str(r.get("match_name") or "—")
-        bet = str(r.get("best_candidate_market") or "—")
+        bet = str(r.get("best_bet_text") or r.get("best_candidate_market") or "—")
         sc = r.get("best_candidate_score")
         st = str(r.get("final_status") or "")
         wr = str(r.get("why_not_sendable_ru") or "").strip()
@@ -722,6 +853,10 @@ def compile_football_cycle_debug(
         "bottleneck_hint_fresh_live": bottleneck_hint_fresh,
     }
 
+    live_quality_summary["football_pipeline_aggregate"] = football_pipeline_aggregate
+    if bottleneck_no_sendable_ru and m_with_send == 0:
+        live_quality_summary["bottleneck_no_sendable_pipeline_ru"] = bottleneck_no_sendable_ru
+
     debug = {
         "global_block": global_block,
         "dry_run": dry_run,
@@ -751,6 +886,10 @@ def compile_football_cycle_debug(
         "family_buckets_after_scoring_finalists": fam_after_score,
         "bottleneck_hint": bottleneck_hint,
         "integrity_fail_samples": integrity_samples,
+        "football_pipeline_aggregate": football_pipeline_aggregate,
+        "top_10_live_pipeline_lines": top_10_live_pipeline_lines,
+        "sendable_live_idea_lines": sendable_live_idea_lines,
+        "bottleneck_no_sendable_pipeline_ru": bottleneck_no_sendable_ru,
         "matches": rows,
         "matches_top_for_message": _football_top_matches_for_telegram(rows, limit=10),
         "blocked_dedup_note": "dedup runs only on live ingest; dry_run does not evaluate DB dedup per match",
@@ -2266,6 +2405,7 @@ class AutoSignalService:
             send_filter_stats=send_filter_result.stats if send_filter_result else None,
             integrity_dropped_checks=list(integrity_result.dropped_checks),
             dry_run=dry_run,
+            single_relief_max_gap=float(single_gap_max),
         )
         lq_live = cycle_dbg.get("live_quality_summary") or {}
         if isinstance(cycle_dbg, dict):

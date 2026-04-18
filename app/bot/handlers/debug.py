@@ -920,15 +920,66 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         lines.extend(["📍 Политика контура: только live-матчи (prematch исключён).", ""])
 
     live_payload_yes = bool(matches_found) or bool(cand_total)
+    lq0 = (dbg or {}).get("live_quality_summary") or {}
+    agg0 = (dbg or {}).get("football_pipeline_aggregate")
+    if isinstance(agg0, dict) and agg0:
+        agg = agg0
+    else:
+        agg = lq0.get("football_pipeline_aggregate") if isinstance(lq0, dict) else {}
+    if isinstance(agg, dict) and "total_live_matches_tracked" in agg:
+        m_trk = int(agg.get("total_live_matches_tracked") or 0)
+    else:
+        m_trk = 0
+    m_send_idea: int | None
+    if isinstance(agg, dict) and "matches_with_sendable_idea" in agg:
+        m_send_idea = int(agg.get("matches_with_sendable_idea") or 0)
+    else:
+        m_send_idea = None
+    lss0 = (dbg or {}).get("live_send_stats") or {}
+    soft_n = int(lss0.get("soft_sendable_total") or 0) if lss0 else 0
+    norm_n = int(lss0.get("normal_sendable") or 0) if lss0 else 0
+    m_send_line = m_send_idea if m_send_idea is not None else (norm_n + soft_n)
+    if isinstance(agg, dict) and "total_live_matches_tracked" in agg:
+        display_trk: object = m_trk
+    else:
+        display_trk = matches_found if matches_found is not None else "—"
     lines.extend(
         [
             "📌 Live сейчас (прогон не зависит от ▶️ Старт):",
             f"• Live-матчи в данных: {'да' if live_payload_yes else 'нет'}",
-            f"• Уникальных live-матчей (оценка): {matches_found}",
-            f"• Кандидатов после live-only отбора: {cand_total if cand_total is not None else '—'}",
+            f"• Live-матчей в pipeline (после свежести, Winline): {display_trk}",
+            f"• Матчей с идеей normal+soft (send-gate): {m_send_line}",
+            f"• Кандидатов-строк после свежести: {cand_total if cand_total is not None else '—'}",
             "",
         ]
     )
+    if isinstance(agg, dict) and agg.get("total_live_matches_tracked"):
+        lines.append(
+            f"• Воронка по матчам: pre-pipeline {agg.get('with_candidates_pre_send_pipeline', '—')} → "
+            f"send-фильтр {agg.get('after_send_filter', '—')} → integrity {agg.get('after_integrity', '—')} → "
+            f"строк в scoring {agg.get('after_scoring_pool', '—')}"
+        )
+        lines.append("")
+    top10 = (dbg or {}).get("top_10_live_pipeline_lines") or []
+    if top10:
+        lines.append("— ТОП-10 live-идей по score (Winline → pipeline) —")
+        for tln in top10[:10]:
+            lines.append("• " + tln[:420])
+        lines.append("")
+    send_lines = (dbg or {}).get("sendable_live_idea_lines") or []
+    bpipe = (dbg or {}).get("bottleneck_no_sendable_pipeline_ru") or (
+        (lq0 or {}).get("bottleneck_no_sendable_pipeline_ru") if isinstance(lq0, dict) else None
+    )
+    if send_lines and m_send_idea is not None and m_send_idea > 0:
+        lines.append("— Сейчас sendable (normal+soft) —")
+        lines.append("• Пример: " + str(send_lines[0])[:380])
+        for tln in send_lines[1:8]:
+            lines.append("• " + tln[:400])
+        lines.append("")
+    elif bpipe and m_trk and m_send_idea == 0:
+        lines.append("— Почему нет sendable-идеи (факт по воронке) —")
+        lines.append("• " + str(bpipe)[:450])
+        lines.append("")
 
     from app.services.football_live_session_service import FootballLiveSessionService as _Fls
 
