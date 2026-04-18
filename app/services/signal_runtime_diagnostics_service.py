@@ -89,6 +89,10 @@ class SignalRuntimeDiagnosticsState:
     football_live_quality_main_blocker: str | None = None
     football_live_quality_main_blocker_ru: str | None = None
     football_live_best_scores_distribution_hint: str | None = None
+    football_live_min_signal_score_base: float | None = None
+    football_live_min_signal_score_effective: float | None = None
+    football_live_score_relief_note: str | None = None
+    football_live_quality_hint_ru: str | None = None
 
 
 _STATE = SignalRuntimeDiagnosticsState()

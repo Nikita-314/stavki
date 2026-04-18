@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     football_live_max_declared_live_minute: int = 130
     # If the live HTTP payload was fetched this many minutes ago and only then processed, block (abnormal delay / stuck worker)
     football_live_runtime_snapshot_max_age_minutes: int = 30
+    # Live sendable: max points of one-time relief when ≥2 main-market matches are just below base threshold (gap ≤2)
+    football_live_score_relief_max_points: float = 1.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

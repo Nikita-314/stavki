@@ -296,6 +296,9 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• С сильной идеей (лучший score ≥ порога): {diag.get('football_live_quality_strong_idea_matches') or 0}",
         f"• Без sendable-идеи в цикле: {diag.get('football_live_quality_no_sendable_matches') or 0}",
         f"• Главный блокер: {diag.get('football_live_quality_main_blocker_ru') or diag.get('football_live_quality_main_blocker') or '—'}",
+        f"• Подсказка качества: {diag.get('football_live_quality_hint_ru') or '—'}",
+        f"• Порог score: база {diag.get('football_live_min_signal_score_base') or '—'}, эффективно {diag.get('football_live_min_signal_score_effective') or '—'}",
+        f"• Рельеф порога: {diag.get('football_live_score_relief_note') or '—'}",
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
         f"• Новых идей к отправке (последний цикл): {new_ideas}",
         f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
@@ -963,6 +966,35 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             + ", ".join(str(x) for x in dist_scores[:12])
         )
         lines.append("")
+
+    fac_ct = int(lq_sum.get("fresh_live_accepted_count") or 0)
+    fb_br = lq_sum.get("fresh_live_send_breakdown") or dbg.get("fresh_live_send_breakdown") or {}
+    if fac_ct > 0 and fb_br:
+        lines.extend(
+            [
+                "— Разрез отсева (свежие live, есть кандидаты после проверки свежести) —",
+                f"• К отправке (selected): {fb_br.get('selected', 0)}",
+                f"• Ниже порога score: {fb_br.get('blocked_low_score', 0)}",
+                f"• Повтор идеи (сессия): {fb_br.get('blocked_duplicate_idea', 0)}",
+                f"• Фильтр отправки: {fb_br.get('blocked_send_filter', 0)}",
+                f"• Integrity: {fb_br.get('blocked_integrity', 0)}",
+                f"• Dedup БД (цикл): {fb_br.get('blocked_dedup_db', 0)}",
+                "",
+            ]
+        )
+
+    why_agg = lq_sum.get("why_no_signal_lines") or dbg.get("why_no_signal_lines") or []
+    if (not signal_yes) and why_agg:
+        lines.append("— Почему нет сигнала —")
+        lines.extend([f"• {ln}" for ln in why_agg[:10]])
+        lines.append("")
+    gap_dist = lq_sum.get("gap_to_sendable_fresh_low_score") or []
+    if (not signal_yes) and gap_dist:
+        lines.append(
+            "• Gap до порога (свежие live, ниже порога): "
+            + ", ".join(str(x) for x in gap_dist[:15])
+        )
+        lines.append("")
     lines.extend(
         [
             "📊 Сводка (live-only цепочка):",
@@ -1001,9 +1033,17 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
     if bn:
         lines.append(f"• Узкое место (цикл): {_humanize_live_bottleneck_ru(str(bn))}")
 
-    min_score = dbg.get("min_signal_score")
-    if min_score is not None:
-        lines.extend(["", f"📐 Порог score: {min_score}"])
+    min_eff = dbg.get("min_signal_score_effective") or dbg.get("min_signal_score")
+    min_base = dbg.get("min_signal_score_base")
+    relief_nt = dbg.get("score_relief_note") or lq_sum.get("score_relief_note")
+    if min_eff is not None:
+        lines.append("")
+        if min_base is not None and min_base != min_eff:
+            lines.append(
+                f"📐 Порог score: база {min_base}, эффективно {min_eff} ({relief_nt or '—'})"
+            )
+        else:
+            lines.append(f"📐 Порог score: {min_eff}")
 
     status_counts = dbg.get("final_status_counts") or {}
     total_m = sum(status_counts.values()) if status_counts else 0
@@ -1042,7 +1082,9 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         else:
             best_kind = "main market"
 
-    tournament_display = (selected_row or {}).get("tournament_name")
+    swd = dbg.get("selected_winner_detail") or {}
+    tournament_display = swd.get("tournament_name") or (selected_row or {}).get("tournament_name")
+    minute_display = swd.get("minute")
     event_start_display = None
     esa = (selected_row or {}).get("event_start_at")
     if esa:
@@ -1050,23 +1092,29 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
 
     lines.append("")
 
-    if signal_yes and sel_match:
+    if signal_yes and (sel_match or swd):
+        bet_disp = swd.get("bet_line") or sel_bet
+        odds_disp = swd.get("odds") or sel_odds
+        sc_disp = swd.get("score") or sel_score
+        match_disp = swd.get("match_name") or sel_match
+        fam_disp = swd.get("market_family")
         lines.extend(
             [
                 "🏆 Лучший кандидат:",
-                f"• Лучшая идея: {best_kind or '—'}",
-                f"• Матч: {sel_match}",
+                f"• Лучшая идея: {best_kind or fam_disp or '—'}",
+                f"• Матч: {match_disp}",
                 f"• Турнир: {tournament_display or '—'}",
+                f"• Минута: {minute_display if minute_display is not None else '—'}",
                 f"• Начало: {event_start_display or '—'}",
-                f"• Ставка: {sel_bet or '—'}",
-                f"• Коэффициент: {sel_odds or '—'}",
-                f"• Score: {sel_score or '—'}",
+                f"• Ставка: {bet_disp or '—'}",
+                f"• Коэффициент: {odds_disp or '—'}",
+                f"• Score: {sc_disp or '—'}",
             ]
         )
-        reasons = res.report_human_reasons or []
+        reasons = swd.get("why_selected_lines") or res.report_human_reasons or []
         if reasons:
-            lines.append("• Причины (скоринг):")
-            for r in reasons[:6]:
+            lines.append("• Почему выбран (скоринг):")
+            for r in reasons[:8]:
                 lines.append(f"  — {r}")
         if res.dry_run:
             lines.extend(
@@ -1079,6 +1127,14 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         lines.extend(["🏆 Финальный сигнал: да", "• Детали матча недоступны в отчёте — см. логи цикла.", ""])
     elif not signal_yes:
         lines.append("❌ Сигнал не выбран")
+        cfm = dbg.get("closest_fresh_live_miss") or lq_sum.get("closest_fresh_live_miss")
+        if cfm and cfm.get("match_name"):
+            lines.append("• Ближайший по gap (свежий live, ниже порога):")
+            lines.append(f"  — матч: {cfm.get('match_name')}")
+            lines.append(f"  — ставка: {cfm.get('best_candidate_market') or '—'}")
+            lines.append(f"  — score: {cfm.get('best_candidate_score')}")
+            if cfm.get("gap_to_sendable") is not None:
+                lines.append(f"  — до порога не хватило: ~{cfm.get('gap_to_sendable')}")
         nearest = None
         best_sc = None
         for row in dbg.get("matches") or []:
@@ -1087,14 +1143,15 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
                 if best_sc is None or float(sc) > float(best_sc):
                     best_sc = float(sc)
                     nearest = row
-        if nearest and nearest.get("match_name"):
+        if (not cfm or not cfm.get("match_name")) and nearest and nearest.get("match_name"):
             lines.append(f"• Лучший матч по score: {nearest.get('match_name')}")
             lines.append(f"• Его score: {nearest.get('best_candidate_score')}")
             st = nearest.get("final_status")
             if st:
                 lines.append(f"• Почему не ушёл: {_humanize_status_token(str(st))}")
-            if min_score is not None and best_sc is not None:
-                gap = float(min_score) - float(best_sc)
+            eff_thr = min_eff
+            if eff_thr is not None and best_sc is not None:
+                gap = float(eff_thr) - float(best_sc)
                 if gap > 0:
                     lines.append(f"• До порога не хватило: ~{gap:.1f}")
         elif (cand_total == 0 or cand_total is None) and not dbg.get("matches"):
