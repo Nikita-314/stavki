@@ -347,9 +347,12 @@ class FootballSignalSendFilterService:
         return score
 
     def _candidate_rank_key(self, candidate: ProviderSignalCandidate) -> tuple[float, float]:
+        """Sort key: overall score, with tier bonus so main markets beat corners when otherwise close."""
         score = self.build_football_signal_score(candidate)
         family_priority = self._FAMILY_PRIORITY.get(self.get_market_family(candidate), 0.0)
-        return (score, family_priority)
+        tier = self.get_market_tier(candidate)
+        tier_bias = float(4 - tier) * 45.0
+        return (score + tier_bias, family_priority)
 
     def _is_allowed_for_auto_send(self, candidate: ProviderSignalCandidate) -> tuple[bool, str | None]:
         is_live, hours_to_start = self._time_window_info(candidate)

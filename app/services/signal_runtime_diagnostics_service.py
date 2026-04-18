@@ -83,6 +83,12 @@ class SignalRuntimeDiagnosticsState:
     football_live_freshness_live_events_accepted: int = 0
     football_live_freshness_stale_events_dropped: int = 0
     football_live_freshness_stale_markets_dropped: int = 0
+    football_live_quality_fresh_matches: int = 0
+    football_live_quality_strong_idea_matches: int = 0
+    football_live_quality_no_sendable_matches: int = 0
+    football_live_quality_main_blocker: str | None = None
+    football_live_quality_main_blocker_ru: str | None = None
+    football_live_best_scores_distribution_hint: str | None = None
 
 
 _STATE = SignalRuntimeDiagnosticsState()

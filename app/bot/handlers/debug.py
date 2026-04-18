@@ -291,6 +291,12 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Live-матчей принято: {diag.get('football_live_freshness_live_events_accepted') or 0}",
         f"• Устаревших live-матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
         f"• Рынков на устаревших матчах отсеяно: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
+        "— Качество live-идей —",
+        f"• Свежих live-матчей: {diag.get('football_live_quality_fresh_matches') or 0}",
+        f"• С сильной идеей (лучший score ≥ порога): {diag.get('football_live_quality_strong_idea_matches') or 0}",
+        f"• Без sendable-идеи в цикле: {diag.get('football_live_quality_no_sendable_matches') or 0}",
+        f"• Главный блокер: {diag.get('football_live_quality_main_blocker_ru') or diag.get('football_live_quality_main_blocker') or '—'}",
+        f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
         f"• Новых идей к отправке (последний цикл): {new_ideas}",
         f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
         f"• Отправлено в Telegram (сессия): {diag.get('football_live_telegram_sent_session') or 0}",
@@ -804,6 +810,7 @@ def _humanize_status_token(token: str | None) -> str:
         "blocked_too_far_in_time": "матч слишком далеко по времени",
         "blocked_dedup": "похожий сигнал уже есть",
         "blocked_unknown": "не удалось классифицировать причину",
+        "blocked_duplicate_idea": "повтор идеи в сессии",
         "blocked_non_real_source": "источник не считается боевым",
         "no_candidates": "нет подходящих кандидатов",
         "selected": "выбран для отправки",
@@ -937,6 +944,27 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             f"• Устаревших live-матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
             f"• Рынков на устаревших матчах отсеяно: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
             "",
+        ]
+    )
+    best_live_lines = dbg.get("best_live_ideas_for_prog") or []
+    lq_sum = dbg.get("live_quality_summary") or {}
+    if best_live_lines:
+        lines.extend(
+            [
+                "— Лучшие live-идеи —",
+                *[f"• {ln}" for ln in best_live_lines[:5]],
+                "",
+            ]
+        )
+    dist_scores = lq_sum.get("fresh_live_best_scores_distribution") or []
+    if dist_scores:
+        lines.append(
+            "• Лучшие score по свежим матчам: "
+            + ", ".join(str(x) for x in dist_scores[:12])
+        )
+        lines.append("")
+    lines.extend(
+        [
             "📊 Сводка (live-only цепочка):",
             f"• Матчей найдено: {matches_found}",
             f"• Кандидатов до фильтра отправки: {cand_total}",

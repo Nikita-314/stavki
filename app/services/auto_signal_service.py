@@ -51,6 +51,23 @@ def _football_only(candidates: list[ProviderSignalCandidate]) -> list[ProviderSi
     return [c for c in candidates if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL]
 
 
+def _football_match_minute_from_candidate(candidate: ProviderSignalCandidate | None) -> int | None:
+    if candidate is None:
+        return None
+    fs = getattr(candidate, "feature_snapshot_json", None) or {}
+    if not isinstance(fs, dict):
+        return None
+    for key in ("minute", "match_minute", "time"):
+        v = fs.get(key)
+        if v is None:
+            continue
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def compile_football_cycle_debug(
     *,
     fb_preview: list[ProviderSignalCandidate],
@@ -59,6 +76,7 @@ def compile_football_cycle_debug(
     fb_post_integrity: list[ProviderSignalCandidate],
     enriched_scored: list[ProviderSignalCandidate] | None,
     finalists: list[ProviderSignalCandidate] | None,
+    finalists_pre_session: list[ProviderSignalCandidate] | None = None,
     min_score: float,
     family_svc: FootballSignalSendFilterService,
     send_filter_stats,
@@ -101,6 +119,16 @@ def compile_football_cycle_debug(
             if prev is None or sc > prev[0]:
                 best_by_eid[eid] = (sc, c)
 
+    pre_session_eids: set[str] = set()
+    if finalists_pre_session:
+        for c in finalists_pre_session:
+            pe = _football_event_id(c)
+            if pe and float(c.signal_score or 0) >= min_score:
+                pre_session_eids.add(pe)
+    finalists_post_eids: set[str] = {
+        _football_event_id(c) for c in (finalists or []) if _football_event_id(c)
+    }
+
     rows: list[dict] = []
     for eid, rep in sorted(preview_by_eid.items(), key=lambda kv: (kv[1].match.match_name or "")):
         match = rep.match
@@ -125,10 +153,19 @@ def compile_football_cycle_debug(
         best_market = None
         best_odds = None
         best_is_corner_like = None
+        best_market_family = None
         if best_c is not None:
             best_market = str(best_c.market.market_label or best_c.market.market_type or "")
             best_odds = str(best_c.market.odds_value) if best_c.market.odds_value is not None else None
             best_is_corner_like = bool(family_svc.is_corner_market(best_c))
+            best_market_family = family_svc.get_market_family(best_c)
+
+        minute_val: int | None = None
+        for c in fb_preview:
+            if _football_event_id(c) == eid:
+                minute_val = _football_match_minute_from_candidate(c)
+                if minute_val is not None:
+                    break
 
         final_status = "blocked_unknown"
         if n_preview == 0:
@@ -146,10 +183,38 @@ def compile_football_cycle_debug(
             final_status = "blocked_unknown"
         elif n_final > 0:
             final_status = "selected"
+        elif (
+            best_c is not None
+            and best_sc >= min_score
+            and eid in pre_session_eids
+            and eid not in finalists_post_eids
+        ):
+            final_status = "blocked_duplicate_idea"
         elif best_c is not None:
             final_status = "blocked_low_score"
         else:
             final_status = "blocked_integrity"
+
+        why_code = "other"
+        why_ru = ""
+        if n_preview == 0:
+            why_code, why_ru = "no_candidates", "Нет кандидатов после проверки свежести"
+        elif n_cvf == 0:
+            why_code, why_ru = "pre_send_pipeline", "Нет кандидатов перед фильтром отправки"
+        elif n_send == 0:
+            why_code, why_ru = "send_filter", "Отсеяно фильтром отправки (рынок/время)"
+        elif n_int == 0:
+            why_code, why_ru = "integrity", "Не прошла проверку целостности ставки"
+        elif best_c is None:
+            why_code, why_ru = "no_scoring", "Нет данных scoring по матчу"
+        elif best_sc < min_score:
+            why_code, why_ru = "low_score", f"Score {best_sc:.1f} ниже порога {min_score:.0f}"
+        elif eid in pre_session_eids and eid not in finalists_post_eids and best_sc >= min_score:
+            why_code, why_ru = "duplicate_idea", "Та же идея по матчу уже отправлялась в этой сессии"
+        elif n_final > 0:
+            why_code, why_ru = "sendable", "Готова к рассмотрению на отправку"
+        else:
+            why_ru = "См. final_status"
 
         tn = str(getattr(match, "tournament_name", "") or "").strip()
         rows.append(
@@ -157,21 +222,26 @@ def compile_football_cycle_debug(
                 "event_id": eid,
                 "match_name": str(match.match_name or ""),
                 "tournament_name": tn or None,
+                "minute": minute_val,
                 "is_live": bool(getattr(match, "is_live", False)),
                 "is_corner_like": is_corner_like,
                 "event_start_at": match.event_start_at.isoformat() if getattr(match, "event_start_at", None) else None,
                 "hours_to_start": None if hours_to_start is None else round(float(hours_to_start), 3),
                 "raw_markets_count": len(raw_keys),
+                "candidates_after_freshness": n_preview,
                 "candidates_before_filter": n_preview,
                 "candidates_after_cvf": n_cvf,
                 "candidates_after_send_filter": n_send,
                 "candidates_after_integrity": n_int,
                 "candidates_after_score_threshold": n_final,
+                "best_market_family": best_market_family,
                 "best_candidate_market": best_market,
                 "best_candidate_odds": best_odds,
                 "best_candidate_score": round(best_sc, 2) if best_c is not None else None,
                 "best_candidate_is_corner_like": best_is_corner_like,
                 "final_status": final_status,
+                "why_not_sendable_code": why_code,
+                "why_not_sendable_ru": why_ru,
             }
         )
 
@@ -221,10 +291,85 @@ def compile_football_cycle_debug(
     if status_counts:
         bottleneck_hint = max(status_counts.items(), key=lambda kv: kv[1])[0]
 
+    fresh_live_best_scores = sorted(
+        (float(r["best_candidate_score"]) for r in rows if r.get("best_candidate_score") is not None),
+        reverse=True,
+    )
+    matches_strong_idea = sum(
+        1 for r in rows if (r.get("best_candidate_score") or 0) >= min_score
+    )
+    matches_selected_n = sum(1 for r in rows if r.get("final_status") == "selected")
+    matches_without_sendable = max(0, len(rows) - matches_selected_n)
+    problem_status_rows = [r for r in rows if str(r.get("final_status")) not in {"selected", "no_candidates"}]
+    blocker_priority = [
+        "blocked_duplicate_idea",
+        "blocked_low_score",
+        "blocked_send_filter",
+        "blocked_integrity",
+        "blocked_too_far_in_time",
+    ]
+    main_blocker_status = bottleneck_hint or "unknown"
+    if not problem_status_rows and rows:
+        main_blocker_status = "none"
+    else:
+        for token in blocker_priority:
+            if any(str(r.get("final_status")) == token for r in problem_status_rows):
+                main_blocker_status = token
+                break
+    _bl_map = {
+        "blocked_low_score": ("score", "порог score"),
+        "blocked_duplicate_idea": ("duplicate_idea", "повтор идеи в сессии"),
+        "blocked_send_filter": ("send_filter", "фильтр отправки"),
+        "blocked_integrity": ("integrity", "проверка целостности"),
+        "blocked_too_far_in_time": ("time", "слишком далеко по времени"),
+        "blocked_unknown": ("unknown", "не классифицировано"),
+        "no_candidates": ("none", "нет кандидатов"),
+        "none": ("ok", "нет блокирующих причин по матчам"),
+        "selected": ("ok", "есть выбранные матчи"),
+    }
+    main_blocker_code_short, mb_ru = _bl_map.get(
+        str(main_blocker_status) or "",
+        ("cycle", "см. узкое место цикла"),
+    )
+
+    def _prog_best_line(r: dict) -> str:
+        nm = str(r.get("match_name") or "—")
+        bet = str(r.get("best_candidate_market") or "—")
+        sc = r.get("best_candidate_score")
+        st = str(r.get("final_status") or "")
+        wr = str(r.get("why_not_sendable_ru") or "").strip()
+        if st == "selected":
+            return f"{nm} — {bet} — score {sc} — к отправке"
+        if sc is not None and wr and wr != "См. final_status":
+            return f"{nm} — {bet} — score {sc} — не прошла: {wr}"
+        return f"{nm} — {bet} — {wr or st}"
+
+    ranked_for_prog = sorted(
+        rows,
+        key=lambda r: float(r.get("best_candidate_score") or -1.0),
+        reverse=True,
+    )
+    best_live_ideas_for_prog = [_prog_best_line(r) for r in ranked_for_prog[:5]]
+
+    live_quality_summary = {
+        "fresh_live_matches": len(rows),
+        "matches_with_strong_idea": matches_strong_idea,
+        "matches_without_sendable": matches_without_sendable,
+        "matches_marked_selected": matches_selected_n,
+        "main_blocker_code": main_blocker_code_short,
+        "main_blocker_status": main_blocker_status,
+        "main_blocker_ru": mb_ru,
+        "min_signal_score": min_score,
+        "fresh_live_best_scores_distribution": [round(x, 2) for x in fresh_live_best_scores[:20]],
+        "best_live_ideas_lines": best_live_ideas_for_prog,
+    }
+
     debug = {
         "global_block": global_block,
         "dry_run": dry_run,
         "min_signal_score": min_score,
+        "live_quality_summary": live_quality_summary,
+        "best_live_ideas_for_prog": best_live_ideas_for_prog,
         "time_buckets_unique_matches": {"live": live_m, "near": near_m, "too_far": too_m},
         "final_status_counts": dict(status_counts),
         "best_scores_all_matches": [round(x, 2) for x in best_scores_sorted[:25]],
@@ -242,6 +387,10 @@ def compile_football_cycle_debug(
         "blocked_dedup_note": "dedup runs only on live ingest; dry_run does not evaluate DB dedup per match",
         "pipeline_live_only": True,
     }
+    try:
+        logger.info("[FOOTBALL][LIVE_QUALITY] %s", json.dumps(live_quality_summary, default=str, ensure_ascii=False)[:12000])
+    except Exception:
+        logger.info("[FOOTBALL][LIVE_QUALITY] (serialization failed)")
     try:
         logger.info("[FOOTBALL][CYCLE_DEBUG_JSON] %s", json.dumps(debug, default=str, ensure_ascii=False)[:24000])
     except Exception:
@@ -341,6 +490,12 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
         "db_signals_created_session": snap.signals_sent_in_session,
         "telegram_messages_sent_session": snap.telegram_messages_sent_in_session,
         "bottleneck": bn,
+        "live_quality_fresh_matches": diag.get("football_live_quality_fresh_matches"),
+        "live_quality_strong_idea_matches": diag.get("football_live_quality_strong_idea_matches"),
+        "live_quality_no_sendable_matches": diag.get("football_live_quality_no_sendable_matches"),
+        "live_quality_main_blocker": diag.get("football_live_quality_main_blocker"),
+        "live_quality_main_blocker_ru": diag.get("football_live_quality_main_blocker_ru"),
+        "best_scores_distribution_hint": diag.get("football_live_best_scores_distribution_hint"),
         "dry_run": res.dry_run,
         "provider": res.source_name,
         "live_auth_status": res.live_auth_status,
@@ -360,8 +515,15 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
 
 def _football_top_matches_for_telegram(rows: list[dict], *, limit: int) -> list[dict]:
     def sort_key(r: dict) -> tuple[int, float, str]:
-        status = r.get("final_status") or ""
-        pri = 0 if status == "selected" else 1 if status == "blocked_low_score" else 2
+        status = str(r.get("final_status") or "")
+        if status == "selected":
+            pri = 0
+        elif status == "blocked_duplicate_idea":
+            pri = 1
+        elif status == "blocked_low_score":
+            pri = 2
+        else:
+            pri = 3
         sc = float(r["best_candidate_score"] or -1.0)
         return (pri, -sc, r.get("match_name") or "")
 
@@ -457,6 +619,12 @@ class AutoSignalService:
             football_live_freshness_live_events_accepted=0,
             football_live_freshness_stale_events_dropped=0,
             football_live_freshness_stale_markets_dropped=0,
+            football_live_quality_fresh_matches=0,
+            football_live_quality_strong_idea_matches=0,
+            football_live_quality_no_sendable_matches=0,
+            football_live_quality_main_blocker="—",
+            football_live_quality_main_blocker_ru="—",
+            football_live_best_scores_distribution_hint="—",
         )
         if runtime.is_paused():
             logger.info("[FOOTBALL][BLOCK] skipped due to paused")
@@ -1395,9 +1563,10 @@ class AutoSignalService:
                 float(c.signal_score or 0),
                 min_score,
             )
-        finalists = [c for c in scored_sorted if float(c.signal_score or 0) >= min_score]
-        n_after_min_score = len(finalists)
+        finalists_pre_session = [c for c in scored_sorted if float(c.signal_score or 0) >= min_score]
+        n_after_min_score = len(finalists_pre_session)
         session_dup_blocked = 0
+        finalists = list(finalists_pre_session)
         if not dry_run:
             ls_fin = FootballLiveSessionService()
             kept_fin: list[ProviderSignalCandidate] = []
@@ -1437,12 +1606,14 @@ class AutoSignalService:
             fb_post_integrity=fb_post_integrity_saved,
             enriched_scored=enriched,
             finalists=finalists,
+            finalists_pre_session=finalists_pre_session,
             min_score=min_score,
             family_svc=FootballSignalSendFilterService(),
             send_filter_stats=send_filter_result.stats if send_filter_result else None,
             integrity_dropped_checks=list(integrity_result.dropped_checks),
             dry_run=dry_run,
         )
+        lq_live = cycle_dbg.get("live_quality_summary") or {}
 
         def _pick_bet_text(cand: ProviderSignalCandidate) -> str:
             from app.services.football_bet_formatter_service import FootballBetFormatterService
@@ -1477,6 +1648,15 @@ class AutoSignalService:
             football_live_cycle_after_score=n_after_min_score,
             football_live_cycle_new_ideas_sendable=len(finalists),
             football_live_cycle_duplicate_ideas_blocked=session_dup_blocked,
+            football_live_quality_fresh_matches=int(lq_live.get("fresh_live_matches") or 0),
+            football_live_quality_strong_idea_matches=int(lq_live.get("matches_with_strong_idea") or 0),
+            football_live_quality_no_sendable_matches=int(lq_live.get("matches_without_sendable") or 0),
+            football_live_quality_main_blocker=str(lq_live.get("main_blocker_code") or "—"),
+            football_live_quality_main_blocker_ru=str(lq_live.get("main_blocker_ru") or "—"),
+            football_live_best_scores_distribution_hint=(
+                ", ".join(str(x) for x in (lq_live.get("fresh_live_best_scores_distribution") or [])[:12])
+                or "—"
+            ),
         )
 
         if not finalists:
