@@ -83,6 +83,8 @@ async def main() -> None:
         "main_market_token_hits": fg.get("main_market_token_hits"),
         "suspicious_core_signals_blocked": fg.get("suspicious_core_signals_blocked"),
         "core_live_extra_sanity_blocked": fg.get("core_live_extra_sanity_blocked"),
+        "late_game_live_sanity_blocked": fg.get("late_game_live_sanity_blocked"),
+        "matches_sent_after_timing_sanity": fg.get("matches_sent_after_timing_sanity"),
         "per_match_table": per,
         "combat_delivery_trace": trace,
         "max_one_signal_per_match_in_trace": len(dup_eids) == 0,

@@ -199,6 +199,193 @@ def _core_live_totals_quality(
     return None
 
 
+def _live_timing_cutoff(
+    c: ProviderSignalCandidate,
+    family: str,
+    h: int | None,
+    a: int | None,
+    minute: int | None,
+    fmt: FootballBetFormatterService,
+    bet: str,
+    family_svc: FootballSignalSendFilterService,
+) -> LiveSanityResult | None:
+    """Hard late-game cutoffs for core live markets (combat send). Token: blocked_late_live_market."""
+    mtype_raw = (c.market.market_type or "").strip()
+
+    if family == "handicap":
+        if minute is not None and int(minute) >= 88:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=12,
+                block_token="blocked_late_live_market",
+                reason_ru=f"Фора: слишком поздняя стадия ({int(minute)}') для live-сигнала",
+                bet_text=bet,
+            )
+        return None
+
+    if family == "btts":
+        if minute is None:
+            return None
+        m = int(minute)
+        sel = f"{c.market.selection or ''} {c.market.market_label or ''}".lower()
+        is_yes = any(t in sel for t in ("yes", "да", "обе забьют", "both teams"))
+        if is_yes and m >= 85:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=14,
+                block_token="blocked_late_live_market",
+                reason_ru=f"ОЗ «да» на {m}': для live-канала уже слишком поздно",
+                bet_text=bet,
+            )
+        return None
+
+    if family == "totals":
+        ctx: FootballTotalContext | None = fmt.describe_total_context(
+            market_type=c.market.market_type,
+            market_label=c.market.market_label,
+            selection=c.market.selection,
+            home_team=c.match.home_team,
+            away_team=c.match.away_team,
+            section_name=c.market.section_name,
+            subsection_name=c.market.subsection_name,
+        )
+        if not ctx or not ctx.total_line:
+            return None
+        try:
+            line = float((ctx.total_line or "0").replace(",", "."))
+        except ValueError:
+            return None
+        if not _is_total_over_side(ctx):
+            return None
+        scope = (ctx.target_scope or "").lower()
+        combined = scope == "match"
+        if ("home" in scope or "it1" in scope) and "away" not in scope:
+            goals = h
+        elif ("away" in scope or "it2" in scope) and "home" not in scope:
+            goals = a
+        else:
+            goals = (h + a) if h is not None and a is not None else None
+
+        min_goals = _min_goals_strict_over(line)
+        need_more = max(0, min_goals - int(goals)) if goals is not None else None
+
+        # Micro match-total OVER without minute in snapshot — typical late-noise path.
+        if (
+            combined
+            and minute is None
+            and h is not None
+            and a is not None
+            and need_more is not None
+            and need_more >= 1
+            and line <= 1.5
+        ):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=18,
+                block_token="blocked_late_live_market",
+                reason_ru="Матчевый тотал «больше» низкой линии без минуты в live-снимке — не публикуем (риск запоздалого алерта)",
+                bet_text=bet,
+            )
+
+        if minute is None or goals is None or need_more is None:
+            return None
+        m = int(minute)
+
+        if combined and m >= 88 and need_more >= 1:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=10,
+                block_token="blocked_late_live_market",
+                reason_ru=f"Матчевый тотал «больше» при {m}': нужно ещё {need_more} гол(а) — для live-сигнала слишком поздно",
+                bet_text=bet,
+            )
+        if combined and m >= 85 and line <= 1.5 and need_more >= 1:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=16,
+                block_token="blocked_late_live_market",
+                reason_ru=f"Микрототал матча >{line} на {m}': ещё {need_more} гол — концовка, не шлём",
+                bet_text=bet,
+            )
+        if combined and m >= 90 and need_more >= 2:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=11,
+                block_token="blocked_late_live_market",
+                reason_ru=f"На {m}' нужно ≥{need_more} гола по матчу — рынок формально есть, для алерта поздно",
+                bet_text=bet,
+            )
+        if scope != "match" and m >= 87 and line <= 1.5 and need_more >= 1:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=17,
+                block_token="blocked_late_live_market",
+                reason_ru=f"Командный тотал >{line} на {m}': ещё {need_more} гол команды — слишком поздно",
+                bet_text=bet,
+            )
+        if not combined and need_more >= 2 and m >= 80:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=19,
+                block_token="blocked_late_live_market",
+                reason_ru=f"Командный тотал: на {m}' нужно ещё {need_more} гола — жёсткий late-cutoff",
+                bet_text=bet,
+            )
+        return None
+
+    if family == "double_chance" and h is not None and a is not None and minute is not None:
+        m = int(minute)
+        if m >= 88:
+            raw_dc = f"{c.market.selection or ''} {c.market.market_label or ''}".strip()
+            dc = fmt._normalize_double_chance(raw_dc)
+            if dc == "1Х" and a > h:
+                return LiveSanityResult(
+                    passed=False,
+                    plausibility="weak",
+                    plausibility_score=13,
+                    block_token="blocked_late_live_market",
+                    reason_ru=f"Двойной шанс 1X на {m}' при отставании хозяев — для live-алерта слишком поздно",
+                    bet_text=bet,
+                )
+            if dc == "Х2" and h > a:
+                return LiveSanityResult(
+                    passed=False,
+                    plausibility="weak",
+                    plausibility_score=13,
+                    block_token="blocked_late_live_market",
+                    reason_ru=f"Двойной шанс X2 на {m}' при отставании гостей — для live-алерта слишком поздно",
+                    bet_text=bet,
+                )
+        return None
+
+    if family == "result" and h is not None and a is not None and minute is not None:
+        mtl = mtype_raw.lower()
+        if mtl in ("1x2", "match_winner") and not family_svc.is_corner_market(c):
+            pick = _result_pick_side(c, mtype_raw, fmt)
+            if pick in ("home", "away"):
+                diff = h - a if pick == "home" else a - h
+                if diff <= -1 and int(minute) >= 88:
+                    return LiveSanityResult(
+                        passed=False,
+                        plausibility="weak",
+                        plausibility_score=9,
+                        block_token="blocked_late_live_market",
+                        reason_ru=f"Исход «победа» при {int(minute)}' и отставании — только концовка, не публикуем",
+                        bet_text=bet,
+                    )
+        return None
+
+    return None
+
+
 def _totals_sanity(
     c: ProviderSignalCandidate,
     family: str,
@@ -325,7 +512,7 @@ def _as_tuple_from_dict(fa: dict) -> tuple[int | None, int | None, int | None]:
 
 
 class FootballLiveMarketSanityService:
-    """Pre-send live-only checks: bet text, European handicap, totals vs score, late W outcome."""
+    """Pre-send live-only checks: bet text, European handicap, totals vs score, late timing, late W outcome."""
 
     def _live_snapshot(
         self, c: ProviderSignalCandidate
@@ -389,6 +576,10 @@ class FootballLiveMarketSanityService:
             qtot = _core_live_totals_quality(c, family, h, a, minute, fmt, bet)
             if qtot and not qtot.passed:
                 return qtot
+
+        tcut = _live_timing_cutoff(c, family, h, a, minute, fmt, bet, family_svc)
+        if tcut and not tcut.passed:
+            return tcut
 
         mtl = mtype.lower()
         if (

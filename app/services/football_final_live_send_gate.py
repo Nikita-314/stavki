@@ -192,6 +192,7 @@ def apply_final_live_send_gate(
     token_hits: dict[str, int] = {}
     suspicious_core_signals_blocked = 0
     core_live_extra_sanity_blocked = 0
+    late_game_live_sanity_blocked = 0
 
     for eid, group in sorted(by_eid.items(), key=lambda kv: (kv[0] == "—", kv[0])):
         mname = str(group[0].match.match_name or "—") if group else "—"
@@ -278,6 +279,8 @@ def apply_final_live_send_gate(
                 suspicious_core_signals_blocked += 1
             elif tk == "blocked_core_late_high_gap_total":
                 core_live_extra_sanity_blocked += 1
+            elif tk == "blocked_late_live_market":
+                late_game_live_sanity_blocked += 1
 
         row["sanity_attempts"] = sanity_attempts
 
@@ -326,6 +329,17 @@ def apply_final_live_send_gate(
                 "final_live_gate": True,
             },
         }
+        _h2, _a2, _mn2 = sanity_svc._live_snapshot(chosen)
+        if _mn2 is not None:
+            _mv = int(_mn2)
+            if _mv >= 88:
+                ex["football_live_late_stage_warning_ru"] = (
+                    "⚠️ Очень поздняя стадия матча: сигнал допущен только как core live после sanity."
+                )
+            elif _mv >= 82:
+                ex["football_live_late_stage_warning_ru"] = (
+                    "🕒 Концовка матча — оцените оставшееся время и ликвидность линии."
+                )
         top2 = chosen.model_copy(update={"explanation_json": ex})
 
         row["chosen_final_candidate"] = _bet_line(top2)
@@ -375,5 +389,7 @@ def apply_final_live_send_gate(
         "core_main_only": True,
         "suspicious_core_signals_blocked": suspicious_core_signals_blocked,
         "core_live_extra_sanity_blocked": core_live_extra_sanity_blocked,
+        "late_game_live_sanity_blocked": late_game_live_sanity_blocked,
+        "matches_sent_after_timing_sanity": n_sent_decision,
     }
     return out, debug_blob, drop_by_eid, drop_reasons
