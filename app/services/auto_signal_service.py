@@ -1250,6 +1250,60 @@ def _combat_bottleneck_ru(token: str | None) -> str:
     return m.get(str(token), str(token).replace("_", " "))
 
 
+def format_final_live_gate_summary_lines(fg: dict, *, max_rows: int = 24) -> list[str]:
+    """Shared UI block: final live send gate (core main markets only)."""
+    if not isinstance(fg, dict) or fg.get("per_match") is None:
+        return []
+    lines: list[str] = [
+        "🧱 Final live send gate (только core main markets, макс. 1 сигнал на матч за цикл):",
+    ]
+    chk = int(fg.get("live_matches_total") or len(fg.get("per_match") or []) or 0)
+    mskip = int(fg.get("matches_skipped") or 0)
+    mpass = int(fg.get("matches_sent_after_final_gate") or fg.get("matches_with_send") or 0)
+    bnmain = int(fg.get("blocked_non_main_live_market_hits") or 0)
+    bexo = int(fg.get("blocked_exotic_result_market_hits") or 0)
+    smain = int(fg.get("sent_main_markets_count") or mpass or 0)
+    msan = int(fg.get("matches_blocked_live_sanity") or 0)
+    lines.append(
+        f"   Матчей проверено: {chk} · отсеяно gate: {mskip} · допущено к отправке: {mpass}"
+    )
+    lines.append(
+        f"   blocked_non_main_live_market (хиты): {bnmain} · "
+        f"blocked_exotic_result_market (хиты): {bexo} · sent_main_markets_count: {smain}"
+    )
+    if msan:
+        lines.append(f"   Матчей отсеяно live sanity (все core-кандидаты): {msan}")
+    bc = int(fg.get("blocked_cards_or_special_hits") or 0)
+    if bc:
+        lines.append(f"   Карточки/мусор (whitelist): {bc}")
+    lines.append(
+        f"   Итого после gate (кандидатов): {fg.get('matches_with_send')} · "
+        f"отсеяно gate: {fg.get('matches_skipped')}"
+    )
+    af = fg.get("allowed_families")
+    if isinstance(af, list) and af:
+        lines.append(f"   семей классификатора: {', '.join(af)}")
+    lines.append("")
+    for row in (fg.get("per_match") or [])[:max_rows]:
+        if not isinstance(row, dict):
+            continue
+        sk = row.get("match_send_skipped")
+        br = row.get("blocked_reason")
+        tail = row.get("skip_reason") or row.get("chosen_reason") or "—"
+        ch = (row.get("chosen_final_candidate") or row.get("chosen_allowed_candidate") or "—")[:88]
+        fpd = row.get("full_pipeline_decision")
+        extra = f" | → {fpd}" if fpd else ""
+        forb = row.get("forbidden_finalists_count")
+        forb_s = f" · forb={forb}" if forb is not None else ""
+        br_s = f" · {str(br)[:48]}" if br else ""
+        lines.append(
+            f"  • {row.get('event_id')} {str(row.get('match_name') or '')[:34]} | "
+            f"{'SKIP' if sk else 'OK'}{forb_s}{br_s} | {ch} | {str(tail)[:92]}{extra}"
+        )
+    lines.append("")
+    return lines
+
+
 def format_football_session_start_user_message(
     cres: AutoSignalCycleResult, *, duration_minutes: int
 ) -> str:
@@ -1352,39 +1406,7 @@ def format_football_session_start_user_message(
         lines.append("")
 
     fg = d.get("final_live_send_gate") or {}
-    if isinstance(fg, dict) and fg.get("per_match") is not None:
-        lines.append("🧱 Final live send gate (макс. 1 сигнал на матч за цикл):")
-        chk = int(fg.get("live_matches_total") or len(fg.get("per_match") or []) or 0)
-        mskip = int(fg.get("matches_skipped") or 0)
-        mpass = int(fg.get("matches_sent_after_final_gate") or fg.get("matches_with_send") or 0)
-        lines.append(
-            f"   Матчей проверено: {chk} · отсеяно gate: {mskip} · допущено к отправке: {mpass}"
-        )
-        bc = int(fg.get("blocked_cards_or_special_hits") or 0)
-        bng = int(fg.get("blocked_broken_next_goal_hits") or 0)
-        if bc or bng:
-            lines.append(f"   Карточки/мусор (кандидат-хиты whitelist): {bc} · broken next goal: {bng}")
-        lines.append(
-            f"   Итого после gate (кандидатов): {fg.get('matches_with_send')} · "
-            f"отсеяно gate: {fg.get('matches_skipped')}"
-        )
-        af = fg.get("allowed_families")
-        if isinstance(af, list) and af:
-            lines.append(f"   whitelist семей: {', '.join(af)}")
-        lines.append("")
-        for row in (fg.get("per_match") or [])[:24]:
-            if not isinstance(row, dict):
-                continue
-            sk = row.get("match_send_skipped")
-            tail = row.get("skip_reason") or row.get("chosen_reason") or "—"
-            ch = (row.get("chosen_final_candidate") or "—")[:90]
-            fpd = row.get("full_pipeline_decision")
-            extra = f" | → {fpd}" if fpd else ""
-            lines.append(
-                f"  • {row.get('event_id')} {str(row.get('match_name') or '')[:36]} | "
-                f"{'SKIP' if sk else 'OK'} | {ch} | {str(tail)[:100]}{extra}"
-            )
-        lines.append("")
+    lines.extend(format_final_live_gate_summary_lines(fg))
 
     if matches:
         lines.append("— Все live-матчи (лучшая идея на матч) —")

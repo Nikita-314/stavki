@@ -29,7 +29,11 @@ from app.services.entry_service import EntryService
 from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
-from app.services.auto_signal_service import AutoSignalService, format_football_session_start_user_message
+from app.services.auto_signal_service import (
+    AutoSignalService,
+    format_final_live_gate_summary_lines,
+    format_football_session_start_user_message,
+)
 from app.services.football_signal_outcome_reason_service import (
     FootballSignalOutcomeReasonService,
     build_football_postmatch_verify_report,
@@ -1239,6 +1243,10 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         f"• Счётчик в БД (посл. бою): обычных {d_last.get('football_last_cycle_ingest_normal') or 0}, "
         f"мягких {d_last.get('football_last_cycle_ingest_soft') or 0}"
     )
+    fg_lines = format_final_live_gate_summary_lines(dbg.get("final_live_send_gate") or {})
+    if fg_lines:
+        lines.extend(fg_lines)
+
     lines.extend(
         [
             "",
