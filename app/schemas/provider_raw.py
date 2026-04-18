@@ -20,6 +20,12 @@ class RawEventItem(BaseModel):
     winline_time: str | None = None
     winline_source_time: str | None = None
     winline_numer: int | None = None
+    # Optional live context (if provider supplies it)
+    score_home: int | None = None
+    score_away: int | None = None
+    minute: int | None = None
+    period: str | None = None
+    live_state: str | None = None
     raw_json: dict[str, Any] | None = None
 
 

@@ -169,15 +169,14 @@ def _read_event_get(r: _Reader) -> dict[str, Any] | None:
     if time_s and time_s[0].isdigit() and time_s[-1].isdigit():
         time_s = time_s + "'"
     ev["time"] = time_s
-    r.u8()
-    r.u8()
-    r.u8()
-    r.u8()
-    r.u8()
-    r.utf()
-    r.utf()
-    r.utf()
-    r.u8()
+    tail_u8 = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8()]
+    # These fields are present in the JS decoder but were previously discarded.
+    # We keep them because they often carry live scoreboard / state strings.
+    tail_utf = [r.utf(), r.utf(), r.utf()]
+    tail_last = r.u8()
+    ev["tail_u8"] = tail_u8
+    ev["tail_utf"] = tail_utf
+    ev["tail_last_u8"] = tail_last
     ev["isLive"] = 1
     return ev
 
@@ -197,15 +196,12 @@ def _read_event_update(r: _Reader) -> dict[str, Any] | None:
     if z and (z[0].isdigit() or "OT" in z or "\u041e\u0422" in z) and z[-1].isdigit():
         z = z + "'"
     ev["time"] = z
-    r.u8()
-    r.u8()
-    r.u8()
-    r.u8()
-    r.u8()
-    r.utf()
-    r.utf()
-    r.utf()
-    r.u8()
+    tail_u8 = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8()]
+    tail_utf = [r.utf(), r.utf(), r.utf()]
+    tail_last = r.u8()
+    ev["tail_u8"] = tail_u8
+    ev["tail_utf"] = tail_utf
+    ev["tail_last_u8"] = tail_last
     ev["isLive"] = 1
     return ev
 

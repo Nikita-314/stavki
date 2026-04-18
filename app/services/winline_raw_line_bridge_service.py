@@ -21,6 +21,12 @@ from app.services.winline_mapping_rules import (
 class WinlineRawLineBridgeService:
     """Convert raw Winline-ish JSON into ingestion-friendly normalized payload."""
 
+    def _first_not_none(self, *vals: Any) -> Any:
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
     def detect_payload_shape(self, payload: dict[str, Any] | None) -> str:
         if not isinstance(payload, dict):
             return "unsupported"
@@ -155,6 +161,18 @@ class WinlineRawLineBridgeService:
                     "winline_time": str(event.get("time") or "") or None,
                     "winline_source_time": str(event.get("sourceTime") or "") or None,
                     "winline_numer": self._int_or_none(event.get("numer")),
+                    # Optional live context (if present in raw event dict)
+                    "score_home": self._int_or_none(
+                        self._first_not_none(event.get("score_home"), event.get("home_score"), event.get("homescore"))
+                    ),
+                    "score_away": self._int_or_none(
+                        self._first_not_none(event.get("score_away"), event.get("away_score"), event.get("awayscore"))
+                    ),
+                    "minute": self._int_or_none(
+                        self._first_not_none(event.get("minute"), event.get("match_minute"), event.get("time_minute"))
+                    ),
+                    "period": str(event.get("period") or "") or None,
+                    "live_state": str(event.get("live_state") or event.get("state") or "") or None,
                 }
             )
         return out

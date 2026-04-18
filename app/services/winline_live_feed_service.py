@@ -13,6 +13,7 @@ import gzip
 import logging
 import struct
 import time
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -136,6 +137,34 @@ def enrich_winline_event_for_ingest(ev: dict[str, Any], champs: dict[int, dict[s
         return None
     c = champs.get(int(ev.get("idChampionship") or 0))
     id_sport = int(c.get("idSport", _FOOTBALL_SPORT)) if c else _FOOTBALL_SPORT
+    src_time = str(ev.get("sourceTime") or ev.get("time") or "").strip()
+    # Parse minute from Winline clock strings like "1Т 12'", "2Т 57'", "90'" etc.
+    minute: int | None = None
+    period: str | None = None
+    nums = re.findall(r"(\d{1,3})", src_time)
+    if nums:
+        try:
+            # Winline strings often look like "2Т 72'" or "1Т 45'"; take the last number as minute.
+            minute = int(nums[-1])
+        except ValueError:
+            minute = None
+    if "2т" in src_time.lower() or "2h" in src_time.lower():
+        period = "2H"
+        if minute is not None and minute < 45:
+            minute = 45 + minute
+    elif "1т" in src_time.lower() or "1h" in src_time.lower():
+        period = "1H"
+    # Try to parse current score from tail UTF fields if present.
+    score_home: int | None = None
+    score_away: int | None = None
+    tail_utf = ev.get("tail_utf") if isinstance(ev.get("tail_utf"), list) else []
+    for t in tail_utf:
+        if not isinstance(t, str):
+            continue
+        mm = re.search(r"\b(\d{1,2})\s*[:\-–]\s*(\d{1,2})\b", t)
+        if mm:
+            score_home, score_away = int(mm.group(1)), int(mm.group(2))
+            break
     return {
         "id": eid,
         "idSport": id_sport,
@@ -147,6 +176,11 @@ def enrich_winline_event_for_ingest(ev: dict[str, Any], champs: dict[int, dict[s
         "time": ev.get("time"),
         "sourceTime": ev.get("sourceTime"),
         "numer": ev.get("numer"),
+        "score_home": score_home,
+        "score_away": score_away,
+        "minute": minute,
+        "period": period,
+        "live_state": ev.get("state"),
     }
 
 

@@ -111,6 +111,11 @@ class GenericOddsAdapter(BaseProviderAdapter):
                             "winline_time": ev.winline_time,
                             "winline_source_time": ev.winline_source_time,
                             "winline_numer": ev.winline_numer,
+                            "score_home": ev.score_home,
+                            "score_away": ev.score_away,
+                            "minute": ev.minute,
+                            "period": ev.period,
+                            "live_state": ev.live_state,
                         },
                     )
                 )
