@@ -297,8 +297,12 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Без sendable-идеи в цикле: {diag.get('football_live_quality_no_sendable_matches') or 0}",
         f"• Главный блокер: {diag.get('football_live_quality_main_blocker_ru') or diag.get('football_live_quality_main_blocker') or '—'}",
         f"• Подсказка качества: {diag.get('football_live_quality_hint_ru') or '—'}",
-        f"• Порог score: база {diag.get('football_live_min_signal_score_base') or '—'}, эффективно {diag.get('football_live_min_signal_score_effective') or '—'}",
-        f"• Рельеф порога: {diag.get('football_live_score_relief_note') or '—'}",
+        f"• Порог score (база): {diag.get('football_live_min_signal_score_base') or '—'}",
+        f"• Live send: нормальных (≥ порога): {diag.get('football_live_normal_sendable_count') or 0}",
+        f"• Live send: soft (недобор до {diag.get('football_live_min_signal_score_base') or '—'}): {diag.get('football_live_soft_sendable_count') or 0}",
+        f"• Soft gap ≤1.5: {diag.get('football_live_soft_sendable_tight_count') or 0}",
+        f"• Soft relief (gap до 2): {diag.get('football_live_soft_sendable_relief_single_count') or 0}",
+        f"• Режим порога: {diag.get('football_live_score_relief_note') or '—'}",
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
         f"• Новых идей к отправке (последний цикл): {new_ideas}",
         f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
@@ -995,6 +999,7 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             + ", ".join(str(x) for x in gap_dist[:15])
         )
         lines.append("")
+    lss = lq_sum.get("live_send_stats") or dbg.get("live_send_stats") or {}
     lines.extend(
         [
             "📊 Сводка (live-only цепочка):",
@@ -1003,6 +1008,20 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             f"• После фильтра отправки: {after_filter if after_filter is not None else '—'}",
             f"• После проверки целостности: {after_integrity if after_integrity is not None else '—'}",
             f"• После порога score: {after_score if after_score is not None else '—'}",
+        ]
+    )
+    if lss:
+        lines.extend(
+            [
+                "— Live send (отбор кандидатов) —",
+                f"• Нормальных (≥ базового порога): {lss.get('normal_sendable', 0)}",
+                f"• Soft всего: {lss.get('soft_sendable_total', 0)}",
+                f"• Soft gap ≤1.5: {lss.get('soft_sendable_tight', 0)}",
+                f"• Soft relief (gap до 2, main): {lss.get('soft_sendable_relief_single', 0)}",
+            ]
+        )
+    lines.extend(
+        [
             "",
             "🎯 Итог:",
             f"• Финальный сигнал: {'Да' if signal_yes else 'Нет'}",
@@ -1033,17 +1052,13 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
     if bn:
         lines.append(f"• Узкое место (цикл): {_humanize_live_bottleneck_ru(str(bn))}")
 
-    min_eff = dbg.get("min_signal_score_effective") or dbg.get("min_signal_score")
-    min_base = dbg.get("min_signal_score_base")
+    min_thr = dbg.get("min_signal_score") or dbg.get("min_signal_score_base")
     relief_nt = dbg.get("score_relief_note") or lq_sum.get("score_relief_note")
-    if min_eff is not None:
+    if min_thr is not None:
         lines.append("")
-        if min_base is not None and min_base != min_eff:
-            lines.append(
-                f"📐 Порог score: база {min_base}, эффективно {min_eff} ({relief_nt or '—'})"
-            )
-        else:
-            lines.append(f"📐 Порог score: {min_eff}")
+        lines.append(f"📐 Базовый порог score: {min_thr}")
+        if relief_nt:
+            lines.append(f"• Режим отбора: {relief_nt}")
 
     status_counts = dbg.get("final_status_counts") or {}
     total_m = sum(status_counts.values()) if status_counts else 0
@@ -1116,6 +1131,14 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             lines.append("• Почему выбран (скоринг):")
             for r in reasons[:8]:
                 lines.append(f"  — {r}")
+        if swd.get("send_path") == "soft":
+            lines.append(
+                f"• Тип: soft_sendable ({swd.get('soft_label') or '—'})"
+            )
+            lines.append(
+                swd.get("live_note")
+                or "Сигнал отправлен несмотря на недобор score (live ситуация)"
+            )
         if res.dry_run:
             lines.extend(
                 [
@@ -1149,7 +1172,7 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             st = nearest.get("final_status")
             if st:
                 lines.append(f"• Почему не ушёл: {_humanize_status_token(str(st))}")
-            eff_thr = min_eff
+            eff_thr = dbg.get("min_signal_score") or dbg.get("min_signal_score_base")
             if eff_thr is not None and best_sc is not None:
                 gap = float(eff_thr) - float(best_sc)
                 if gap > 0:

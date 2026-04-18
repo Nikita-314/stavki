@@ -51,55 +51,122 @@ def _football_only(candidates: list[ProviderSignalCandidate]) -> list[ProviderSi
     return [c for c in candidates if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL]
 
 
-def _compute_football_live_effective_min_score(
-    scored_sorted: list[ProviderSignalCandidate],
-    min_base: float,
-    *,
+_LIVE_MAIN_SINGLE_RELIEF = frozenset({"result", "totals", "btts", "handicap"})
+_LIVE_MAIN_SOFT = frozenset({"result", "double_chance", "totals", "btts", "handicap"})
+_LIVE_ABS_SCORE_FLOOR = 48.0
+_SOFT_GAP_LABEL = 1.5
+_SOFT_GAP_PRIORITY = 1.0
+
+
+def classify_live_sendable_candidate(
+    c: ProviderSignalCandidate,
+    base: float,
     family_svc: FootballSignalSendFilterService,
-    relief_max: float,
-) -> tuple[float, str]:
-    """Lower threshold by at most relief_max only when ≥2 fresh live main-market bests sit just below base (gap ∈ (0, 2])."""
-    MAIN = {"result", "double_chance", "totals", "btts", "handicap"}
-    by_eid: dict[str, float] = {}
-    for c in scored_sorted:
-        if family_svc.is_corner_market(c):
-            continue
-        fam = family_svc.get_market_family(c)
-        if fam not in MAIN:
-            continue
-        eid = _football_event_id(c)
-        if not eid:
-            continue
-        sc = float(c.signal_score or 0.0)
-        prev = by_eid.get(eid, -1.0)
-        if sc > prev:
-            by_eid[eid] = sc
-    tight = [sc for sc in by_eid.values() if 0 < (min_base - sc) <= 2.0]
-    if len(tight) >= 2 and relief_max > 0:
-        new_min = max(48.0, float(min_base) - float(relief_max))
-        if new_min < min_base:
-            return new_min, "auto_relief_main_market_tight_gap"
-    return float(min_base), "none"
+    *,
+    single_relief_max_gap: float,
+) -> tuple[str, str | None]:
+    """normal | soft | reject — soft only for main markets with reason_codes, not exotic/corners."""
+    sc = float(c.signal_score or 0)
+    if sc >= base:
+        return "normal", None
+    floor = max(_LIVE_ABS_SCORE_FLOOR, base - 3.0)
+    if sc < floor:
+        return "reject", None
+    if family_svc.is_corner_market(c):
+        return "reject", None
+    fam = family_svc.get_market_family(c)
+    if fam == "exotic":
+        return "reject", None
+    codes = (c.explanation_json or {}).get("football_scoring_reason_codes") or []
+    if not codes:
+        return "reject", None
+    if fam not in _LIVE_MAIN_SOFT:
+        return "reject", None
+    gap = base - sc
+    if fam in _LIVE_MAIN_SINGLE_RELIEF:
+        if sc < base - float(single_relief_max_gap):
+            return "reject", None
+        if gap <= _SOFT_GAP_LABEL:
+            return "soft", "soft_sendable"
+        return "soft", "soft_sendable_relief_single"
+    if fam == "double_chance" and gap <= _SOFT_GAP_LABEL:
+        return "soft", "soft_sendable_dc"
+    return "reject", None
+
+
+def order_live_finalist_tuples(
+    items: list[tuple[ProviderSignalCandidate, str, str | None]],
+    base: float,
+    family_svc: FootballSignalSendFilterService,
+) -> list[tuple[ProviderSignalCandidate, str, str | None]]:
+    """Normals first; among softs prefer gap ≤1.0, then tighter gap, then main-market preference."""
+    if not items:
+        return []
+    normals = [x for x in items if x[1] == "normal"]
+    softs = [x for x in items if x[1] == "soft"]
+    out: list[tuple[ProviderSignalCandidate, str, str | None]] = []
+    if normals:
+        nc = [c for c, _, _ in normals]
+        ns = _sort_finalists_main_market_first(nc, family_svc)
+        id_order = {id(c): i for i, c in enumerate(ns)}
+        normals.sort(key=lambda x: id_order.get(id(x[0]), 999))
+        out.extend(normals)
+    if softs:
+
+        def _sk(item: tuple[ProviderSignalCandidate, str, str | None]) -> tuple[int, float, float, float]:
+            c, _, _ = item
+            sc = float(c.signal_score or 0)
+            gap = base - sc
+            band = 0 if gap <= _SOFT_GAP_PRIORITY else (1 if gap <= _SOFT_GAP_LABEL else 2)
+            if family_svc.is_corner_market(c):
+                mb = -10.0
+            else:
+                fam = family_svc.get_market_family(c)
+                if fam in ("result", "double_chance"):
+                    mb = 18.0
+                elif fam in ("totals", "btts", "handicap"):
+                    mb = 14.0
+                else:
+                    mb = 0.0
+            return (band, gap, -(mb + sc), sc)
+
+        softs.sort(key=_sk)
+        out.extend(softs)
+    return out
 
 
 def _sort_finalists_main_market_first(
     finalists: list[ProviderSignalCandidate],
     family_svc: FootballSignalSendFilterService,
 ) -> list[ProviderSignalCandidate]:
-    """Final ordering for ingest/notify: main markets ahead of corners/special at similar numeric score."""
+    """Corners lose to main markets at comparable raw score (final live selection)."""
 
     def _key(c: ProviderSignalCandidate) -> tuple[float, float]:
-        tier = family_svc.get_market_tier(c)
         fam = family_svc.get_market_family(c)
-        boost = float(4 - tier) * 4.0
-        if fam in ("result", "double_chance"):
-            boost += 6.0
-        elif fam in ("totals", "btts", "handicap"):
-            boost += 3.0
         sc = float(c.signal_score or 0.0)
-        return (boost + sc, sc)
+        if family_svc.is_corner_market(c):
+            return (sc - 8.0, sc)
+        if fam in ("result", "double_chance"):
+            return (sc + 14.0, sc)
+        if fam in ("totals", "btts", "handicap"):
+            return (sc + 12.0, sc)
+        return (sc, sc)
 
     return sorted(finalists, key=_key, reverse=True)
+
+
+def _attach_football_live_send_meta(
+    c: ProviderSignalCandidate,
+    meta: tuple[str, str | None] | None,
+) -> ProviderSignalCandidate:
+    if not meta:
+        return c
+    tier, sub = meta
+    expl = dict(c.explanation_json or {})
+    expl["football_live_send_path"] = tier
+    if sub:
+        expl["football_live_send_soft_label"] = sub
+    return c.model_copy(update={"explanation_json": expl})
 
 
 def _football_format_bet_line(candidate: ProviderSignalCandidate) -> str:
@@ -154,6 +221,8 @@ def compile_football_cycle_debug(
     min_score_base: float | None = None,
     score_relief_note: str = "none",
     db_dedup_blocked_count: int = 0,
+    live_send_stats: dict | None = None,
+    finalist_send_meta: dict[int, tuple[str, str | None]] | None = None,
 ) -> dict:
     """Aggregated per-match football pipeline diagnostics for dry_run Telegram + logs."""
     base_for_display = float(min_score_base) if min_score_base is not None else float(min_score)
@@ -196,7 +265,7 @@ def compile_football_cycle_debug(
     if finalists_pre_session:
         for c in finalists_pre_session:
             pe = _football_event_id(c)
-            if pe and float(c.signal_score or 0) >= thr_eff:
+            if pe:
                 pre_session_eids.add(pe)
     finalists_post_eids: set[str] = {
         _football_event_id(c) for c in (finalists or []) if _football_event_id(c)
@@ -258,7 +327,6 @@ def compile_football_cycle_debug(
             final_status = "selected"
         elif (
             best_c is not None
-            and best_sc >= thr_eff
             and eid in pre_session_eids
             and eid not in finalists_post_eids
         ):
@@ -280,24 +348,18 @@ def compile_football_cycle_debug(
             why_code, why_ru = "integrity", "Не прошла проверку целостности ставки"
         elif best_c is None:
             why_code, why_ru = "no_scoring", "Нет данных scoring по матчу"
-        elif best_sc < thr_eff:
-            if abs(base_for_display - thr_eff) > 1e-6:
-                why_code, why_ru = (
-                    "low_score",
-                    f"Score {best_sc:.1f} ниже эффективного порога {thr_eff:.0f} (база {base_for_display:.0f})",
-                )
-            else:
-                why_code, why_ru = "low_score", f"Score {best_sc:.1f} ниже порога {thr_eff:.0f}"
-        elif eid in pre_session_eids and eid not in finalists_post_eids and best_sc >= thr_eff:
-            why_code, why_ru = "duplicate_idea", "Та же идея по матчу уже отправлялась в этой сессии"
         elif n_final > 0:
             why_code, why_ru = "sendable", "Готова к рассмотрению на отправку"
+        elif eid in pre_session_eids and eid not in finalists_post_eids:
+            why_code, why_ru = "duplicate_idea", "Та же идея по матчу уже отправлялась в этой сессии"
+        elif best_sc < base_for_display:
+            why_code, why_ru = "low_score", f"Score {best_sc:.1f} ниже порога {base_for_display:.0f}"
         else:
             why_ru = "См. final_status"
 
         gap_to_sendable = None
         if best_c is not None and final_status == "blocked_low_score":
-            gap_to_sendable = round(float(thr_eff) - float(best_sc), 2)
+            gap_to_sendable = round(float(base_for_display) - float(best_sc), 2)
 
         tn = str(getattr(match, "tournament_name", "") or "").strip()
         rows.append(
@@ -323,7 +385,7 @@ def compile_football_cycle_debug(
                 "best_candidate_score": round(best_sc, 2) if best_c is not None else None,
                 "best_candidate_is_corner_like": best_is_corner_like,
                 "min_threshold_base": round(base_for_display, 2),
-                "min_threshold_effective": round(thr_eff, 2),
+                "min_threshold_effective": round(base_for_display, 2),
                 "gap_to_sendable": gap_to_sendable,
                 "final_status": final_status,
                 "why_not_sendable_code": why_code,
@@ -395,7 +457,7 @@ def compile_football_cycle_debug(
         (float(r["best_candidate_score"]) for r in fresh_accepted if r.get("best_candidate_score") is not None),
         reverse=True,
     )
-    matches_strong_idea = sum(1 for r in rows if (r.get("best_candidate_score") or 0) >= thr_eff)
+    matches_strong_idea = sum(1 for r in rows if (r.get("best_candidate_score") or 0) >= base_for_display)
     matches_selected_n = sum(1 for r in rows if r.get("final_status") == "selected")
     matches_without_sendable = max(0, len(rows) - matches_selected_n)
     problem_status_rows = [r for r in rows if str(r.get("final_status")) not in {"selected", "no_candidates"}]
@@ -525,6 +587,14 @@ def compile_football_cycle_debug(
             "market_family": family_svc.get_market_family(sel),
             "why_selected_lines": human_sel_rs[:10],
         }
+        if finalist_send_meta and id(sel) in finalist_send_meta:
+            stier, slabel = finalist_send_meta[id(sel)]
+            selected_winner_detail["send_path"] = stier
+            selected_winner_detail["soft_label"] = slabel
+            if stier == "soft":
+                selected_winner_detail["live_note"] = (
+                    "Сигнал отправлен несмотря на недобор score (live ситуация)"
+                )
 
     def _prog_best_line(r: dict) -> str:
         nm = str(r.get("match_name") or "—")
@@ -562,8 +632,9 @@ def compile_football_cycle_debug(
         "main_blocker_ru": mb_ru,
         "min_signal_score": min_score,
         "min_signal_score_base": round(base_for_display, 2),
-        "min_signal_score_effective": round(thr_eff, 2),
+        "min_signal_score_effective": round(base_for_display, 2),
         "score_relief_note": score_relief_note,
+        "live_send_stats": live_send_stats or {},
         "football_live_quality_hint_ru": football_live_quality_hint_ru,
         "fresh_live_send_breakdown": fresh_live_send_breakdown,
         "why_no_signal_lines": why_no_signal_lines,
@@ -579,8 +650,9 @@ def compile_football_cycle_debug(
         "dry_run": dry_run,
         "min_signal_score": min_score,
         "min_signal_score_base": round(base_for_display, 2),
-        "min_signal_score_effective": round(thr_eff, 2),
+        "min_signal_score_effective": round(base_for_display, 2),
         "score_relief_note": score_relief_note,
+        "live_send_stats": live_send_stats or {},
         "live_quality_summary": live_quality_summary,
         "best_live_ideas_for_prog": best_live_ideas_for_prog,
         "why_no_signal_lines": why_no_signal_lines,
@@ -1763,31 +1835,52 @@ class AutoSignalService:
         report_after_integrity = int(post_integrity_count)
 
         min_score_base = float(settings.football_min_signal_score or 60.0)
-        relief_max = float(getattr(settings, "football_live_score_relief_max_points", 0.0) or 0.0)
+        single_gap_max = float(getattr(settings, "football_live_single_relief_max_gap", 2.0) or 2.0)
         scored_sorted = sorted(
             candidates_to_ingest,
             key=lambda c: float(c.signal_score or 0),
             reverse=True,
         )
-        effective_min, relief_note = _compute_football_live_effective_min_score(
-            scored_sorted,
-            min_score_base,
-            family_svc=family_svc,
-            relief_max=relief_max,
-        )
-        min_score = float(effective_min)
+        score_relief_note = "soft_sendable_live"
+        scored_tuples: list[tuple[ProviderSignalCandidate, str, str | None]] = []
+        for c in scored_sorted:
+            tier, sub = classify_live_sendable_candidate(
+                c, min_score_base, family_svc, single_relief_max_gap=single_gap_max
+            )
+            if tier != "reject":
+                scored_tuples.append((c, tier, sub))
+
+        live_send_stats = {
+            "normal_sendable": sum(1 for _, t, _ in scored_tuples if t == "normal"),
+            "soft_sendable_total": sum(1 for _, t, _ in scored_tuples if t == "soft"),
+            "soft_sendable_tight": sum(
+                1 for _, t, s in scored_tuples if t == "soft" and s == "soft_sendable"
+            ),
+            "soft_sendable_relief_single": sum(
+                1 for _, t, s in scored_tuples if t == "soft" and s == "soft_sendable_relief_single"
+            ),
+            "soft_sendable_dc": sum(
+                1 for _, t, s in scored_tuples if t == "soft" and s == "soft_sendable_dc"
+            ),
+        }
+
+        ordered = order_live_finalist_tuples(scored_tuples, min_score_base, family_svc)
+        finalists_pre_session = [c for c, _, _ in ordered]
+        n_after_min_score = len(finalists_pre_session)
+        session_dup_blocked = 0
+        send_meta_final: dict[int, tuple[str, str | None]] = {}
         logger.info(
-            "[FOOTBALL][LIVE_THRESHOLD] base=%s effective=%s relief_note=%s",
+            "[FOOTBALL][LIVE_THRESHOLD] base=%s single_relief_max_gap=%s stats=%s",
             min_score_base,
-            min_score,
-            relief_note,
+            single_gap_max,
+            live_send_stats,
         )
         for rank, c in enumerate(scored_sorted, start=1):
             fam = family_svc.get_market_family(c)
             is_corner_like = bool(family_svc.is_corner_market(c))
             fam_w = family_svc.family_priority_weight(fam)
             logger.info(
-                "[FOOTBALL][SCORING] rank=%s match=%s market_type=%s family=%s corners=%s family_w=%.1f score=%s min=%s (base=%s)",
+                "[FOOTBALL][SCORING] rank=%s match=%s market_type=%s family=%s corners=%s family_w=%.1f score=%s base=%s",
                 rank,
                 c.match.match_name,
                 c.market.market_type,
@@ -1795,18 +1888,18 @@ class AutoSignalService:
                 str(is_corner_like).lower(),
                 fam_w,
                 float(c.signal_score or 0),
-                min_score,
                 min_score_base,
             )
-        finalists_pre_session = [c for c in scored_sorted if float(c.signal_score or 0) >= min_score]
-        n_after_min_score = len(finalists_pre_session)
-        session_dup_blocked = 0
-        finalists = list(finalists_pre_session)
-        if not dry_run:
+        if dry_run:
+            kept_fin = [c for c, _, _ in ordered]
+            for c, t, s in ordered:
+                send_meta_final[id(c)] = (t, s)
+            finalists = _sort_finalists_main_market_first(kept_fin, family_svc)
+        else:
             ls_fin = FootballLiveSessionService()
             kept_fin: list[ProviderSignalCandidate] = []
             batch_seen: set[str] = set()
-            for c in finalists:
+            for c, t, s in ordered:
                 ik = build_live_idea_key(c)
                 if ik in batch_seen or ls_fin.has_idea(ik):
                     ls_fin.record_duplicate_idea_blocked(1)
@@ -1814,10 +1907,9 @@ class AutoSignalService:
                     continue
                 batch_seen.add(ik)
                 kept_fin.append(c)
+                send_meta_final[id(c)] = (t, s)
             session_dup_blocked = max(0, n_after_min_score - len(kept_fin))
-            finalists = kept_fin
-
-        finalists = _sort_finalists_main_market_first(finalists, family_svc)
+            finalists = _sort_finalists_main_market_first(kept_fin, family_svc)
 
         finalist_set = set(id(x) for x in finalists)
         for c in finalists:
@@ -1844,9 +1936,11 @@ class AutoSignalService:
             enriched_scored=enriched,
             finalists=finalists,
             finalists_pre_session=finalists_pre_session,
-            min_score=min_score,
+            min_score=min_score_base,
             min_score_base=min_score_base,
-            score_relief_note=relief_note,
+            score_relief_note=score_relief_note,
+            live_send_stats=live_send_stats,
+            finalist_send_meta=send_meta_final,
             family_svc=FootballSignalSendFilterService(),
             send_filter_stats=send_filter_result.stats if send_filter_result else None,
             integrity_dropped_checks=list(integrity_result.dropped_checks),
@@ -1897,9 +1991,15 @@ class AutoSignalService:
                 or "—"
             ),
             football_live_min_signal_score_base=float(lq_live.get("min_signal_score_base") or min_score_base),
-            football_live_min_signal_score_effective=float(lq_live.get("min_signal_score_effective") or min_score),
-            football_live_score_relief_note=str(lq_live.get("score_relief_note") or relief_note),
+            football_live_min_signal_score_effective=float(lq_live.get("min_signal_score_effective") or min_score_base),
+            football_live_score_relief_note=str(lq_live.get("score_relief_note") or score_relief_note),
             football_live_quality_hint_ru=str(lq_live.get("football_live_quality_hint_ru") or "—"),
+            football_live_normal_sendable_count=int((lq_live.get("live_send_stats") or {}).get("normal_sendable") or 0),
+            football_live_soft_sendable_count=int((lq_live.get("live_send_stats") or {}).get("soft_sendable_total") or 0),
+            football_live_soft_sendable_tight_count=int((lq_live.get("live_send_stats") or {}).get("soft_sendable_tight") or 0),
+            football_live_soft_sendable_relief_single_count=int(
+                (lq_live.get("live_send_stats") or {}).get("soft_sendable_relief_single") or 0
+            ),
         )
 
         if not finalists:
@@ -1908,7 +2008,7 @@ class AutoSignalService:
                 messages_sent_count=0,
                 football_sent_count=0,
                 last_delivery_reason="low_score",
-                note="no candidate passed football_min_signal_score",
+                note="no candidate passed live send gate (normal or soft)",
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -1995,7 +2095,9 @@ class AutoSignalService:
                 football_cycle_debug=cycle_dbg,
             )
 
-        candidates_to_ingest = finalists
+        candidates_to_ingest = [
+            _attach_football_live_send_meta(c, send_meta_final.get(id(c))) for c in finalists
+        ]
         relaxed_dedup = runtime_source_kind == "semi_live_manual"
 
         async with sessionmaker() as session:

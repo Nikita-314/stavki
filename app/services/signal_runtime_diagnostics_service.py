@@ -93,6 +93,10 @@ class SignalRuntimeDiagnosticsState:
     football_live_min_signal_score_effective: float | None = None
     football_live_score_relief_note: str | None = None
     football_live_quality_hint_ru: str | None = None
+    football_live_normal_sendable_count: int = 0
+    football_live_soft_sendable_count: int = 0
+    football_live_soft_sendable_tight_count: int = 0
+    football_live_soft_sendable_relief_single_count: int = 0
 
 
 _STATE = SignalRuntimeDiagnosticsState()
