@@ -460,3 +460,215 @@ async def _refresh_football_postmatch_summary(session: AsyncSession) -> None:
         football_postmatch_top_loss_reasons=" | ".join(f"{a}:{b}" for a, b in top) if top else None,
         football_postmatch_status_lines_json=json.dumps(blob, ensure_ascii=False)[:20000],
     )
+
+
+async def build_football_postmatch_verify_report(
+    session: AsyncSession,
+    *,
+    limit: int = 200,
+    detail_count: int = 10,
+    loss_lookback: int = 500,
+) -> str:
+    """Admin/debug: E2E snapshot of post-match reasons (football, settled)."""
+    from collections import Counter
+
+    from app.db.repositories.signal_repository import SignalRepository
+    from app.services.football_learning_service import FootballLearningService
+
+    srepo = SignalRepository()
+    fam_svc = FootballSignalSendFilterService()
+    lim = max(1, min(500, int(limit)))
+    sigs = await srepo.list_latest_settled_football_with_logs(session, limit=lim)
+    await _refresh_football_postmatch_summary(session)
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    loss_rows = await FootballLearningService().aggregate_outcome_reason_losses(
+        session, lookback=max(50, int(loss_lookback))
+    )
+
+    n_w = n_l = n_v = 0
+    all_codes: Counter[str] = Counter()
+    fam_for_unknown: Counter[str] = Counter()
+    fam_for_generic: Counter[str] = Counter()
+    n_empty = n_unknown = n_gen_other = 0
+    _GENERIC_CODES = frozenset(
+        {
+            "unknown_settlement_reason",
+            "won_other_valid_market",
+            "lost_other_valid_market",
+        }
+    )
+
+    def _cand(s: Signal, snap: dict[str, Any], ex: dict[str, Any]) -> ProviderSignalCandidate:
+        return ProviderSignalCandidate(
+            match=ProviderMatch(
+                external_event_id=str(s.event_external_id or ""),
+                sport=SportType.FOOTBALL,
+                tournament_name=s.tournament_name,
+                match_name=s.match_name,
+                home_team=s.home_team,
+                away_team=s.away_team,
+                event_start_at=s.event_start_at,
+                is_live=bool(s.is_live),
+                source_name="db",
+            ),
+            market=ProviderOddsMarket(
+                bookmaker=s.bookmaker,
+                market_type=s.market_type,
+                market_label=s.market_label,
+                selection=s.selection,
+                odds_value=s.odds_at_signal,
+                section_name=s.section_name,
+                subsection_name=s.subsection_name,
+            ),
+            min_entry_odds=s.min_entry_odds,
+            feature_snapshot_json=snap,
+            explanation_json=ex,
+        )
+
+    n_with_rows = 0
+    for s in sigs:
+        st = s.settlement
+        if not st:
+            continue
+        n_with_rows += 1
+        if st.result == BetResult.WIN:
+            n_w += 1
+        elif st.result == BetResult.LOSE:
+            n_l += 1
+        elif st.result == BetResult.VOID:
+            n_v += 1
+        pl0 = min(s.prediction_logs, key=lambda p: p.id) if s.prediction_logs else None
+        snap0: dict[str, Any] = dict(pl0.feature_snapshot_json or {}) if pl0 else {}
+        ex0: dict[str, Any] = dict(pl0.explanation_json or {}) if pl0 else {}
+        fam = fam_svc.get_market_family(_cand(s, snap0, ex0))
+        if not pl0:
+            n_empty += 1
+            c = "—"
+        else:
+            aud0 = snap0.get("football_outcome_audit")
+            if not isinstance(aud0, dict) or not (aud0.get("outcome_reason_code") or "").strip():
+                n_empty += 1
+                c = "—"
+            else:
+                c = str(aud0.get("outcome_reason_code"))
+                all_codes[c] += 1
+        if c == "—" or c == "unknown_settlement_reason":
+            fam_for_unknown[str(fam)] += 1
+        elif c in _GENERIC_CODES and c != "—":
+            fam_for_generic[str(fam)] += 1
+        if c == "unknown_settlement_reason":
+            n_unknown += 1
+        if c in _GENERIC_CODES:
+            n_gen_other += 1
+
+    _TARGET = (
+        "won_match_result",
+        "lost_match_result_wrong_side",
+        "won_total_over",
+        "won_total_under",
+        "lost_total_over_not_enough_goals",
+        "lost_total_under_too_many_goals",
+        "lost_late_comeback_bet",
+        "void_match",
+        "canceled_or_refunded",
+        "unknown_settlement_reason",
+    )
+    target_present = [t for t in _TARGET if t in all_codes]
+
+    lines_d: list[str] = []
+    dmax = max(0, min(int(detail_count), 25, len(sigs)))
+    for i in range(dmax):
+        s = sigs[i]
+        st = s.settlement
+        pl0 = min(s.prediction_logs, key=lambda p: p.id) if s.prediction_logs else None
+        snap0 = dict(pl0.feature_snapshot_json or {}) if pl0 else {}
+        ex0 = dict(pl0.explanation_json or {}) if pl0 else {}
+        aud0 = snap0.get("football_outcome_audit") if isinstance(snap0.get("football_outcome_audit"), dict) else {}
+        code = (aud0.get("outcome_reason_code") or "").strip() or "—"
+        tru = (aud0.get("outcome_reason_text_ru") or "—")[:220]
+        fam = fam_svc.get_market_family(_cand(s, snap0, ex0))
+        ssa = snap0.get("football_send_audit") if isinstance(snap0.get("football_send_audit"), dict) else {}
+        sp = ssa.get("send_path") or ex0.get("football_live_send_path") or "—"
+        lsn = ssa.get("live_sanity")
+        if not isinstance(lsn, dict) and isinstance(ex0.get("live_sanity"), dict):
+            lsn = ex0.get("live_sanity")
+        lshort = "—"
+        if isinstance(lsn, dict) and lsn:
+            lshort = str(
+                {k: lsn.get(k) for k in ("plausibility", "plausibility_score", "block_token", "code") if k in lsn}
+            )[:200]
+        bet = f"{s.market_type or ''} / {s.market_label or ''} / {s.selection or ''}"[:200]
+        why = ""
+        if code == "—":
+            why = "  «почему пусто»: " + (
+                "нет prediction_log"
+                if not pl0
+                else "сеттл до слоя, apply не писал, или исключение при apply"
+            )
+        lines_d.append(
+            f"{i + 1}) id={s.id}  {s.home_team} — {s.away_team}\n"
+            f"   fam={fam}  odds={s.odds_at_signal}  res={st.result.value if st else '—'}\n"
+            f"   bet: {bet}\n"
+            f"   code={code}{why}\n"
+            f"   RU: {tru}\n"
+            f"   send_path={sp}  live_sanity={lshort}\n"
+        )
+
+    def _pct(n: int, d: int) -> str:
+        if d <= 0:
+            return "n/a"
+        return f"{100.0 * n / d:.1f}%"
+
+    out: list[str] = [
+        "=== Football post-match verify (settled) ===",
+        f"Query: list_latest_settled_football limit={lim} → {len(sigs)} rows",
+        f"W/L/V (all in list): {n_w} / {n_l} / {n_v}",
+        f"Audit: empty/— {n_empty}  unknown {n_unknown}  generic* {n_gen_other}  "
+        f"(generic%={_pct(n_gen_other, n_with_rows)} of rows={n_with_rows})  codes: {sorted(_GENERIC_CODES)}",
+        "",
+        "— Diagnostics (refresh → окно 20) —",
+        f"n={diag.get('football_postmatch_settled_count')}",
+        f"W/L/V: {diag.get('football_postmatch_wins_last')}/{diag.get('football_postmatch_losses_last')}/{diag.get('football_postmatch_voids_last')}",
+        f"top loss: {diag.get('football_postmatch_top_loss_reasons') or '—'}",
+        "",
+        "— Learning aggregate_outcome_reason_losses —",
+    ]
+    if not loss_rows:
+        out.append(f"(0 codes in last {max(50, int(loss_lookback))} football LOSE, или нет LOSE)")
+    else:
+        for row in loss_rows[:20]:
+            out.append(f"  {row.get('outcome_reason_code')}: {row.get('count')}")
+        if len(loss_rows) > 20:
+            out.append(f"  … ещё коды: {len(loss_rows) - 20}")
+    if target_present:
+        out.extend(["", f"— Целевые коды в сэмпле: {', '.join(target_present)}", ""])
+    if all_codes:
+        out.extend(
+            [
+                "— Самые частые codes (только non-empty audit) —",
+                *[f"  {c}: {n}" for c, n in all_codes.most_common(20)],
+            ]
+        )
+    if fam_for_unknown:
+        out.extend(
+            [
+                "",
+                "— Когда code пуст/unknown: семьи (куда копать в классификатор) —",
+                *[f"  {a}: {b}" for a, b in fam_for_unknown.most_common(10)],
+            ]
+        )
+    if fam_for_generic and any(v for _, v in fam_for_generic.most_common(10)):
+        out.extend(
+            [
+                "",
+                "— Generic (won/lost other / unknown) по семьям —",
+                *[f"  {a}: {b}" for a, b in fam_for_generic.most_common(10)],
+            ]
+        )
+    if lines_d:
+        out.extend(["", f"— Примеры ({dmax} шт.) —", *lines_d])
+    else:
+        out.append("")
+        out.append("Settled футбольных сигналов в БД нет — после settle повтори команду.")
+
+    return "\n".join(out)

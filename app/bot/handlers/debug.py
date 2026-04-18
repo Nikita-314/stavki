@@ -29,7 +29,10 @@ from app.services.entry_service import EntryService
 from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
-from app.services.football_signal_outcome_reason_service import FootballSignalOutcomeReasonService
+from app.services.football_signal_outcome_reason_service import (
+    FootballSignalOutcomeReasonService,
+    build_football_postmatch_verify_report,
+)
 from app.services.settlement_service import SettlementService
 from app.services.result_ingestion_service import ResultIngestionService
 from app.schemas.event_result import EventResultInput
@@ -1711,6 +1714,24 @@ async def cmd_miss_signal(message: Message, sessionmaker: async_sessionmaker[Asy
             ]
         )
     )
+
+
+@router.message(Command("football_postmatch_verify"))
+async def cmd_football_postmatch_verify(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    parts = (message.text or "").split()
+    limit = 200
+    if len(parts) > 1:
+        try:
+            limit = int(parts[1])
+        except Exception:
+            await message.answer("Usage: /football_postmatch_verify [limit]\n limit 1..500, default 200")
+            return
+    async with sessionmaker() as session:
+        text = await build_football_postmatch_verify_report(session, limit=limit, detail_count=10)
+    await _answer_long_message(message, text)
 
 
 @router.message(Command("settle_signal"))
