@@ -54,7 +54,7 @@ async def main() -> None:
 
     res = await asyncio.wait_for(
         AutoSignalService().run_single_cycle(sessionmaker, bot, dry_run=False),
-        timeout=180,
+        timeout=240,
     )
     AutoSignalService().log_football_cycle_trace(res)
 
@@ -64,6 +64,7 @@ async def main() -> None:
     trace = d.get("combat_delivery_trace") or []
 
     agg = d.get("football_pipeline_aggregate") or {}
+    matches_after_freshness = int(agg.get("matches_after_freshness") or 0)
     matches_scored = [m for m in per if float(m.get("best_scored_candidate_score") or 0) > 0 or m.get("finalists_found_before_gate")]
 
     # One signal per match in trace (created rows)
@@ -75,6 +76,7 @@ async def main() -> None:
         "notifications_sent_count": res.notifications_sent_count,
         "message": res.message,
         "live_matches_total": fg.get("live_matches_total"),
+        "matches_after_freshness": matches_after_freshness,
         "matches_reaching_final_gate": fg.get("matches_reaching_final_gate"),
         "matches_blocked_by_final_gate": fg.get("matches_blocked_by_final_gate"),
         "matches_sent_after_final_gate": fg.get("matches_sent_after_final_gate"),

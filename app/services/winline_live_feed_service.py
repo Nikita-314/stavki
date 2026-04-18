@@ -12,6 +12,7 @@ import base64
 import gzip
 import logging
 import struct
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -158,6 +159,10 @@ async def winline_websocket_scan_accumulator(
     tmo = max(5.0, float(s.winline_live_recv_timeout_seconds or 30))
     nscan = int(prescan if prescan is not None else (s.winline_live_max_prescan or 200))
     acc = _Accum()
+    total_cap = max(45.0, float(s.winline_live_total_timeout_seconds or 180))
+    # Leave headroom for event.plus + bridge inside the outer wait_for(cap).
+    scan_wall = max(25.0, min(95.0, total_cap * 0.42))
+    t_wall0 = time.monotonic()
     try:
         async with websockets.connect(  # type: ignore[call-overload]
             s.winline_live_ws_url,
@@ -167,7 +172,14 @@ async def winline_websocket_scan_accumulator(
         ) as ws:
             for cmd in ("lang", "RU", "data", "WINLINE", "getdate"):
                 await ws.send(str(cmd))
-            for _ in range(nscan):
+            for i in range(nscan):
+                if time.monotonic() - t_wall0 > scan_wall:
+                    logger.info(
+                        "[FOOTBALL][WINLINE_LIVE] prescan_wall_budget_exhausted iter=%s budget_s=%.1f",
+                        i,
+                        scan_wall,
+                    )
+                    break
                 step, body = await _recv_gzip_step(ws, tmo)
                 if step == 16 and not acc.tips:
                     acc.tips = parse_menu_step16_tippeline(body)
@@ -254,19 +266,30 @@ class WinlineLiveFeedService:
         need = int(s.winline_live_event_plus_min_lines or 2)
         rounds = int(s.winline_live_event_plus_rounds or 2)
         if int(s.winline_live_event_plus_postscan or 0) > 0:
+            ev_plus_cap = max(14.0, min(36.0, 0.18 * float(s.winline_live_total_timeout_seconds or 180)))
+            post_n = min(int(s.winline_live_event_plus_postscan or 80), 45)
             for eid in pick[:rounds]:
                 n_here = sum(1 for x in acc.lines if int(x.get("idEvent") or 0) == int(eid))
                 if n_here >= need:
                     continue
                 try:
-                    extra = await _event_plus_lines_for_event(
-                        s,
-                        int(eid),
-                        tmo,
-                        int(s.winline_live_event_plus_postscan or 80),
+                    extra = await asyncio.wait_for(
+                        _event_plus_lines_for_event(
+                            s,
+                            int(eid),
+                            tmo,
+                            post_n,
+                        ),
+                        timeout=ev_plus_cap,
                     )
                     acc.lines.extend(extra)
-                except (TimeoutError, asyncio.TimeoutError, OSError) as e:
+                except asyncio.TimeoutError:
+                    logger.info(
+                        "[FOOTBALL][WINLINE_LIVE] event_plus_timeout eid=%s cap_s=%.1f",
+                        eid,
+                        ev_plus_cap,
+                    )
+                except (TimeoutError, OSError) as e:
                     logger.info("[FOOTBALL][WINLINE_LIVE] event_plus failed eid=%s: %s", eid, e)
                 except Exception:  # noqa: BLE001
                     logger.info("[FOOTBALL][WINLINE_LIVE] event_plus other_error eid=%s", eid, exc_info=True)

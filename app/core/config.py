@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     football_live_winline_primary: bool = True
     """When True, football `run_single_cycle` loads live from Winline WS first; The Odds API is optional."""
     winline_live_ws_url: str = "wss://wss.winline.ru/data_ng?client=newsite&nb=true"
-    winline_live_max_prescan: int = 320
+    winline_live_max_prescan: int = 100
     winline_live_catalog_max_prescan: int = 450
     """Extra prescan for debug catalog script (more WS step-4 messages)."""
     # 0 = do not cap football event count in one fetch (all detected football live ids in snapshot)
