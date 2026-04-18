@@ -275,6 +275,27 @@ def _format_signal_runtime_status_lines() -> list[str]:
     bn = diag.get("football_live_cycle_bottleneck") or "—"
     src_age_txt = _fmt_source_age_for_ui(diag.get("football_live_source_age_seconds"))
     ff_ru = _fmt_football_live_source_label_ru(diag)
+    if diag.get("football_last_combat_cycle_at"):
+        _csm = str(diag.get("football_last_combat_send_mode") or "none")
+        _csm_ru = {
+            "normal": "обычный (normal)",
+            "soft": "мягкий (soft)",
+            "mixed": "смешанный",
+            "none": "нет",
+        }.get(_csm, _csm)
+        combat_status_lines: list[str] = [
+            "— Последний боевой цикл —",
+            f"• Время: {diag.get('football_last_combat_cycle_at')}",
+            f"• Отправлено в Telegram: {int(diag.get('football_last_combat_messages_sent') or 0)}",
+            f"• Режим: {_csm_ru}",
+            f"• Главный блокер: {diag.get('football_last_combat_bottleneck_ru') or '—'} "
+            f"({diag.get('football_last_combat_bottleneck') or '—'})",
+        ]
+    else:
+        combat_status_lines = [
+            "— Последний боевой цикл —",
+            "• Пока нет зафиксированного боя: ▶️ Старт + live-цикл или ожидайте автоцикл.",
+        ]
     return [
         "📊 Статус сигналов",
         "",
@@ -305,6 +326,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• К пулу: soft relief (main, gap до 2): {diag.get('football_live_soft_sendable_relief_single_count') or 0}",
         f"• Схема порога: {diag.get('football_live_score_relief_note') or '—'}",
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
+        *combat_status_lines,
         "— Последняя запись (не dry-run) —",
         f"• Обычных сигналов записано в БД: {diag.get('football_last_cycle_ingest_normal') or 0}",
         f"• Мягко допущенных (soft) live в БД: {diag.get('football_last_cycle_ingest_soft') or 0}",
@@ -918,6 +940,33 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
                 "",
             ]
         )
+    d_combat = SignalRuntimeDiagnosticsService().get_state()
+    if d_combat.get("football_last_combat_cycle_at"):
+        _rsm = str(d_combat.get("football_last_combat_send_mode") or "none")
+        _rsm_ru = {
+            "normal": "обычный (normal)",
+            "soft": "мягкий (soft)",
+            "mixed": "смешанный",
+            "none": "нет",
+        }.get(_rsm, _rsm)
+        lines.extend(
+            [
+                "— Последний боевой цикл (не этот тест) —",
+                f"• Время: {d_combat.get('football_last_combat_cycle_at')}",
+                f"• Отправлено: {int(d_combat.get('football_last_combat_messages_sent') or 0)}",
+                f"• Режим: {_rsm_ru}",
+                f"• Главный блокер: {d_combat.get('football_last_combat_bottleneck_ru') or '—'}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "— Последний боевой цикл —",
+                "• Пока нет зафиксированного боя после рестарта процесса.",
+                "",
+            ]
+        )
     lines.extend(
         [
             "🎚 Память live-сессии (только если жмёте ▶️ Старт для боя):",
@@ -1225,7 +1274,7 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             f"• Provider: {res.source_name or '—'}",
             f"• HTTP: {res.last_live_http_status if res.last_live_http_status is not None else '—'}",
             f"• Auth (сырой код): {res.live_auth_status or '—'}",
-            f"• Dry run: да",
+            f"• Тестовый dry-run: {'да' if res.dry_run else 'нет'}",
             f"• Хост API: {_prog_netloc(res.endpoint)}",
         ]
     )

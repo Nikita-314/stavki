@@ -779,6 +779,10 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
     if msg == "football_live_session_inactive":
         return "blocked_no_live_session"
     if msg == "blocked_stale_manual_live_source" or rr == "blocked_stale_manual_live_source":
+        # If live API already failed (e.g. quota), that is the dominant operator-facing reason.
+        lauth = str((diag or {}).get("live_auth_status") or "").lower()
+        if lauth in ("unauthorized_quota", "out_of_usage_credits", "unauthorized"):
+            return "blocked_live_provider_auth_or_quota"
         return "blocked_stale_manual_live_source"
     if msg == "blocked_stale_live_source" or rr == "blocked_stale_live_source":
         return "blocked_stale_live_source"
@@ -824,11 +828,76 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
     return "blocked_unknown"
 
 
+def _combat_bottleneck_ru(token: str | None) -> str:
+    if not token or token == "—":
+        return "нет данных"
+    m = {
+        "blocked_paused": "контур на паузе",
+        "blocked_no_live_session": "live-сессия не запущена (нужен ▶️ Старт)",
+        "blocked_no_live_matches": "нет live-матчей футбола в выборке провайдера",
+        "blocked_send_filter": "все отсеяны фильтром отправки (live/семья/время)",
+        "blocked_integrity": "не прошли проверку целостности ставки",
+        "blocked_low_score": "score ниже порога",
+        "blocked_duplicate_idea": "повтор той же идеи в рамках live-сессии",
+        "blocked_dedup_db": "отсеяно дедупликацией в базе",
+        "blocked_football_disabled": "футбол выключен в настройках",
+        "blocked_sport_disabled": "источник отключён",
+        "blocked_provider_not_configured": "провайдер не настроен",
+        "blocked_non_real_source": "источник не считается боевым live",
+        "blocked_non_live_source": "источник не в режиме live",
+        "blocked_notify_config": "сигнал создан, но уведомление не ушло (чат/пауза)",
+        "blocked_fetch": "ошибка загрузки у провайдера",
+        "blocked_live_provider_auth_or_quota": "Live API: авторизация или квота",
+        "blocked_preview_only": "включён только preview в .env",
+        "ok_sent_telegram": "сообщение ушло в Telegram",
+        "dry_run_ok": "тестовый прогон",
+        "ok_no_signal_selected": "цикл завершён без выбранной ставки",
+        "blocked_unknown": "причина не классифицирована",
+        "blocked_stale_manual_live_source": "ручной live JSON слишком старый",
+        "blocked_stale_live_source": "снимок live устарел по задержке обработки",
+        "blocked_stale_live_events": "все live-матчи признаны протухшими",
+    }
+    return m.get(str(token), str(token).replace("_", " "))
+
+
+def _apply_last_combat_cycle_diagnostics(res: AutoSignalCycleResult) -> None:
+    if res.dry_run:
+        return
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    bn = str(
+        diag.get("football_live_cycle_bottleneck")
+        or _infer_football_live_cycle_bottleneck(res, diag)
+    )
+    dbg = res.football_cycle_debug or {}
+    lq = dbg.get("live_quality_summary") or {}
+    lss = lq.get("live_send_stats") or {}
+    sm = str(diag.get("football_last_cycle_send_mode") or "none")
+    SignalRuntimeDiagnosticsService().update(
+        football_last_combat_cycle_at=datetime.now(timezone.utc).isoformat(),
+        football_last_combat_messages_sent=int(res.notifications_sent_count or 0),
+        football_last_combat_created_signals=int(res.created_signals_count or 0),
+        football_last_combat_bottleneck=bn,
+        football_last_combat_bottleneck_ru=_combat_bottleneck_ru(bn),
+        football_last_combat_send_mode=sm,
+        football_last_combat_fresh_live_matches=int(
+            lq.get("fresh_live_matches") or diag.get("football_live_quality_fresh_matches") or 0
+        ),
+        football_last_combat_normal_sendable=int(lss.get("normal_sendable") or 0),
+        football_last_combat_soft_sendable_total=int(lss.get("soft_sendable_total") or 0),
+        football_last_combat_rejected_total=int(lss.get("rejected_total") or 0),
+        football_last_combat_session_idea_dedup=int(dbg.get("session_idea_dedup_this_cycle") or 0),
+        football_last_combat_db_dedup_skipped=int(diag.get("football_last_cycle_db_dedup_skipped") or 0),
+    )
+
+
 def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict) -> None:
     """Расширенный отчёт одного цикла live-контура (JSON в лог)."""
     snap = FootballLiveSessionService().snapshot()
     rem = FootballLiveSessionService().remaining_seconds()
     bn = diag.get("football_live_cycle_bottleneck") or _infer_football_live_cycle_bottleneck(res, diag)
+    dbg = res.football_cycle_debug or {}
+    lq = dbg.get("live_quality_summary") or {}
+    lss = lq.get("live_send_stats") or {}
     payload = {
         "session_active": snap.active,
         "session_started_at": snap.started_at.isoformat() if snap.started_at else None,
@@ -877,6 +946,9 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
         "last_send_mode": diag.get("football_last_cycle_send_mode"),
         "db_dedup_skipped_last_ingest": diag.get("football_last_cycle_db_dedup_skipped"),
         "post_selection_hint_ru": diag.get("football_live_post_selection_hint_ru"),
+        "fresh_live_matches": lq.get("fresh_live_matches"),
+        "live_send_stats": lss,
+        "session_idea_dedup_this_cycle": dbg.get("session_idea_dedup_this_cycle"),
     }
     try:
         logger.info("[FOOTBALL][LIVE_SESSION_REPORT] %s", json.dumps(payload, default=str, ensure_ascii=False)[:32000])
@@ -2441,6 +2513,7 @@ class AutoSignalService:
         diag = SignalRuntimeDiagnosticsService().get_state()
         bn = _infer_football_live_cycle_bottleneck(res, diag)
         SignalRuntimeDiagnosticsService().update(football_live_cycle_bottleneck=bn)
+        _apply_last_combat_cycle_diagnostics(res)
         _football_log_live_session_report(res=res, diag=SignalRuntimeDiagnosticsService().get_state())
 
     async def run_football_live_forever(
@@ -2484,6 +2557,7 @@ class AutoSignalService:
                     dcur = SignalRuntimeDiagnosticsService().get_state()
                     bn = _infer_football_live_cycle_bottleneck(cres, dcur)
                     diag_fn(football_live_cycle_bottleneck=bn)
+                    _apply_last_combat_cycle_diagnostics(cres)
                     _football_log_live_session_report(
                         res=cres, diag=SignalRuntimeDiagnosticsService().get_state()
                     )

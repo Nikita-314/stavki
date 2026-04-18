@@ -110,6 +110,19 @@ class SignalRuntimeDiagnosticsState:
     """DB dedup skips in the last ingest batch (non-dry)."""
     football_last_cycle_sent_traces_json: str | None = None
     """JSON array: per created signal, match, bet, score, path, gap, family, was_main, codes."""
+    football_last_combat_cycle_at: str | None = None
+    """ISO time of last non-dry football live cycle (combat or script)."""
+    football_last_combat_messages_sent: int = 0
+    football_last_combat_created_signals: int = 0
+    football_last_combat_bottleneck: str | None = None
+    football_last_combat_bottleneck_ru: str | None = None
+    football_last_combat_send_mode: str = "none"
+    football_last_combat_fresh_live_matches: int = 0
+    football_last_combat_normal_sendable: int = 0
+    football_last_combat_soft_sendable_total: int = 0
+    football_last_combat_rejected_total: int = 0
+    football_last_combat_session_idea_dedup: int = 0
+    football_last_combat_db_dedup_skipped: int = 0
 
 
 _STATE = SignalRuntimeDiagnosticsState()

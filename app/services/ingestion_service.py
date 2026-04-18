@@ -70,8 +70,15 @@ class IngestionService:
                 )
                 if existing is not None:
                     logger.info(
-                        "[FOOTBALL][DEDUP] reason=duplicate_in_db existing_signal_id=%s decision=blocked relaxed=%s",
+                        "[FOOTBALL][DEDUP] reason=duplicate_in_db existing_signal_id=%s event_external_id=%s "
+                        "market_type=%s selection=%s is_live=%s match_name=%s signaled_at=%s decision=blocked relaxed=%s",
                         existing.id,
+                        existing.event_external_id,
+                        existing.market_type,
+                        existing.selection,
+                        str(bool(existing.is_live)).lower(),
+                        existing.match_name,
+                        existing.signaled_at.isoformat() if existing.signaled_at else None,
                         str(relaxed).lower(),
                     )
                     skipped += 1
