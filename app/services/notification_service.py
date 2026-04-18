@@ -217,6 +217,12 @@ class NotificationService:
             getattr(getattr(report, "signal", None), "id", None),
             len(text),
         )
+        logger.info(
+            "[FOOTBALL][NOTIFY] NotificationService.send_signal_notification -> bot.send_message "
+            "(signal_id=%s chat_id=%s)",
+            getattr(getattr(report, "signal", None), "id", None),
+            chat_id,
+        )
         await bot.send_message(chat_id=chat_id, text=self._trim(text))
 
     async def send_result_notification(

@@ -237,6 +237,101 @@ def compile_football_cycle_debug(
     return debug
 
 
+def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict | None = None) -> str:
+    """Один доминирующий bottleneck за цикл (для статуса и логов)."""
+    msg = (res.message or "").strip().lower()
+    rr = (res.rejection_reason or "").strip().lower()
+    diag = diag or {}
+    if msg == "paused" or "paused" in rr:
+        return "blocked_paused"
+    if msg == "football_disabled" or "football_disabled" in rr:
+        return "blocked_football_disabled"
+    if msg.startswith("sport_disabled"):
+        return "blocked_sport_disabled"
+    if msg == "provider_not_configured":
+        return "blocked_provider_not_configured"
+    if msg == "football_live_session_inactive":
+        return "blocked_no_live_session"
+    if not res.fetch_ok and ("unauthorized" in rr or "quota" in rr or "live_unavailable" in rr):
+        return "blocked_live_provider_auth_or_quota"
+    if not res.fetch_ok:
+        return "blocked_fetch"
+    if msg == "non_live_source_blocked" or "non_real_source" in rr:
+        return "blocked_non_real_source"
+    if "non_live_source" in rr:
+        return "blocked_non_live_source"
+    if msg == "preview_only" or "preview_only" in rr:
+        return "blocked_preview_only"
+    if msg == "payload_is_not_dict":
+        return "blocked_bad_payload"
+    if res.preview_candidates == 0 and res.fetch_ok:
+        return "blocked_no_live_matches"
+    if (res.report_after_filter or 0) == 0 and (res.preview_candidates or 0) > 0:
+        return "blocked_send_filter"
+    if (res.report_after_integrity or 0) == 0 and (res.report_after_filter or 0) > 0:
+        return "blocked_integrity"
+    if (
+        int(diag.get("football_live_cycle_after_score") or 0) > 0
+        and int(diag.get("football_live_cycle_new_ideas_sendable") or 0) == 0
+        and int(diag.get("football_live_cycle_duplicate_ideas_blocked") or 0) > 0
+    ):
+        return "blocked_duplicate_idea"
+    low = msg in {"low_score", "dry_run_low_score"} or "low_score" in rr
+    if low:
+        return "blocked_low_score"
+    if msg == "dedup_blocked" or res.report_rejection_code == "blocked_by_dedup" or "dedup" in rr:
+        return "blocked_dedup_db"
+    if res.created_signals_count > 0 and res.notifications_sent_count == 0:
+        return "blocked_notify_config"
+    if msg == "ok" and res.notifications_sent_count > 0:
+        return "ok_sent_telegram"
+    if msg == "dry_run_ok":
+        return "dry_run_ok"
+    if msg == "ok":
+        return "ok_no_signal_selected"
+    return "blocked_unknown"
+
+
+def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict) -> None:
+    """Расширенный отчёт одного цикла live-контура (JSON в лог)."""
+    snap = FootballLiveSessionService().snapshot()
+    rem = FootballLiveSessionService().remaining_seconds()
+    bn = diag.get("football_live_cycle_bottleneck") or _infer_football_live_cycle_bottleneck(res, diag)
+    payload = {
+        "session_active": snap.active,
+        "session_started_at": snap.started_at.isoformat() if snap.started_at else None,
+        "session_expires_at": snap.expires_at.isoformat() if snap.expires_at else None,
+        "remaining_minutes": round(rem / 60.0, 2) if rem is not None else None,
+        "last_cycle_at": snap.last_cycle_at.isoformat() if snap.last_cycle_at else None,
+        "live_matches_found": diag.get("football_live_cycle_live_matches_found"),
+        "candidates_before_filter": diag.get("football_live_cycle_candidates_before_filter"),
+        "candidates_after_send_filter": diag.get("football_live_cycle_after_send_filter"),
+        "candidates_after_integrity": diag.get("football_live_cycle_after_integrity"),
+        "candidates_after_score": diag.get("football_live_cycle_after_score"),
+        "new_ideas_sendable": diag.get("football_live_cycle_new_ideas_sendable"),
+        "duplicate_ideas_blocked_session_total": snap.duplicate_ideas_blocked_session,
+        "duplicate_ideas_blocked_last_cycle": diag.get("football_live_cycle_duplicate_ideas_blocked"),
+        "db_signals_created_session": snap.signals_sent_in_session,
+        "telegram_messages_sent_session": snap.telegram_messages_sent_in_session,
+        "bottleneck": bn,
+        "dry_run": res.dry_run,
+        "provider": res.source_name,
+        "live_auth_status": res.live_auth_status,
+        "source_mode": diag.get("source_mode"),
+        "effective_source": diag.get("football_live_effective_source"),
+        "is_real_source": diag.get("is_real_source"),
+        "fetch_ok": res.fetch_ok,
+        "notifications_sent_count": res.notifications_sent_count,
+        "created_signals_count": res.created_signals_count,
+        "last_notify_path": diag.get("football_live_last_notify_path"),
+        "last_delivery_reason": diag.get("last_delivery_reason"),
+    }
+    try:
+        logger.info("[FOOTBALL][LIVE_SESSION_REPORT] %s", json.dumps(payload, default=str, ensure_ascii=False)[:32000])
+    except Exception:
+        logger.info("[FOOTBALL][LIVE_SESSION_REPORT] (serialization failed)")
+
+
 def _football_top_matches_for_telegram(rows: list[dict], *, limit: int) -> list[dict]:
     def sort_key(r: dict) -> tuple[int, float, str]:
         status = r.get("final_status") or ""
@@ -433,6 +528,14 @@ class AutoSignalService:
                     last_fetch_status="football_live_session_inactive",
                     last_delivery_reason="football_live_session_inactive",
                     note="Нажмите ▶️ Старт для запуска 15-минутной live-сессии",
+                    football_live_cycle_bottleneck="blocked_no_live_session",
+                    football_live_cycle_candidates_before_filter=0,
+                    football_live_cycle_after_send_filter=0,
+                    football_live_cycle_after_integrity=0,
+                    football_live_cycle_after_score=0,
+                    football_live_cycle_new_ideas_sendable=0,
+                    football_live_cycle_duplicate_ideas_blocked=0,
+                    football_live_cycle_live_matches_found=0,
                 )
                 return AutoSignalCycleResult(
                     endpoint=getattr(config, "base_url", None),
@@ -453,6 +556,18 @@ class AutoSignalService:
 
         logger.info("[FOOTBALL] fetch started")
         logger.info("[FOOTBALL] fetch source=%s endpoint=%s", self._detect_provider_name(settings), config.base_url)
+        diagnostics.update(
+            football_live_cycle_live_matches_found=0,
+            football_live_cycle_candidates_before_filter=0,
+            football_live_cycle_after_send_filter=0,
+            football_live_cycle_after_integrity=0,
+            football_live_cycle_after_score=0,
+            football_live_cycle_new_ideas_sendable=0,
+            football_live_cycle_duplicate_ideas_blocked=0,
+            football_live_cycle_bottleneck=None,
+            football_live_last_notify_path=None,
+            football_live_effective_source=None,
+        )
         fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
         live_auth_status = self._render_live_auth_status(fetch_res.auth_status, fetch_res.response_body_snippet)
         diagnostics.update(
@@ -873,10 +988,17 @@ class AutoSignalService:
             ]
         )
         diagnostics.update(
-            football_after_filter_count=len(candidates_to_ingest),
+            football_after_filter_count=post_send_filter_count,
             football_after_integrity_count=len(candidates_to_ingest),
             dropped_invalid_market_mapping_count=invalid_market_drops,
             dropped_invalid_total_scope_count=invalid_total_scope_drops,
+            football_live_cycle_candidates_before_filter=preview_candidates,
+            football_live_cycle_after_send_filter=post_send_filter_count,
+            football_live_cycle_after_integrity=len(candidates_to_ingest),
+            football_live_cycle_live_matches_found=(
+                int(send_filter_result.stats.live_matches) if send_filter_result is not None else 0
+            ),
+            football_live_effective_source=f"{source_name}:{source_kind}",
         )
         if invalid_market_drops:
             logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_market_mapping=%s", invalid_market_drops)
@@ -892,7 +1014,7 @@ class AutoSignalService:
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
-                football_after_filter_count=0,
+                football_after_filter_count=post_send_filter_count,
                 football_after_integrity_count=0,
                 football_sent_count=0,
                 last_delivery_reason=(
@@ -1057,6 +1179,8 @@ class AutoSignalService:
                 min_score,
             )
         finalists = [c for c in scored_sorted if float(c.signal_score or 0) >= min_score]
+        n_after_min_score = len(finalists)
+        session_dup_blocked = 0
         if not dry_run:
             ls_fin = FootballLiveSessionService()
             kept_fin: list[ProviderSignalCandidate] = []
@@ -1069,6 +1193,7 @@ class AutoSignalService:
                     continue
                 batch_seen.add(ik)
                 kept_fin.append(c)
+            session_dup_blocked = max(0, n_after_min_score - len(kept_fin))
             finalists = kept_fin
 
         finalist_set = set(id(x) for x in finalists)
@@ -1086,7 +1211,7 @@ class AutoSignalService:
                     float(c.signal_score or 0),
                 )
 
-        report_after_scoring = len(finalists)
+        report_after_scoring = n_after_min_score
 
         cycle_dbg = compile_football_cycle_debug(
             fb_preview=fb_preview,
@@ -1132,6 +1257,9 @@ class AutoSignalService:
             football_live_fields_in_last_cycle=bool(live_fields_seen),
             football_injuries_data_available=False,
             football_line_movement_available=False,
+            football_live_cycle_after_score=n_after_min_score,
+            football_live_cycle_new_ideas_sendable=len(finalists),
+            football_live_cycle_duplicate_ideas_blocked=session_dup_blocked,
         )
 
         if not finalists:
@@ -1170,7 +1298,7 @@ class AutoSignalService:
                 report_candidates=report_candidates,
                 report_after_filter=report_after_filter,
                 report_after_integrity=report_after_integrity,
-                report_after_scoring=0,
+                report_after_scoring=n_after_min_score,
                 report_final_signal="НЕТ",
                 report_rejection_code="low_score",
                 report_selected_reason_codes=codes,
@@ -1255,9 +1383,16 @@ class AutoSignalService:
                     sent = await orch.notify_signal_if_configured(session2, bot, signal_id)
                 if sent:
                     notifications_sent_count += 1
+                    FootballLiveSessionService().record_telegram_message_sent(1)
             except Exception:
                 logger.exception("Auto signal notification failed for signal_id=%s", signal_id)
         logger.info("[FOOTBALL] messages sent: %s", notifications_sent_count)
+        if notifications_sent_count:
+            diagnostics.update(football_live_last_notify_path="NotificationService.send_signal_notification")
+        elif ingest_res.created_signal_ids:
+            diagnostics.update(football_live_last_notify_path="notify_skipped_see_orchestration_logs")
+        else:
+            diagnostics.update(football_live_last_notify_path=None)
 
         if ingest_res.created_signals == 0 and finalists and int(ingest_res.skipped_candidates) > 0:
             diagnostics.update(
@@ -1359,6 +1494,12 @@ class AutoSignalService:
             football_cycle_debug=cycle_dbg,
         )
 
+    def log_football_cycle_trace(self, res: AutoSignalCycleResult) -> None:
+        diag = SignalRuntimeDiagnosticsService().get_state()
+        bn = _infer_football_live_cycle_bottleneck(res, diag)
+        SignalRuntimeDiagnosticsService().update(football_live_cycle_bottleneck=bn)
+        _football_log_live_session_report(res=res, diag=SignalRuntimeDiagnosticsService().get_state())
+
     async def run_football_live_forever(
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
@@ -1375,36 +1516,58 @@ class AutoSignalService:
                 sess.expire_if_needed()
                 diag_fn = SignalRuntimeDiagnosticsService().update
                 if sess.is_active():
-                    await self.run_single_cycle(sessionmaker, bot, dry_run=False)
+                    cres = await self.run_single_cycle(sessionmaker, bot, dry_run=False)
                     snap = sess.snapshot()
                     rem = sess.remaining_seconds()
                     diag_fn(
                         football_live_session_active=snap.active,
+                        football_live_session_started_at=(
+                            snap.started_at.isoformat() if snap.started_at else None
+                        ),
                         football_live_session_expires_at=(
                             snap.expires_at.isoformat() if snap.expires_at else None
+                        ),
+                        football_live_session_last_cycle_at=(
+                            snap.last_cycle_at.isoformat() if snap.last_cycle_at else None
                         ),
                         football_live_session_remaining_minutes=(
                             (rem / 60.0) if rem is not None else None
                         ),
                         football_live_signals_sent_session=snap.signals_sent_in_session,
+                        football_live_telegram_sent_session=snap.telegram_messages_sent_in_session,
                         football_live_duplicate_ideas_blocked=snap.duplicate_ideas_blocked_session,
                         football_live_sent_ideas_count=snap.sent_idea_keys_count,
                     )
+                    dcur = SignalRuntimeDiagnosticsService().get_state()
+                    bn = _infer_football_live_cycle_bottleneck(cres, dcur)
+                    diag_fn(football_live_cycle_bottleneck=bn)
+                    _football_log_live_session_report(
+                        res=cres, diag=SignalRuntimeDiagnosticsService().get_state()
+                    )
                     logger.info(
-                        "[FOOTBALL][LIVE_LOOP] cycle done signals_sent_session=%s dup_blocked=%s ideas=%s remaining_min=%s",
+                        "[FOOTBALL][LIVE_LOOP] cycle done signals_sent_session=%s telegram_sent=%s dup_blocked=%s ideas=%s remaining_min=%s bottleneck=%s",
                         snap.signals_sent_in_session,
+                        snap.telegram_messages_sent_in_session,
                         snap.duplicate_ideas_blocked_session,
                         snap.sent_idea_keys_count,
                         round((rem or 0) / 60.0, 2) if rem is not None else None,
+                        bn,
                     )
                     sleep_time = poll_sleep
                 else:
                     snap_idle = sess.snapshot()
                     diag_fn(
                         football_live_session_active=False,
+                        football_live_session_started_at=(
+                            snap_idle.started_at.isoformat() if snap_idle.started_at else None
+                        ),
                         football_live_session_expires_at=None,
+                        football_live_session_last_cycle_at=(
+                            snap_idle.last_cycle_at.isoformat() if snap_idle.last_cycle_at else None
+                        ),
                         football_live_session_remaining_minutes=None,
                         football_live_signals_sent_session=snap_idle.signals_sent_in_session,
+                        football_live_telegram_sent_session=snap_idle.telegram_messages_sent_in_session,
                         football_live_duplicate_ideas_blocked=snap_idle.duplicate_ideas_blocked_session,
                         football_live_sent_ideas_count=snap_idle.sent_idea_keys_count,
                     )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +21,8 @@ from app.services.result_ingestion_service import ResultIngestionService
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_service import SignalService
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestrationService:
@@ -66,10 +70,14 @@ class OrchestrationService:
     async def notify_signal_if_configured(self, session: AsyncSession, bot, signal_id: int) -> bool:
         settings = get_settings()
         if settings.signal_chat_id is None:
+            logger.info(
+                "[FOOTBALL][NOTIFY] skip OrchestrationService.notify_signal_if_configured: signal_chat_id not set"
+            )
             return False
         report = await AnalyticsService().get_signal_report(session, signal_id)
         runtime = SignalRuntimeSettingsService()
         if runtime.is_paused():
+            logger.info("[FOOTBALL][NOTIFY] skip notify_signal_if_configured: runtime paused")
             return False
         signal_sport = getattr(getattr(report, "signal", None), "sport", None)
         if signal_sport is not None and not runtime.is_sport_enabled(signal_sport):

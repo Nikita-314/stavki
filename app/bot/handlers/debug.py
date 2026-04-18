@@ -235,8 +235,34 @@ def _format_signal_runtime_status_lines() -> list[str]:
     if last_fetch == "fallback_manual_payload" and diag.get("last_error"):
         last_fetch = f"{diag.get('last_error')} -> fallback"
     delivery_reason = diag.get("last_delivery_reason") or diag.get("note") or "—"
+    rem_m = diag.get("football_live_session_remaining_minutes")
+    rem_txt = f"{round(float(rem_m), 1)}" if rem_m is not None else "—"
+    last_cy = diag.get("football_live_session_last_cycle_at") or "—"
+    live_m = diag.get("football_live_cycle_live_matches_found")
+    if live_m is None:
+        live_m = diag.get("live_matches_count") or 0
+    new_ideas = diag.get("football_live_cycle_new_ideas_sendable")
+    if new_ideas is None:
+        new_ideas = 0
+    started_s = diag.get("football_live_session_started_at") or "—"
+    expires_s = diag.get("football_live_session_expires_at") or "—"
+    bn = diag.get("football_live_cycle_bottleneck") or "—"
     return [
         "📊 Статус сигналов",
+        "",
+        "⚽ Football live-сессия",
+        f"• Активна: {_fmt_yes_no(bool(diag.get('football_live_session_active')))}",
+        f"• Старт: {started_s}",
+        f"• Истекает: {expires_s}",
+        f"• Осталось: {rem_txt} мин",
+        f"• Live-матчей (последний цикл): {live_m}",
+        f"• Новых идей к отправке (последний цикл): {new_ideas}",
+        f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
+        f"• Отправлено в Telegram (сессия): {diag.get('football_live_telegram_sent_session') or 0}",
+        f"• Записано сигналов в БД (сессия): {diag.get('football_live_signals_sent_session') or 0}",
+        f"• Последний цикл: {last_cy}",
+        f"• Узкое место (последний цикл): {bn}",
+        "",
         f"▶️ Режим: {'запущен' if not state.get('paused') else 'остановлен'}",
         f"⚽ Футбол: {'включён' if state.get('football_enabled') else 'выключен'}",
         f"🎮 CS2: {'включён' if state.get('cs2_enabled') else 'выключен'}",
@@ -269,16 +295,8 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🧭 Почему выбран матч: {diag.get('selected_match_reason') or '—'}",
         f"⚽ football_sent: {diag.get('football_sent_count') or 0}",
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
-        f"📨 Отправлено: {diag.get('messages_sent_count') or 0}",
+        f"📨 Отправлено (цикл→канал): {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {delivery_reason}",
-        "",
-        "— Football live-сессия (▶️ Старт) —",
-        f"🟢 Активна: {_fmt_yes_no(bool(diag.get('football_live_session_active')))}",
-        f"⏱ До конца (мин): {round(diag.get('football_live_session_remaining_minutes'), 2) if diag.get('football_live_session_remaining_minutes') is not None else '—'}",
-        f"🔔 Истекает: {diag.get('football_live_session_expires_at') or '—'}",
-        f"📤 Сигналов в сессии: {diag.get('football_live_signals_sent_session') or 0}",
-        f"🧱 Повтор идей отсеяно: {diag.get('football_live_duplicate_ideas_blocked') or 0}",
-        f"🧩 Идей в памяти сессии: {diag.get('football_live_sent_ideas_count') or 0}",
         "",
         "— Аналитика и обучение (флаги, без выдуманных данных) —",
         f"Сбор признаков в снимке: {_fmt_yes_no(bool(diag.get('football_analytics_enabled')))}",
@@ -582,7 +600,8 @@ async def cmd_signal_pause(message: Message) -> None:
     FootballLiveSessionService().stop_session(manual=True)
     SignalRuntimeSettingsService().pause()
     await message.answer(
-        "⏸ Футбольная live-сессия остановлена.\nНовые циклы не запускаются.",
+        "⏸ Футбольная live-сессия остановлена.\n"
+        "Live-only режим остаётся политикой контура, но новые live-циклы не запускаются, пока снова не нажмёте ▶️ Старт.",
         reply_markup=get_signal_control_keyboard(),
     )
 
@@ -599,11 +618,13 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
     dm = int(settings.football_live_session_duration_minutes or 15)
     FootballLiveSessionService().start_session(duration_minutes=dm)
     SignalRuntimeSettingsService().start()
-    await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=False)
+    cres = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=False)
+    AutoSignalService().log_football_cycle_trace(cres)
     await message.answer(
-        f"▶️ Футбольная live-сессия запущена на {dm} минут.\n"
-        "Анализируются только матчи с признаком live.\n"
-        "Повтор одной и той же идеи по матчу блокируется до следующего запуска сессии.",
+        f"▶️ Футбольная live-сессия запущена на {dm} минут (истекает по таймеру).\n"
+        "Live-only: в контуре только матчи с признаком live, prematch не отправляется.\n"
+        "Повтор той же идеи по матчу в рамках сессии блокируется; другая идея по тому же матчу — разрешена.\n"
+        "Первый цикл уже выполнен — детали в логах [FOOTBALL][LIVE_SESSION_REPORT].",
         reply_markup=get_signal_control_keyboard(),
     )
 
@@ -706,6 +727,32 @@ def _humanize_rejection_for_owner(raw: str | None) -> str:
     return raw
 
 
+def _humanize_live_bottleneck_ru(token: str | None) -> str:
+    if not token or token == "—":
+        return "нет данных"
+    m = {
+        "blocked_paused": "контур на паузе",
+        "blocked_no_live_session": "live-сессия не запущена (для боя нужен ▶️ Старт)",
+        "blocked_no_live_matches": "нет live-матчей футбола в выборке провайдера",
+        "blocked_send_filter": "все отсеяны фильтром отправки (live/семья/время)",
+        "blocked_integrity": "не прошли проверку целостности ставки",
+        "blocked_low_score": "score ниже порога",
+        "blocked_duplicate_idea": "повтор той же идеи в рамках live-сессии",
+        "blocked_dedup_db": "отсеяно дедупликацией в базе",
+        "blocked_non_real_source": "источник не считается боевым live",
+        "blocked_non_live_source": "источник не в режиме live",
+        "blocked_notify_config": "сигнал создан, но уведомление не ушло (чат/пауза)",
+        "blocked_fetch": "ошибка загрузки у провайдера",
+        "blocked_live_provider_auth_or_quota": "Live API: авторизация или квота",
+        "blocked_preview_only": "включён только preview в .env",
+        "ok_sent_telegram": "сообщение ушло в Telegram",
+        "dry_run_ok": "тестовый прогон: сигнал был бы выбран",
+        "ok_no_signal_selected": "цикл завершён без выбранной ставки",
+        "blocked_unknown": "причина не классифицирована",
+    }
+    return m.get(token, token.replace("_", " "))
+
+
 def _humanize_status_token(token: str | None) -> str:
     if not token:
         return ""
@@ -778,33 +825,54 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
     if dbg.get("pipeline_live_only"):
         lines.extend(["📍 Политика контура: только live-матчи (prematch исключён).", ""])
 
+    live_payload_yes = bool(matches_found) or bool(cand_total)
+    lines.extend(
+        [
+            "📌 Live сейчас (прогон не зависит от ▶️ Старт):",
+            f"• Live-матчи в данных: {'да' if live_payload_yes else 'нет'}",
+            f"• Уникальных live-матчей (оценка): {matches_found}",
+            f"• Кандидатов после live-only отбора: {cand_total if cand_total is not None else '—'}",
+            "",
+        ]
+    )
+
     from app.services.football_live_session_service import FootballLiveSessionService as _Fls
 
     _snap = _Fls().snapshot()
     _rem = _Fls().remaining_seconds()
     lines.extend(
         [
-            "🎚 Live-сессия (память процесса):",
+            "🎚 Память live-сессии (только если жмёте ▶️ Старт для боя):",
             f"• Активна: {'да' if _snap.active else 'нет'}",
             f"• Осталось мин: {round(_rem / 60.0, 1) if _rem is not None and _snap.active else '—'}",
-            f"• Сигналов записано в БД за сессию: {_snap.signals_sent_in_session}",
+            f"• В БД за сессию: {_snap.signals_sent_in_session}",
+            f"• В Telegram за сессию: {_snap.telegram_messages_sent_in_session}",
             f"• Повтор идей отсеяно (сессия): {_snap.duplicate_ideas_blocked_session}",
-            f"• Уникальных идей отправлено: {_snap.sent_idea_keys_count}",
+            f"• Уникальных идей в памяти сессии: {_snap.sent_idea_keys_count}",
             "",
         ]
     )
+
+    eff = diag.get("football_live_effective_source") or used_source
+    sm = (diag.get("source_mode") or "").lower()
+    if sm == "semi_live_manual":
+        lines.append("⚠️ Эффективный источник: semi_live_manual (контролируемый JSON, не маскируем под боевой live).")
+        lines.append("")
+    elif sm and sm != "live" and not res.fallback_used:
+        lines.append(f"⚠️ Режим источника: {sm} (не чистый live).")
+        lines.append("")
 
     lines.extend(
         [
             "📡 Источник:",
             f"• Режим: {mode_line}",
             f"• Статус Live API: {live_api_human}",
-            f"• Фактически использованы данные: {used_source}",
+            f"• Эффективный источник данных: {eff}",
             "",
-            "📊 Сводка:",
+            "📊 Сводка (live-only цепочка):",
             f"• Матчей найдено: {matches_found}",
-            f"• Кандидатов всего: {cand_total}",
-            f"• После фильтра кандидатов: {after_filter if after_filter is not None else '—'}",
+            f"• Кандидатов до фильтра отправки: {cand_total}",
+            f"• После фильтра отправки: {after_filter if after_filter is not None else '—'}",
             f"• После проверки целостности: {after_integrity if after_integrity is not None else '—'}",
             f"• После порога score: {after_score if after_score is not None else '—'}",
             "",
@@ -833,6 +901,9 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         if bh:
             primary_reason = _humanize_status_token(str(bh))
     lines.append(f"• Комментарий: {primary_reason}")
+    bn = diag.get("football_live_cycle_bottleneck")
+    if bn:
+        lines.append(f"• Узкое место (цикл): {_humanize_live_bottleneck_ru(str(bn))}")
 
     min_score = dbg.get("min_signal_score")
     if min_score is not None:
@@ -914,16 +985,19 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
                     best_sc = float(sc)
                     nearest = row
         if nearest and nearest.get("match_name"):
-            lines.append(f"• Ближайший по score: {nearest.get('match_name')}")
+            lines.append(f"• Лучший матч по score: {nearest.get('match_name')}")
             lines.append(f"• Его score: {nearest.get('best_candidate_score')}")
+            st = nearest.get("final_status")
+            if st:
+                lines.append(f"• Почему не ушёл: {_humanize_status_token(str(st))}")
             if min_score is not None and best_sc is not None:
                 gap = float(min_score) - float(best_sc)
                 if gap > 0:
                     lines.append(f"• До порога не хватило: ~{gap:.1f}")
         elif (cand_total == 0 or cand_total is None) and not dbg.get("matches"):
-            lines.append("• Ближайший кандидат: не сформирован")
+            lines.append("• Лучший кандидат: не сформирован (нет live-данных по футболу)")
         if res.report_dedup_skipped:
-            lines.append(f"• Dedup отклонил кандидатов: {res.report_dedup_skipped}")
+            lines.append(f"• Dedup в БД отклонил кандидатов: {res.report_dedup_skipped}")
         if res.dry_run:
             lines.append("")
             lines.append("ℹ️ Прогон тестовый: канал и БД не затрагиваются.")
@@ -992,6 +1066,7 @@ async def cmd_auto_signal_run_once(message: Message, sessionmaker: async_session
         return
 
     res = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=True)
+    AutoSignalService().log_football_cycle_trace(res)
     await message.answer(
         _format_football_prog_run_report(res),
         reply_markup=get_signal_control_keyboard(),

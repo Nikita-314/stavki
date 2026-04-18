@@ -57,11 +57,24 @@ class SignalRuntimeDiagnosticsState:
     football_injuries_data_available: bool = False
     football_line_movement_available: bool = False
     football_live_session_active: bool = False
+    football_live_session_started_at: str | None = None
     football_live_session_expires_at: str | None = None
+    football_live_session_last_cycle_at: str | None = None
     football_live_session_remaining_minutes: float | None = None
     football_live_signals_sent_session: int = 0
+    football_live_telegram_sent_session: int = 0
     football_live_duplicate_ideas_blocked: int = 0
     football_live_sent_ideas_count: int = 0
+    football_live_cycle_live_matches_found: int = 0
+    football_live_cycle_candidates_before_filter: int = 0
+    football_live_cycle_after_send_filter: int = 0
+    football_live_cycle_after_integrity: int = 0
+    football_live_cycle_after_score: int = 0
+    football_live_cycle_new_ideas_sendable: int = 0
+    football_live_cycle_duplicate_ideas_blocked: int = 0
+    football_live_cycle_bottleneck: str | None = None
+    football_live_effective_source: str | None = None
+    football_live_last_notify_path: str | None = None
 
 
 _STATE = SignalRuntimeDiagnosticsState()

@@ -17,6 +17,9 @@ class FootballLiveSessionSnapshot:
     stopped_manually: bool = False
     last_cycle_at: datetime | None = None
     signals_sent_in_session: int = 0
+    """Сколько сигналов записано в БД за сессию (ingest)."""
+    telegram_messages_sent_in_session: int = 0
+    """Сколько раз реально ушло сообщение в Telegram за сессию."""
     duplicate_ideas_blocked_session: int = 0
     sent_idea_keys_count: int = 0
 
@@ -29,6 +32,7 @@ _DURATION_MINUTES = 15
 _STOPPED_MANUALLY = False
 _LAST_CYCLE_AT: datetime | None = None
 _SIGNALS_SENT = 0
+_TELEGRAM_SENT = 0
 _DUP_BLOCKED = 0
 _SENT_IDEA_KEYS: set[str] = set()
 
@@ -50,6 +54,7 @@ class FootballLiveSessionService:
                 stopped_manually=_STOPPED_MANUALLY,
                 last_cycle_at=_LAST_CYCLE_AT,
                 signals_sent_in_session=_SIGNALS_SENT,
+                telegram_messages_sent_in_session=_TELEGRAM_SENT,
                 duplicate_ideas_blocked_session=_DUP_BLOCKED,
                 sent_idea_keys_count=len(_SENT_IDEA_KEYS),
             )
@@ -91,7 +96,7 @@ class FootballLiveSessionService:
     def start_session(self, *, duration_minutes: int | None = None) -> FootballLiveSessionSnapshot:
         global _ACTIVE, _STARTED_AT, _EXPIRES_AT, _DURATION_MINUTES
         global _STOPPED_MANUALLY, _LAST_CYCLE_AT
-        global _SIGNALS_SENT, _DUP_BLOCKED
+        global _SIGNALS_SENT, _TELEGRAM_SENT, _DUP_BLOCKED
         global _SENT_IDEA_KEYS
         with _LOCK:
             dm = int(duration_minutes if duration_minutes is not None else _DURATION_MINUTES)
@@ -104,6 +109,7 @@ class FootballLiveSessionService:
             _EXPIRES_AT = now + timedelta(minutes=dm)
             _LAST_CYCLE_AT = None
             _SIGNALS_SENT = 0
+            _TELEGRAM_SENT = 0
             _DUP_BLOCKED = 0
             _SENT_IDEA_KEYS = set()
             logger.info("[FOOTBALL][LIVE_SESSION] started expires_at=%s duration_min=%s", _EXPIRES_AT.isoformat(), dm)
@@ -136,16 +142,33 @@ class FootballLiveSessionService:
         with _LOCK:
             return idea_key in _SENT_IDEA_KEYS
 
-    def record_notification_sent(self, n: int = 1) -> None:
-        global _SIGNALS_SENT
+    def record_telegram_message_sent(self, n: int = 1) -> None:
+        global _TELEGRAM_SENT
         with _LOCK:
-            _SIGNALS_SENT += max(0, int(n))
+            _TELEGRAM_SENT += max(0, int(n))
 
     def record_signals_created(self, n: int) -> None:
         """Сигналов записано в БД за текущую live-сессию (устойчивее чем только notify)."""
         global _SIGNALS_SENT
         with _LOCK:
             _SIGNALS_SENT += max(0, int(n))
+
+
+def reset_live_session_for_tests() -> None:
+    """Сброс процесс-local состояния (только тесты / локальные демо)."""
+    global _ACTIVE, _STARTED_AT, _EXPIRES_AT, _DURATION_MINUTES
+    global _STOPPED_MANUALLY, _LAST_CYCLE_AT, _SIGNALS_SENT, _TELEGRAM_SENT, _DUP_BLOCKED, _SENT_IDEA_KEYS
+    with _LOCK:
+        _ACTIVE = False
+        _STARTED_AT = None
+        _EXPIRES_AT = None
+        _DURATION_MINUTES = 15
+        _STOPPED_MANUALLY = False
+        _LAST_CYCLE_AT = None
+        _SIGNALS_SENT = 0
+        _TELEGRAM_SENT = 0
+        _DUP_BLOCKED = 0
+        _SENT_IDEA_KEYS = set()
 
 
 def build_live_idea_key(candidate) -> str:
