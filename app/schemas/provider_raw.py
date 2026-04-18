@@ -16,6 +16,10 @@ class RawEventItem(BaseModel):
     away_team: str
     event_start_at: datetime | None = None
     is_live: bool = False
+    # Winline LIVE binary: match clock and scheduled kickoff are separate; used for fresh/live checks
+    winline_time: str | None = None
+    winline_source_time: str | None = None
+    winline_numer: int | None = None
     raw_json: dict[str, Any] | None = None
 
 

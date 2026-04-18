@@ -152,6 +152,9 @@ class WinlineRawLineBridgeService:
                     "away_team": away_team,
                     "event_start_at": self._normalize_dt(event.get("date")),
                     "is_live": bool(event.get("isLive", False)),
+                    "winline_time": str(event.get("time") or "") or None,
+                    "winline_source_time": str(event.get("sourceTime") or "") or None,
+                    "winline_numer": self._int_or_none(event.get("numer")),
                 }
             )
         return out
@@ -448,6 +451,15 @@ class WinlineRawLineBridgeService:
         if len(names) < 2:
             return "", ""
         return names[0], names[1]
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _normalize_dt(self, value: Any) -> Any:
         if value is None:

@@ -108,6 +108,9 @@ class GenericOddsAdapter(BaseProviderAdapter):
                             "source_bookmaker": m.bookmaker,
                             "source_raw_market_json": m.raw_json,
                             "adapter": "generic_odds",
+                            "winline_time": ev.winline_time,
+                            "winline_source_time": ev.winline_source_time,
+                            "winline_numer": ev.winline_numer,
                         },
                     )
                 )

@@ -71,20 +71,12 @@ def _build_multi_event_raw_payload(
     out_events: list[dict[str, Any]] = []
     for eid in event_ids:
         ev = acc.events.get(int(eid))
-        if not ev or not isinstance(ev.get("members"), list) or len(ev["members"]) < 2:
+        if not ev:
             continue
-        c = acc.champs.get(int(ev.get("idChampionship") or 0))
-        id_sport = int(c.get("idSport", _FOOTBALL_SPORT)) if c else _FOOTBALL_SPORT
-        out_events.append(
-            {
-                "id": int(eid),
-                "idSport": id_sport,
-                "idChampionship": int(ev.get("idChampionship") or 0),
-                "date": ev.get("date") or datetime.now(tz=timezone.utc).isoformat(),
-                "isLive": 1,
-                "members": [str(ev["members"][0]), str(ev["members"][1])],
-            }
-        )
+        rec = enrich_winline_event_for_ingest(ev, acc.champs)
+        if not rec:
+            continue
+        out_events.append(rec)
     if not out_events:
         return None
     eid_set = {int(x) for x in event_ids}
@@ -132,6 +124,65 @@ def _ingest_step4_body(acc: _Accum, body: bytes) -> None:
         acc.events[int(_eid)] = ev
     for ln in chunk.lines:
         acc.lines.append(ln)
+
+
+def enrich_winline_event_for_ingest(ev: dict[str, Any], champs: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    """Event dict from live step-4 has no `idSport`; add it from the championship (same as fetch payload)."""
+    eid = int(ev.get("id") or 0)
+    if eid <= 0:
+        return None
+    if not ev.get("members") or not isinstance(ev.get("members"), list) or len(ev["members"]) < 2:
+        return None
+    c = champs.get(int(ev.get("idChampionship") or 0))
+    id_sport = int(c.get("idSport", _FOOTBALL_SPORT)) if c else _FOOTBALL_SPORT
+    return {
+        "id": eid,
+        "idSport": id_sport,
+        "idChampionship": int(ev.get("idChampionship") or 0),
+        "date": ev.get("date")
+        or datetime.now(tz=timezone.utc).isoformat(),
+        "isLive": int(ev.get("isLive") or 0) or 1,
+        "members": [str(ev["members"][0]), str(ev["members"][1])],
+        "time": ev.get("time"),
+        "sourceTime": ev.get("sourceTime"),
+        "numer": ev.get("numer"),
+    }
+
+
+async def winline_websocket_scan_accumulator(
+    s: Settings,
+    *,
+    prescan: int | None = None,
+) -> tuple[_Accum | None, str | None]:
+    """Read WS prescan (step 16 tipline + coalesced step-4). Used by live feed and debug catalog."""
+    tmo = max(5.0, float(s.winline_live_recv_timeout_seconds or 30))
+    nscan = int(prescan if prescan is not None else (s.winline_live_max_prescan or 200))
+    acc = _Accum()
+    try:
+        async with websockets.connect(  # type: ignore[call-overload]
+            s.winline_live_ws_url,
+            ping_interval=None,
+            close_timeout=5,
+            open_timeout=float(s.winline_live_connect_timeout_seconds or 25),
+        ) as ws:
+            for cmd in ("lang", "RU", "data", "WINLINE", "getdate"):
+                await ws.send(str(cmd))
+            for _ in range(nscan):
+                step, body = await _recv_gzip_step(ws, tmo)
+                if step == 16 and not acc.tips:
+                    acc.tips = parse_menu_step16_tippeline(body)
+                if step == 4:
+                    _ingest_step4_body(acc, body)
+    except (TimeoutError, asyncio.TimeoutError, OSError) as e:
+        logger.info("[FOOTBALL][WINLINE_LIVE] connect_or_scan_failed: %s", e)
+        return None, f"winline_connect_or_read_failed: {e!s}"
+    except WebSocketException as e:
+        logger.info("[FOOTBALL][WINLINE_LIVE] ws_error: %s", e)
+        return None, f"winline_websocket: {e!s}"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[FOOTBALL][WINLINE_LIVE] unexpected: %s", e)
+        return None, f"winline_unexpected: {e!s}"
+    return acc, None
 
 
 async def _event_plus_lines_for_event(
@@ -186,43 +237,20 @@ class WinlineLiveFeedService:
 
     async def _do_fetch_football(self, s: Settings) -> tuple[dict[str, Any] | None, str | None]:
         tmo = max(5.0, float(s.winline_live_recv_timeout_seconds or 30))
-        acc = _Accum()
-        try:
-            async with websockets.connect(  # type: ignore[call-overload]
-                s.winline_live_ws_url,
-                ping_interval=None,
-                close_timeout=5,
-                open_timeout=float(s.winline_live_connect_timeout_seconds or 25),
-            ) as ws:
-                for cmd in ("lang", "RU", "data", "WINLINE", "getdate"):
-                    await ws.send(str(cmd))
-                for _ in range(int(s.winline_live_max_prescan or 200)):
-                    step, body = await _recv_gzip_step(ws, tmo)
-                    if step == 16 and not acc.tips:
-                        acc.tips = parse_menu_step16_tippeline(body)
-                    if step == 4:
-                        _ingest_step4_body(acc, body)
-
-        except (TimeoutError, asyncio.TimeoutError, OSError) as e:
-            logger.info("[FOOTBALL][WINLINE_LIVE] connect_or_scan_failed: %s", e)
-            return None, f"winline_connect_or_read_failed: {e!s}"
-        except WebSocketException as e:
-            logger.info("[FOOTBALL][WINLINE_LIVE] ws_error: %s", e)
-            return None, f"winline_websocket: {e!s}"
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[FOOTBALL][WINLINE_LIVE] unexpected: %s", e)
-            return None, f"winline_unexpected: {e!s}"
-
+        acc, err0 = await winline_websocket_scan_accumulator(s)
+        if acc is None:
+            return None, err0
         if not acc.tips:
             return None, "winline_tipline_missing"
         fball_ids = [
             int(eid) for eid, ev in acc.events.items() if _is_football_event(ev, acc.champs)
         ]
+        fball_ids.sort()
         if not fball_ids:
             return None, "winline_football_live_not_seen"
 
-        max_ev = int(s.winline_live_max_football_events or 8)
-        pick = fball_ids[:max_ev]
+        max_ev = int(s.winline_live_max_football_events or 0)
+        pick = fball_ids if max_ev <= 0 else fball_ids[:max_ev]
         need = int(s.winline_live_event_plus_min_lines or 2)
         rounds = int(s.winline_live_event_plus_rounds or 2)
         if int(s.winline_live_event_plus_postscan or 0) > 0:

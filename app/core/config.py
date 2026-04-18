@@ -74,15 +74,18 @@ class Settings(BaseSettings):
     football_live_winline_primary: bool = True
     """When True, football `run_single_cycle` loads live from Winline WS first; The Odds API is optional."""
     winline_live_ws_url: str = "wss://wss.winline.ru/data_ng?client=newsite&nb=true"
-    winline_live_max_prescan: int = 220
-    winline_live_max_football_events: int = 8
+    winline_live_max_prescan: int = 320
+    winline_live_catalog_max_prescan: int = 450
+    """Extra prescan for debug catalog script (more WS step-4 messages)."""
+    # 0 = do not cap football event count in one fetch (all detected football live ids in snapshot)
+    winline_live_max_football_events: int = 0
     winline_live_event_plus_min_lines: int = 1
     winline_live_event_plus_rounds: int = 2
     winline_live_event_plus_postscan: int = 100
     winline_live_connect_timeout_seconds: int = 25
     winline_live_recv_timeout_seconds: int = 20
-    winline_live_total_timeout_seconds: int = 120
-    """Max wall time for the complete Winline WS prescan+event.plus (per cycle)."""
+    winline_live_total_timeout_seconds: int = 180
+    """Max wall time for the complete Winline WS prescan+event.plus (per cycle). Longer when all football live events are included."""
     football_live_odds_api_fallback: bool = False
     """If True, try The Odds API when Winline live feed fails. Default False: honest `blocked_winline` instead."""
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -137,6 +138,32 @@ class LiveEventFreshnessRow:
     reason: str
 
 
+def _winline_shows_in_play(time_str: str | None, numer: int | None) -> bool:
+    """Winline sends separate scheduled kickoff (`date`) and live match clock (`time` / `sourceTime` / `numer`).
+
+    If the clock looks like a live minute / break, the event must not be rejected
+    as `kickoff_in_future` based on scheduled time alone.
+    """
+    if numer is not None and 1 <= int(numer) <= 200:
+        return True
+    s = (time_str or "").strip()
+    if not s:
+        return False
+    if re.search(
+        r"(?i)перер|ht\b|half|int\.|инт\.|меж|ot\b|aet|экстр",
+        s,
+    ):
+        return True
+    if re.search(
+        r"(?:^|[^\d])(\d{1,3}\s*[''′'″\+]|\d{1,2}\+?\d?\s*[''′])",
+        s,
+    ):
+        return True
+    if re.search(r"^\d{1,2}\+?\d?\s*[''′]?\s*$", s):
+        return True
+    return False
+
+
 def _candidate_live_minute(candidate: ProviderSignalCandidate) -> int | None:
     fs = getattr(candidate, "feature_snapshot_json", None) or {}
     if not isinstance(fs, dict):
@@ -178,6 +205,19 @@ def evaluate_live_event_staleness(
     max_hours = float(settings.football_live_event_max_kickoff_age_hours or 4.0)
     hours_since = (now - kickoff).total_seconds() / 3600.0
     if hours_since < -0.02:
+        fs = getattr(candidate, "feature_snapshot_json", None) or {}
+        wcl = fs.get("winline_time")
+        wsrc = fs.get("winline_source_time")
+        wclock = (wcl or wsrc) if (wcl or wsrc) else None
+        wn = fs.get("winline_numer")
+        if wn is not None and not isinstance(wn, int):
+            try:
+                wn = int(wn)
+            except (TypeError, ValueError):
+                wn = None
+        wclock_s = wclock if isinstance(wclock, str) else (str(wclock) if wclock is not None else None)
+        if _winline_shows_in_play(wclock_s, wn):
+            return False, "ok_winline_in_play_overrides_future_scheduled_time"
         return True, "kickoff_in_future_while_marked_live"
     if hours_since > max_hours:
         return True, f"kickoff_too_old_for_live hours={hours_since:.2f} max={max_hours}"
