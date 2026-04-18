@@ -1312,6 +1312,29 @@ def format_football_session_start_user_message(
             lines.append(f"  … +{len(cdt) - 5} ещё")
         lines.append("")
 
+    fg = d.get("final_live_send_gate") or {}
+    if isinstance(fg, dict) and fg.get("per_match") is not None:
+        lines.append("🧱 Final live send gate (макс. 1 сигнал на матч за цикл):")
+        lines.append(
+            f"   матчей с отправкой: {fg.get('matches_with_send')} · "
+            f"отсеяно gate: {fg.get('matches_skipped')}"
+        )
+        af = fg.get("allowed_families")
+        if isinstance(af, list) and af:
+            lines.append(f"   whitelist семей: {', '.join(af)}")
+        lines.append("")
+        for row in (fg.get("per_match") or [])[:24]:
+            if not isinstance(row, dict):
+                continue
+            sk = row.get("match_send_skipped")
+            tail = row.get("skip_reason") or row.get("chosen_reason") or "—"
+            ch = (row.get("chosen_final_candidate") or "—")[:90]
+            lines.append(
+                f"  • {row.get('event_id')} {str(row.get('match_name') or '')[:36]} | "
+                f"{'SKIP' if sk else 'OK'} | {ch} | {str(tail)[:100]}"
+            )
+        lines.append("")
+
     if matches:
         lines.append("— Все live-матчи (лучшая идея на матч) —")
     max_rows = 40
@@ -2733,34 +2756,28 @@ class AutoSignalService:
 
         live_sanity_drop_by_eid: dict[str, str] = {}
         live_sanity_drop_reasons: dict[str, str] = {}
+        final_live_gate_debug: dict[str, Any] = {}
         if finalists:
-            from app.services.football_live_market_sanity_service import FootballLiveMarketSanityService
+            from app.services.football_final_live_send_gate import apply_final_live_send_gate
 
             _n_fin_pre = len(finalists)
-            _ssvc = FootballLiveMarketSanityService()
-            finalists, _sani_drops = _ssvc.filter_finalists(finalists, family_svc)
-            for _c, _r in _sani_drops:
-                _e2 = _football_event_id(_c)
-                if _e2:
-                    live_sanity_drop_by_eid[_e2] = _r.block_token
-                    live_sanity_drop_reasons[_e2] = _r.reason_ru
-            if _sani_drops:
-                logger.info(
-                    "[FOOTBALL][LIVE_SANITY] dropped %s of %s finalists (pre-send)",
-                    len(_sani_drops),
-                    _n_fin_pre,
-                )
+            finalists, final_live_gate_debug, live_sanity_drop_by_eid, live_sanity_drop_reasons = (
+                apply_final_live_send_gate(finalists, family_svc)
+            )
+            logger.info(
+                "[FOOTBALL][FINAL_LIVE_GATE] in=%s out=%s matches_skipped=%s",
+                _n_fin_pre,
+                len(finalists),
+                int((final_live_gate_debug or {}).get("matches_skipped") or 0),
+            )
             _br = None
             _b0 = None
-            if _sani_drops:
-                _top0 = max(_sani_drops, key=lambda t: float(t[0].signal_score or 0))
-                _br = (
-                    f"{_top0[0].match.match_name} (score {float(_top0[0].signal_score or 0):.1f}): "
-                    f"{_top0[1].reason_ru}"
-                )[:500]
-                _b0 = str(_sani_drops[0][1].block_token)
+            if live_sanity_drop_reasons:
+                _e0 = next(iter(live_sanity_drop_reasons.keys()))
+                _br = (live_sanity_drop_reasons.get(_e0) or "")[:500]
+                _b0 = str(live_sanity_drop_by_eid.get(_e0) or "")
             diagnostics.update(
-                football_live_sanity_blocked_last_cycle=int(len(_sani_drops)),
+                football_live_sanity_blocked_last_cycle=int(len(live_sanity_drop_reasons)),
                 football_live_sanity_last_blocker=_b0,
                 football_live_sanity_last_best_rejected=_br,
             )
@@ -2797,6 +2814,7 @@ class AutoSignalService:
         lq_live = cycle_dbg.get("live_quality_summary") or {}
         if isinstance(cycle_dbg, dict):
             cycle_dbg["session_idea_dedup_this_cycle"] = int(session_dup_blocked)
+            cycle_dbg["final_live_send_gate"] = final_live_gate_debug or {}
 
         def _pick_bet_text(cand: ProviderSignalCandidate) -> str:
             from app.services.football_bet_formatter_service import FootballBetFormatterService
