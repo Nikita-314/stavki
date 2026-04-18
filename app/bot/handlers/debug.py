@@ -296,6 +296,8 @@ def _format_signal_runtime_status_lines() -> list[str]:
             "— Последний боевой цикл —",
             "• Пока нет зафиксированного боя: ▶️ Старт + live-цикл или ожидайте автоцикл.",
         ]
+    csum = diag.get("football_live_combat_delivery_last_summary")
+    e2e_lines: list[str] = [f"• E2E (ingest → TG): {csum}"] if csum else []
     return [
         "📊 Статус сигналов",
         "",
@@ -336,6 +338,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Схема порога: {diag.get('football_live_score_relief_note') or '—'}",
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
         *combat_status_lines,
+        *e2e_lines,
         "— Последняя запись (не dry-run) —",
         f"• Обычных сигналов записано в БД: {diag.get('football_last_cycle_ingest_normal') or 0}",
         f"• Мягко допущенных (soft) live в БД: {diag.get('football_last_cycle_ingest_soft') or 0}",
@@ -860,6 +863,8 @@ def _humanize_status_token(token: str | None) -> str:
         "blocked_non_real_source": "источник не считается боевым",
         "no_candidates": "нет подходящих кандидатов",
         "selected": "выбран для отправки",
+        "blocked_pre_send_pipeline": "отсев до send-фильтра (runtime / дедуп в батче)",
+        "blocked_no_enriched_scored_row": "нет enriched+scored по матчу",
     }
     return m.get(token, token.replace("_", " "))
 

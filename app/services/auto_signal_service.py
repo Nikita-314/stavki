@@ -5,9 +5,12 @@ import json
 import logging
 from collections import Counter
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
+
+from pydantic import ValidationError
 
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,6 +45,7 @@ from app.services.winline_live_feed_service import WinlineLiveFeedService
 from app.services.winline_manual_cycle_service import WinlineManualCycleService
 from app.services.winline_manual_payload_service import WinlineManualPayloadService
 from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
+from app.db.repositories.signal_repository import SignalRepository
 
 
 logger = logging.getLogger(__name__)
@@ -304,6 +308,159 @@ def _ru_why_reject_at_soft_send_gate(
     return "мягкий send-gate: reject"
 
 
+def _combat_finalist_dedup_key(c: ProviderSignalCandidate) -> str:
+    m, mk = c.match, c.market
+    return "|".join(
+        (
+            str(m.external_event_id or ""),
+            str(mk.bookmaker or ""),
+            str(mk.market_type or ""),
+            str(mk.selection or ""),
+            str(mk.market_label or ""),
+        )
+    )
+
+
+async def _combat_e2e_delivery_rows(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    *,
+    delivery_scope: str,
+    relaxed_dedup: bool,
+    dedup_relaxed_minutes: int,
+    candidates_to_ingest: list[ProviderSignalCandidate],
+    ingest_res: Any,
+    per_signal_notified: dict[int, bool],
+    runtime_paused: bool,
+) -> list[dict[str, Any]]:
+    """Per-finalist trace: DB ingest result, dedup, notify (no DB schema changes)."""
+    chat_ok = bool(getattr(settings, "signal_chat_id", None))
+    key_to_sid: dict[str, int] = {}
+    for i, cc in enumerate(ingest_res.created_from_candidates):
+        key_to_sid[_combat_finalist_dedup_key(cc)] = int(ingest_res.created_signal_ids[i])
+
+    rows: list[dict[str, Any]] = []
+    ing = IngestionService()
+    for c in candidates_to_ingest:
+        eid = str(c.match.external_event_id or "—")
+        mname = str(c.match.match_name or "—")
+        bet = _football_format_bet_line(c)
+        sc = float(c.signal_score or 0.0)
+        odds = str(c.market.odds_value) if c.market.odds_value is not None else "—"
+        st_path = (c.explanation_json or {}).get("football_live_send_path") or "—"
+        k = _combat_finalist_dedup_key(c)
+        if k in key_to_sid:
+            sid = key_to_sid[k]
+            n_ok = bool(per_signal_notified.get(sid, False))
+            if n_ok:
+                final = "sent"
+            elif not chat_ok:
+                final = "blocked_notify_signal_chat"
+            elif runtime_paused:
+                final = "blocked_notify_runtime_paused"
+            else:
+                final = "blocked_notify"
+            rows.append(
+                {
+                    "event_id": eid,
+                    "match": mname,
+                    "bet": bet,
+                    "odds": odds,
+                    "score": round(sc, 2),
+                    "sendable_status": st_path,
+                    "created_in_db": "yes",
+                    "signal_id": sid,
+                    "blocked_before_db": None,
+                    "blocked_by_db_dedup": "no",
+                    "notify_attempted": "yes",
+                    "bot_send_message_effective": "yes" if n_ok else "no",
+                    "final_outcome": final,
+                }
+            )
+            continue
+        try:
+            b = ing.candidate_to_bundle(c)
+        except (ValidationError, ValueError, TypeError) as e:
+            rows.append(
+                {
+                    "event_id": eid,
+                    "match": mname,
+                    "bet": bet,
+                    "odds": odds,
+                    "score": round(sc, 2),
+                    "sendable_status": st_path,
+                    "created_in_db": "no",
+                    "signal_id": None,
+                    "blocked_before_db": f"bundle:{e!s}"[:180],
+                    "blocked_by_db_dedup": "n/a",
+                    "notify_attempted": "no",
+                    "bot_send_message_effective": "no",
+                    "final_outcome": "blocked_before_ingest",
+                }
+            )
+            continue
+        async with sessionmaker() as session:
+            ex = await SignalRepository().find_existing_similar_signal(
+                session,
+                sport=b.signal.sport,
+                bookmaker=b.signal.bookmaker,
+                event_external_id=b.signal.event_external_id,
+                home_team=b.signal.home_team,
+                away_team=b.signal.away_team,
+                market_type=b.signal.market_type,
+                selection=b.signal.selection,
+                is_live=b.signal.is_live,
+                exclude_notes=("fallback_json", "manual_json", "demo"),
+                required_notes=(delivery_scope,),
+                relaxed_semi_manual=relaxed_dedup,
+                candidate_odds=Decimal(b.signal.odds_at_signal) if b.signal.odds_at_signal is not None else None,
+                candidate_event_start_at=b.signal.event_start_at,
+                relaxed_interval_minutes=int(dedup_relaxed_minutes),
+            )
+        if ex is not None:
+            sa = ex.signaled_at.isoformat() if ex.signaled_at else None
+            rows.append(
+                {
+                    "event_id": eid,
+                    "match": mname,
+                    "bet": bet,
+                    "odds": odds,
+                    "score": round(sc, 2),
+                    "sendable_status": st_path,
+                    "created_in_db": "no",
+                    "signal_id": None,
+                    "blocked_before_db": None,
+                    "blocked_by_db_dedup": "yes",
+                    "existing_signal_id": int(ex.id),
+                    "existing_event_id": ex.event_external_id,
+                    "existing_bet": f"{ex.market_type} / {ex.selection}"[:200],
+                    "existing_signaled_at": sa,
+                    "notify_attempted": "no",
+                    "bot_send_message_effective": "no",
+                    "final_outcome": "blocked_db_dedup",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "event_id": eid,
+                    "match": mname,
+                    "bet": bet,
+                    "odds": odds,
+                    "score": round(sc, 2),
+                    "sendable_status": st_path,
+                    "created_in_db": "no",
+                    "signal_id": None,
+                    "blocked_before_db": "ingest_skipped (no duplicate found — validation or other)",
+                    "blocked_by_db_dedup": "no",
+                    "notify_attempted": "no",
+                    "bot_send_message_effective": "no",
+                    "final_outcome": "blocked_before_ingest",
+                }
+            )
+    return rows
+
+
 def compile_football_cycle_debug(
     *,
     fb_preview: list[ProviderSignalCandidate],
@@ -416,7 +573,7 @@ def compile_football_cycle_debug(
         if n_preview == 0:
             final_status = "no_candidates"
         elif n_cvf == 0:
-            final_status = "blocked_unknown"
+            final_status = "blocked_pre_send_pipeline"
         elif n_send == 0:
             if send_fail_by_eid.get(eid) == "too_far_in_time":
                 final_status = "blocked_too_far_in_time"
@@ -425,7 +582,7 @@ def compile_football_cycle_debug(
         elif n_int == 0:
             final_status = "blocked_integrity"
         elif n_int > 0 and best_c is None:
-            final_status = "blocked_unknown"
+            final_status = "blocked_no_enriched_scored_row"
         elif n_final > 0:
             final_status = "selected"
         elif (
@@ -450,7 +607,10 @@ def compile_football_cycle_debug(
         elif n_int == 0:
             why_code, why_ru = "integrity", "Не прошла проверку целостности ставки"
         elif best_c is None:
-            why_code, why_ru = "no_scoring", "Нет данных scoring по матчу"
+            why_code, why_ru = (
+                "no_enriched_scored",
+                "Нет enriched+scored по матчу (integrity могла пройти, пул scoring пуст)",
+            )
         elif n_final > 0:
             why_code, why_ru = "sendable", "Готова к рассмотрению на отправку"
         elif eid in pre_session_eids and eid not in finalists_post_eids:
@@ -2622,17 +2782,20 @@ class AutoSignalService:
         ls_ing.record_signals_created(len(ingest_res.created_signal_ids))
 
         notifications_sent_count = 0
+        per_signal_notified: dict[int, bool] = {}
         orch = OrchestrationService()
         logger.info("[FOOTBALL] final signals: %s", ingest_res.created_signals)
         for signal_id in ingest_res.created_signal_ids:
             try:
                 async with sessionmaker() as session2:
                     sent = await orch.notify_signal_if_configured(session2, bot, signal_id)
+                per_signal_notified[int(signal_id)] = bool(sent)
                 if sent:
                     notifications_sent_count += 1
                     FootballLiveSessionService().record_telegram_message_sent(1)
             except Exception:
                 logger.exception("Auto signal notification failed for signal_id=%s", signal_id)
+                per_signal_notified[int(signal_id)] = False
         logger.info("[FOOTBALL] messages sent: %s", notifications_sent_count)
         if notifications_sent_count:
             diagnostics.update(football_live_last_notify_path="NotificationService.send_signal_notification")
@@ -2640,6 +2803,38 @@ class AutoSignalService:
             diagnostics.update(football_live_last_notify_path="notify_skipped_see_orchestration_logs")
         else:
             diagnostics.update(football_live_last_notify_path=None)
+
+        _trace_rows = await _combat_e2e_delivery_rows(
+            sessionmaker,
+            settings,
+            delivery_scope=delivery_scope,
+            relaxed_dedup=relaxed_dedup,
+            dedup_relaxed_minutes=int(settings.football_dedup_relaxed_interval_minutes or 30),
+            candidates_to_ingest=candidates_to_ingest,
+            ingest_res=ingest_res,
+            per_signal_notified=per_signal_notified,
+            runtime_paused=runtime.is_paused(),
+        )
+        _n_sent = sum(1 for r in _trace_rows if r.get("final_outcome") == "sent")
+        _n_db = sum(1 for r in _trace_rows if r.get("final_outcome") == "blocked_db_dedup")
+        _combat_sum = (
+            f"rows={len(_trace_rows)} created_in_db={ingest_res.created_signals} "
+            f"telegram_ok={_n_sent} db_dedup_row={_n_db} batch_skipped={ingest_res.skipped_candidates}"
+        )
+        if isinstance(cycle_dbg, dict):
+            cycle_dbg["combat_delivery_trace"] = _trace_rows
+        _tj = json.dumps(_trace_rows, default=str, ensure_ascii=False)[:60000]
+        SignalRuntimeDiagnosticsService().update(
+            football_live_combat_delivery_trace_json=_tj,
+            football_live_combat_delivery_last_summary=_combat_sum,
+        )
+        diagnostics.update(
+            football_live_combat_delivery_last_summary=_combat_sum,
+        )
+        try:
+            logger.info("[FOOTBALL][COMBAT_E2E] %s", _tj[:24000])
+        except Exception:
+            pass
 
         if ingest_res.created_signals == 0 and finalists and int(ingest_res.skipped_candidates) > 0:
             _db_sk = int(ingest_res.skipped_candidates)

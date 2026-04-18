@@ -133,6 +133,10 @@ class SignalRuntimeDiagnosticsState:
     """Last Winline error token if primary fetch failed."""
     football_winline_football_candidate_count: int = 0
     """ProviderSignalCandidate count (football) in preview after Winline+bridge in last cycle."""
+    football_live_combat_delivery_trace_json: str | None = None
+    """Per-finalist E2E rows: ingest, db dedup, notify (last non-dry live cycle)."""
+    football_live_combat_delivery_last_summary: str | None = None
+    """One line: created / Telegram / db_dedup_from_last_combat."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()
