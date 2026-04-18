@@ -59,6 +59,79 @@ def _european_hcap_broken(
     return False
 
 
+# Mirrors final live gate heuristics (no import from gate — avoids circular imports).
+_JUNK_EXOTIC_LIVE_SUBSTRINGS: tuple[str, ...] = (
+    "европейск",
+    "european handicap",
+    "european hcap",
+    "азиатск",
+    "asian handicap",
+    "asian hcap",
+    "следующий гол",
+    "next goal",
+    "nextgoal",
+    "остаток матча",
+    "rest of the match",
+    "rest of match",
+    "выиграет остаток",
+    "win the rest",
+    "матч с минут",
+    "from minute",
+    "первый гол",
+    "first goal",
+    "последний гол",
+    "last goal",
+    "кто забьет",
+    "кто забьёт",
+    "goalscorer",
+    "anytime scorer",
+    "точный счёт",
+    "точный счет",
+    "correct score",
+    "тайм/матч",
+    "half time/full time",
+    "ht/ft",
+    "ht-ft",
+    "метод победы",
+    "method of victory",
+    "winning margin",
+    "разниц",
+    "race to",
+    "гол в обе",
+    "both halves",
+)
+
+
+def _combat_live_candidate_text_blob(c: ProviderSignalCandidate) -> str:
+    parts = [
+        str(c.market.market_type or ""),
+        str(c.market.market_label or ""),
+        str(c.market.selection or ""),
+        str(c.market.section_name or ""),
+        str(c.market.subsection_name or ""),
+        _format_bet_line(c),
+    ]
+    return " ".join(parts).lower()
+
+
+def _forbidden_cards_or_special_live_blob(c: ProviderSignalCandidate) -> bool:
+    blob = _combat_live_candidate_text_blob(c)
+    if "карточ" in blob:
+        return True
+    if "card" in blob and ("bet" in blob or "карт" in blob or "желт" in blob or "red " in blob):
+        return True
+    if "исход" in blob and "1x2" in blob and "карточ" in blob:
+        return True
+    if "bookings" in blob or "booking" in blob:
+        return True
+    return False
+
+
+def _is_exotic_or_derived_junk_live_text(c: ProviderSignalCandidate) -> bool:
+    b = _combat_live_candidate_text_blob(c)
+    return any(s in b for s in _JUNK_EXOTIC_LIVE_SUBSTRINGS)
+
+
 def _next_goal_broken_bet(bet: str) -> bool:
     if "след" in (bet or "").lower() and "гол" in (bet or "").lower():
         if re.search(r"гол\s*[-–—]?\s*й", bet or "", re.I) and "?" not in bet and not re.search(r"(\d+)[-–—]?\s*й", bet or ""):
@@ -141,6 +214,29 @@ def _core_live_totals_quality(
     missing_any = h is None or a is None or minute is None
     combined = scope == "match"
 
+    # Team / IT totals OVER: recurring junk — no minute or no team goals in snapshot.
+    if not combined:
+        if goals is None or minute is None:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=33,
+                block_token="blocked_suspicious_core_live_signal",
+                reason_ru="Командный/ИТ тотал «больше» без минуты или без голов команды в live-снимке — не публикуем",
+                bet_text=bet,
+            )
+
+    # Match total OVER: need both sides' goals in snapshot.
+    if combined and (h is None or a is None):
+        return LiveSanityResult(
+            passed=False,
+            plausibility="weak",
+            plausibility_score=32,
+            block_token="blocked_suspicious_core_live_signal",
+            reason_ru="Матчевый тотал «больше» без полного счёта матча — не публикуем",
+            bet_text=bet,
+        )
+
     # Aggressive match total OVER without reliable live snapshot — low channel value.
     if combined and line >= 4.5 and missing_any:
         return LiveSanityResult(
@@ -151,6 +247,23 @@ def _core_live_totals_quality(
             reason_ru="Крупный тотал матча без полного live-снимка (счёт/минута) — не публикуем",
             bet_text=bet,
         )
+
+    # Match total OVER, still need goals, but no minute — common junk path (was passing only for low lines).
+    if combined and minute is None and goals is not None and line <= 3.5:
+        min_goals = _min_goals_strict_over(line)
+        need_more = max(0, min_goals - int(goals))
+        if need_more >= 1:
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=31,
+                block_token="blocked_late_live_market",
+                reason_ru=(
+                    f"Матчевый тотал >{line}: нужно ещё {need_more} гол(а), "
+                    f"но нет минуты в live-снимке — не публикуем"
+                ),
+                bet_text=bet,
+            )
 
     if goals is None or minute is None:
         return None
@@ -279,14 +392,14 @@ def _live_timing_cutoff(
             and a is not None
             and need_more is not None
             and need_more >= 1
-            and line <= 1.5
+            and line <= 3.5
         ):
             return LiveSanityResult(
                 passed=False,
                 plausibility="weak",
                 plausibility_score=18,
                 block_token="blocked_late_live_market",
-                reason_ru="Матчевый тотал «больше» низкой линии без минуты в live-снимке — не публикуем (риск запоздалого алерта)",
+                reason_ru="Матчевый тотал «больше» без минуты в live-снимке (линия до 3.5) — не публикуем (риск запоздалого алерта)",
                 bet_text=bet,
             )
 
@@ -303,7 +416,7 @@ def _live_timing_cutoff(
                 reason_ru=f"Матчевый тотал «больше» при {m}': нужно ещё {need_more} гол(а) — для live-сигнала слишком поздно",
                 bet_text=bet,
             )
-        if combined and m >= 85 and line <= 1.5 and need_more >= 1:
+        if combined and m >= 85 and line <= 2.5 and need_more >= 1:
             return LiveSanityResult(
                 passed=False,
                 plausibility="weak",
@@ -321,7 +434,7 @@ def _live_timing_cutoff(
                 reason_ru=f"На {m}' нужно ≥{need_more} гола по матчу — рынок формально есть, для алерта поздно",
                 bet_text=bet,
             )
-        if scope != "match" and m >= 87 and line <= 1.5 and need_more >= 1:
+        if scope != "match" and m >= 87 and line <= 2.5 and need_more >= 1:
             return LiveSanityResult(
                 passed=False,
                 plausibility="weak",
@@ -558,6 +671,41 @@ class FootballLiveMarketSanityService:
             )
 
         h, a, minute = self._live_snapshot(c)
+
+        if _forbidden_cards_or_special_live_blob(c):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="impossible",
+                plausibility_score=0,
+                block_token="blocked_cards_or_special",
+                reason_ru="Карточки/букинги/специсходы — не для core live-сигнала",
+                bet_text=bet,
+            )
+        if _is_exotic_or_derived_junk_live_text(c):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="impossible",
+                plausibility_score=0,
+                block_token="blocked_exotic_result_market",
+                reason_ru="Рынок по тексту вне core live-боя (next goal / EH / точный счёт / …)",
+                bet_text=bet,
+            )
+
+        mtl0 = (c.market.market_type or "").strip().lower()
+        if (
+            family == "result"
+            and mtl0 in ("1x2", "match_winner")
+            and not family_svc.is_corner_market(c)
+            and (h is None or a is None or minute is None)
+        ):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=30,
+                block_token="blocked_suspicious_core_live_signal",
+                reason_ru="Исход 1X2 без полного live-снимка (нужны счёт и минута)",
+                bet_text=bet,
+            )
         ok_default = LiveSanityResult(
             passed=True,
             plausibility="ok",
