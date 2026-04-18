@@ -298,6 +298,16 @@ def _format_signal_runtime_status_lines() -> list[str]:
         ]
     csum = diag.get("football_live_combat_delivery_last_summary")
     e2e_lines: list[str] = [f"• E2E (ingest → TG): {csum}"] if csum else []
+    _san_n = int(diag.get("football_live_sanity_blocked_last_cycle") or 0)
+    _san_blk = diag.get("football_live_sanity_last_blocker") or "—"
+    _san_br = (diag.get("football_live_sanity_last_best_rejected") or "").strip()
+    sanity_status_lines: list[str] = [
+        "— Pre-send live sanity —",
+        f"• Заблокировано по sanity (последний цикл): {_san_n}",
+        f"• Последний block_token: {_san_blk}",
+    ]
+    if _san_br:
+        sanity_status_lines.append(f"• Сильный отсев: {_san_br[:400]}")
     return [
         "📊 Статус сигналов",
         "",
@@ -339,6 +349,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
         *combat_status_lines,
         *e2e_lines,
+        *sanity_status_lines,
         "— Последняя запись (не dry-run) —",
         f"• Обычных сигналов записано в БД: {diag.get('football_last_cycle_ingest_normal') or 0}",
         f"• Мягко допущенных (soft) live в БД: {diag.get('football_last_cycle_ingest_soft') or 0}",
@@ -865,6 +876,10 @@ def _humanize_status_token(token: str | None) -> str:
         "selected": "выбран для отправки",
         "blocked_pre_send_pipeline": "отсев до send-фильтра (runtime / дедуп в батче)",
         "blocked_no_enriched_scored_row": "нет enriched+scored по матчу",
+        "blocked_live_market_sanity": "pre-send live sanity (счёт, текст, plausibility)",
+        "blocked_invalid_live_market_text": "некорректный live-текст / маппинг рынка",
+        "blocked_impossible_live_outcome": "исход противоречит счёту/минуте",
+        "blocked_low_live_plausibility": "низкая plausibility (поздно / слабая логика)",
     }
     return m.get(token, token.replace("_", " "))
 
@@ -964,6 +979,21 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
             f"send-фильтр {agg.get('after_send_filter', '—')} → integrity {agg.get('after_integrity', '—')} → "
             f"строк в scoring {agg.get('after_scoring_pool', '—')}"
         )
+        lines.append("")
+    if isinstance(agg, dict) and (int(agg.get("live_sanity_dropped") or 0) > 0 or (dbg or {}).get("live_sanity_drops")):
+        _ldn = int(agg.get("live_sanity_dropped") or 0)
+        _drops0 = (dbg or {}).get("live_sanity_drops") or []
+        lines.append("— Pre-send live sanity —")
+        lines.append(f"• Снято перед отправкой (по воронке): {_ldn}")
+        if _drops0 and isinstance(_drops0, list) and str((_drops0[0] or {}).get("reason", "")).strip():
+            _d0 = _drops0[0] or {}
+            lines.append(
+                f"• Пример: eid={_d0.get('eid', '—')} — {str(_d0.get('reason', ''))[:300]}"
+            )
+        # если прогон dry-run, в памяти теста нет best_rejected
+        d_diag = SignalRuntimeDiagnosticsService().get_state()
+        if (d_diag.get("football_live_sanity_last_best_rejected") or "") and (not _drops0):
+            lines.append("• (из памяти) " + str(d_diag.get("football_live_sanity_last_best_rejected"))[:300])
         lines.append("")
     top10 = (dbg or {}).get("top_10_live_pipeline_lines") or []
     if top10:

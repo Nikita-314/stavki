@@ -128,6 +128,32 @@ class FootballBetFormatterService:
                 away_team=away_team,
             )
 
+        # 3-way European handicaps: must not be formatted as «Исход»+yes/no via fallback
+        if special_scope != "corners" and self._is_european_handicap_3way_label(
+            market_label_s, market_type_l
+        ):
+            if self._normalize_yes_no(selection_s):
+                return FootballBetPresentation(
+                    main_label="(служебно) Европейский гандикап: исход да/нет, не 1-Х-2"
+                )
+            d = self._european_3way_detail(
+                selection_s, home_team=home_team, away_team=away_team
+            )
+            if d:
+                return FootballBetPresentation(
+                    main_label=self._with_period(f"Европейский гандикап: {d}", period)
+                )
+            pretty = self._prettify_selection(
+                selection_s, home_team=home_team, away_team=away_team
+            ) or (selection_s or "—")
+            if self._normalize_yes_no(pretty):
+                return FootballBetPresentation(
+                    main_label="(служебно) Европейский гандикап: исход да/нет, не 1-Х-2"
+                )
+            return FootballBetPresentation(
+                main_label=self._with_period(f"Европейский гандикап: {pretty}", period)
+            )
+
         if self._is_double_chance(market_type_l, market_label_s, selection_s):
             dc = self._normalize_double_chance(selection_s or market_label_s)
             if dc:
@@ -597,6 +623,42 @@ class FootballBetFormatterService:
     def _is_handicap(self, market_type: str, market_label: str) -> bool:
         combined = f"{market_type} {market_label}".lower()
         return market_type == "handicap" or "handicap" in combined or "фора" in combined
+
+    def _is_european_handicap_3way_label(self, market_label: str, market_type_l: str) -> bool:
+        """Winline often tags 3-way EU handicaps as match_winner + label, not as handicap type."""
+        ml = (market_label or "").lower()
+        if not (("европ" in ml or "european" in ml) and ("гандик" in ml or "handicap" in ml)):
+            return False
+        mtl = (market_type_l or "").lower()
+        return mtl in ("1x2", "match_winner")
+
+    def _european_3way_detail(
+        self,
+        selection_s: str,
+        *,
+        home_team: str | None,
+        away_team: str | None,
+    ) -> str | None:
+        s = (selection_s or "").strip()
+        if not s or self._normalize_yes_no(s):
+            return None
+        o = self._normalize_outcome_token(s)
+        if o == "Х" or s.upper() in self._DRAW_TOKENS or s.lower() in ("draw", "ничья"):
+            return "Х"
+        if o == "П1":
+            ht = self._humanize_team(home_team)
+            return f"П1 {ht}" if ht else "П1"
+        if o == "П2":
+            at = self._humanize_team(away_team)
+            return f"П2 {at}" if at else "П2"
+        home = self._humanize_team(home_team)
+        away = self._humanize_team(away_team)
+        sl = s.lower()
+        if home and (home.lower() in sl or sl in home.lower()):
+            return home
+        if away and (away.lower() in sl or sl in away.lower()):
+            return away
+        return s
 
     def _is_btts(self, market_type: str, market_label: str) -> bool:
         combined = f"{market_type} {market_label}".lower()

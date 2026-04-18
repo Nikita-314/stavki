@@ -137,6 +137,12 @@ class SignalRuntimeDiagnosticsState:
     """Per-finalist E2E rows: ingest, db dedup, notify (last non-dry live cycle)."""
     football_live_combat_delivery_last_summary: str | None = None
     """One line: created / Telegram / db_dedup_from_last_combat."""
+    football_live_sanity_blocked_last_cycle: int = 0
+    """Finalists removed by pre-send live market sanity in the last football live cycle."""
+    football_live_sanity_last_blocker: str | None = None
+    """e.g. blocked_invalid_live_market_text | blocked_impossible_live_outcome — first drop if any."""
+    football_live_sanity_last_best_rejected: str | None = None
+    """Human line: best-score rejected candidate and reason."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()

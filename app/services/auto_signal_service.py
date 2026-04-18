@@ -482,8 +482,12 @@ def compile_football_cycle_debug(
     live_send_stats: dict | None = None,
     finalist_send_meta: dict[int, tuple[str, str | None]] | None = None,
     single_relief_max_gap: float = 2.0,
+    live_sanity_drop_by_eid: dict[str, str] | None = None,
+    live_sanity_drop_reasons: dict[str, str] | None = None,
 ) -> dict:
     """Aggregated per-match football pipeline diagnostics for dry_run Telegram + logs."""
+    lsd: dict[str, str] = dict(live_sanity_drop_by_eid or {})
+    lsr: dict[str, str] = dict(live_sanity_drop_reasons or {})
     base_for_display = float(min_score_base) if min_score_base is not None else float(min_score)
     thr_eff = float(min_score)
     send_surviving_eids = {_football_event_id(c) for c in fb_post_send if _football_event_id(c)}
@@ -596,6 +600,9 @@ def compile_football_cycle_debug(
         else:
             final_status = "blocked_integrity"
 
+        if eid in lsd:
+            final_status = lsd[eid]
+
         why_code = "other"
         why_ru = ""
         if n_preview == 0:
@@ -619,6 +626,8 @@ def compile_football_cycle_debug(
             why_code, why_ru = "low_score", f"Score {best_sc:.1f} ниже порога {base_for_display:.0f}"
         else:
             why_ru = "См. final_status"
+        if eid in lsd:
+            why_code, why_ru = "live_sanity", lsr.get(eid) or "Отсеяно pre-send live sanity (счёт/текст рынка)"
 
         gap_to_sendable = None
         if best_c is not None and final_status == "blocked_low_score":
@@ -652,6 +661,8 @@ def compile_football_cycle_debug(
             sendable_path_ru = "сессия: идея уже в памяти live (не ушла в пул) — " + (why_ru or "")
         elif n_final > 0:
             sendable_path_ru = "ok (есть в финалистах после live send-gate)"
+        if eid in lsd:
+            sendable_path_ru = "live sanity: " + lsr.get(eid, (why_ru or "—")[:200])
 
         tn = str(getattr(match, "tournament_name", "") or "").strip()
         rows.append(
@@ -705,12 +716,20 @@ def compile_football_cycle_debug(
         if int(r.get("candidates_after_freshness") or 0) > 0 and bool(r.get("is_live"))
     ]
     status_counts_fresh = Counter(str(r["final_status"]) for r in fresh_accepted) if fresh_accepted else Counter()
+    _sany_toks = {
+        "blocked_invalid_live_market_text",
+        "blocked_impossible_live_outcome",
+        "blocked_low_live_plausibility",
+        "blocked_live_market_sanity",
+    }
+    n_sanity_fresh = sum(1 for r in fresh_accepted if str(r.get("final_status")) in _sany_toks)
     fresh_live_send_breakdown = {
         "blocked_send_filter": int(status_counts_fresh.get("blocked_send_filter", 0)),
         "blocked_integrity": int(status_counts_fresh.get("blocked_integrity", 0)),
         "blocked_low_score": int(status_counts_fresh.get("blocked_low_score", 0)),
         "blocked_duplicate_idea": int(status_counts_fresh.get("blocked_duplicate_idea", 0)),
         "blocked_dedup_db": int(db_dedup_blocked_count),
+        "blocked_live_market_sanity": n_sanity_fresh,
         "selected": int(status_counts_fresh.get("selected", 0)),
     }
     best_scores_sorted = sorted(
@@ -770,6 +789,10 @@ def compile_football_cycle_debug(
         else []
     )
     blocker_priority = [
+        "blocked_invalid_live_market_text",
+        "blocked_impossible_live_outcome",
+        "blocked_low_live_plausibility",
+        "blocked_live_market_sanity",
         "blocked_duplicate_idea",
         "blocked_low_score",
         "blocked_send_filter",
@@ -815,6 +838,7 @@ def compile_football_cycle_debug(
         "soft_sendable_matches": m_soft_m,
         "rejected_at_soft_send_gate": m_rej_gate,
         "funnel_by_final_status": dict(status_counts),
+        "live_sanity_dropped": len(lsd),
     }
 
     def _fmt_top10_line(r: dict) -> str:
@@ -963,6 +987,16 @@ def compile_football_cycle_debug(
                 selected_winner_detail["live_note"] = (
                     "Live-сигнал допущен по мягкому порогу (недобор score компенсирован live-контекстом)"
                 )
+        _ls0 = (sel.explanation_json or {}).get("live_sanity")
+        if isinstance(_ls0, dict) and _ls0:
+            if _ls0.get("passed") and _ls0.get("skipped") != "not_is_live":
+                selected_winner_detail["live_sanity"] = (
+                    f"ok ({_ls0.get('plausibility', 'ok')}, pscore={_ls0.get('plausibility_score', 100)})"
+                )
+            elif not _ls0.get("passed"):
+                selected_winner_detail["live_sanity"] = f"blocked: {_ls0.get('block_token', '—')}"
+            else:
+                selected_winner_detail["live_sanity"] = "ok (not live or skipped check)"
 
     def _prog_best_line(r: dict) -> str:
         nm = str(r.get("match_name") or "—")
@@ -1054,6 +1088,9 @@ def compile_football_cycle_debug(
         "matches_top_for_message": _football_top_matches_for_telegram(rows, limit=10),
         "blocked_dedup_note": "dedup runs only on live ingest; dry_run does not evaluate DB dedup per match",
         "pipeline_live_only": True,
+        "live_sanity_drops": [
+            {"eid": e, "block_token": lsd.get(e, ""), "reason": lsr.get(e, "")} for e in lsd
+        ],
     }
     try:
         logger.info("[FOOTBALL][LIVE_QUALITY] %s", json.dumps(live_quality_summary, default=str, ensure_ascii=False)[:12000])
@@ -1117,6 +1154,10 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
         and int(diag.get("football_live_cycle_duplicate_ideas_blocked") or 0) > 0
     ):
         return "blocked_duplicate_idea"
+    if (msg in ("low_score", "dry_run_low_score") or "low_score" in rr) and int(
+        diag.get("football_live_sanity_blocked_last_cycle") or 0
+    ) > 0 and int(diag.get("football_live_cycle_after_score") or 0) > 0:
+        return "blocked_live_market_sanity"
     low = msg in {"low_score", "dry_run_low_score"} or "low_score" in rr
     if low:
         return "blocked_low_score"
@@ -1162,6 +1203,10 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_stale_live_source": "снимок live устарел по задержке обработки",
         "blocked_stale_live_events": "все live-матчи признаны протухшими",
         "blocked_winline_live_unavailable": "Winline live feed недоступен (WS/данные/тип-лайн)",
+        "blocked_live_market_sanity": "все кандидаты сняты pre-send live sanity",
+        "blocked_invalid_live_market_text": "некорректный маппинг/текст live-рынка",
+        "blocked_impossible_live_outcome": "исход несовместим с текущим счётом (невозможен)",
+        "blocked_low_live_plausibility": "низкая plausibility (поздний тайм / счёт / тотал)",
     }
     return m.get(str(token), str(token).replace("_", " "))
 
@@ -2546,6 +2591,46 @@ class AutoSignalService:
                     float(c.signal_score or 0),
                 )
 
+        live_sanity_drop_by_eid: dict[str, str] = {}
+        live_sanity_drop_reasons: dict[str, str] = {}
+        if finalists:
+            from app.services.football_live_market_sanity_service import FootballLiveMarketSanityService
+
+            _n_fin_pre = len(finalists)
+            _ssvc = FootballLiveMarketSanityService()
+            finalists, _sani_drops = _ssvc.filter_finalists(finalists, family_svc)
+            for _c, _r in _sani_drops:
+                _e2 = _football_event_id(_c)
+                if _e2:
+                    live_sanity_drop_by_eid[_e2] = _r.block_token
+                    live_sanity_drop_reasons[_e2] = _r.reason_ru
+            if _sani_drops:
+                logger.info(
+                    "[FOOTBALL][LIVE_SANITY] dropped %s of %s finalists (pre-send)",
+                    len(_sani_drops),
+                    _n_fin_pre,
+                )
+            _br = None
+            _b0 = None
+            if _sani_drops:
+                _top0 = max(_sani_drops, key=lambda t: float(t[0].signal_score or 0))
+                _br = (
+                    f"{_top0[0].match.match_name} (score {float(_top0[0].signal_score or 0):.1f}): "
+                    f"{_top0[1].reason_ru}"
+                )[:500]
+                _b0 = str(_sani_drops[0][1].block_token)
+            diagnostics.update(
+                football_live_sanity_blocked_last_cycle=int(len(_sani_drops)),
+                football_live_sanity_last_blocker=_b0,
+                football_live_sanity_last_best_rejected=_br,
+            )
+        else:
+            diagnostics.update(
+                football_live_sanity_blocked_last_cycle=0,
+                football_live_sanity_last_blocker=None,
+                football_live_sanity_last_best_rejected=None,
+            )
+
         report_after_scoring = n_after_min_score
 
         cycle_dbg = compile_football_cycle_debug(
@@ -2566,6 +2651,8 @@ class AutoSignalService:
             integrity_dropped_checks=list(integrity_result.dropped_checks),
             dry_run=dry_run,
             single_relief_max_gap=float(single_gap_max),
+            live_sanity_drop_by_eid=live_sanity_drop_by_eid,
+            live_sanity_drop_reasons=live_sanity_drop_reasons,
         )
         lq_live = cycle_dbg.get("live_quality_summary") or {}
         if isinstance(cycle_dbg, dict):
