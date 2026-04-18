@@ -91,6 +91,114 @@ def _result_pick_side(
     return None
 
 
+def _min_goals_strict_over(line: float) -> int:
+    """Smallest integer total goals G with G > line (standard .5 football lines)."""
+    return int(line + 0.5)
+
+
+def _is_total_over_side(ctx: FootballTotalContext) -> bool:
+    return (ctx.total_side or "").upper() == "ТБ"
+
+
+def _core_live_totals_quality(
+    c: ProviderSignalCandidate,
+    family: str,
+    h: int | None,
+    a: int | None,
+    minute: int | None,
+    fmt: FootballBetFormatterService,
+    bet: str,
+) -> LiveSanityResult | None:
+    """Extra plausibility for core totals (combat live): weak late gaps, missing snapshot on aggressive lines."""
+    if family != "totals":
+        return None
+    ctx: FootballTotalContext | None = fmt.describe_total_context(
+        market_type=c.market.market_type,
+        market_label=c.market.market_label,
+        selection=c.market.selection,
+        home_team=c.match.home_team,
+        away_team=c.match.away_team,
+        section_name=c.market.section_name,
+        subsection_name=c.market.subsection_name,
+    )
+    if not ctx or not ctx.total_line:
+        return None
+    try:
+        line = float((ctx.total_line or "0").replace(",", "."))
+    except ValueError:
+        return None
+    if not _is_total_over_side(ctx):
+        return None
+
+    scope = (ctx.target_scope or "").lower()
+    if ("home" in scope or "it1" in scope) and "away" not in scope:
+        goals = h
+    elif ("away" in scope or "it2" in scope) and "home" not in scope:
+        goals = a
+    else:
+        goals = (h + a) if h is not None and a is not None else None
+
+    missing_any = h is None or a is None or minute is None
+    combined = scope == "match"
+
+    # Aggressive match total OVER without reliable live snapshot — low channel value.
+    if combined and line >= 4.5 and missing_any:
+        return LiveSanityResult(
+            passed=False,
+            plausibility="weak",
+            plausibility_score=28,
+            block_token="blocked_suspicious_core_live_signal",
+            reason_ru="Крупный тотал матча без полного live-снимка (счёт/минута) — не публикуем",
+            bet_text=bet,
+        )
+
+    if goals is None or minute is None:
+        return None
+
+    min_goals = _min_goals_strict_over(line)
+    need_more = max(0, min_goals - int(goals))
+    m = int(minute)
+
+    if need_more >= 3 and m >= 70:
+        return LiveSanityResult(
+            passed=False,
+            plausibility="weak",
+            plausibility_score=22,
+            block_token="blocked_core_late_high_gap_total",
+            reason_ru=f"Тотал больше {line}: нужно ещё ≥{need_more} гол(а) при {m}' — слишком жёсткий хвост матча",
+            bet_text=bet,
+        )
+    if need_more >= 2 and m >= 78:
+        return LiveSanityResult(
+            passed=False,
+            plausibility="weak",
+            plausibility_score=35,
+            block_token="blocked_core_late_high_gap_total",
+            reason_ru=f"Тотал больше {line}: к {m}' не хватает {need_more} гол(ов) — малореалистично для публикации",
+            bet_text=bet,
+        )
+    if need_more >= 2 and m >= 74 and line >= 3.5:
+        return LiveSanityResult(
+            passed=False,
+            plausibility="weak",
+            plausibility_score=40,
+            block_token="blocked_core_late_high_gap_total",
+            reason_ru=f"Высокая линия ({line}) и {m}': нужно ещё {need_more} гол(а) — режем как слабый live-сигнал",
+            bet_text=bet,
+        )
+    # Team / IT1/IT2: late need 2+ goals on short clock
+    if scope != "match" and need_more >= 2 and m >= 78:
+        return LiveSanityResult(
+            passed=False,
+            plausibility="weak",
+            plausibility_score=38,
+            block_token="blocked_core_late_high_gap_total",
+            reason_ru=f"Командный тотал: к {m}' нужно ещё {need_more} гол(а) команды — слишком поздно",
+            bet_text=bet,
+        )
+    return None
+
+
 def _totals_sanity(
     c: ProviderSignalCandidate,
     family: str,
@@ -276,6 +384,11 @@ class FootballLiveMarketSanityService:
             tot = _totals_sanity(c, family, h, a, fmt)
             if tot and not tot.passed:
                 return tot
+
+        if family == "totals":
+            qtot = _core_live_totals_quality(c, family, h, a, minute, fmt, bet)
+            if qtot and not qtot.passed:
+                return qtot
 
         mtl = mtype.lower()
         if (

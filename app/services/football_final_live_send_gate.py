@@ -190,6 +190,8 @@ def apply_final_live_send_gate(
     drop_by_eid: dict[str, str] = {}
     drop_reasons: dict[str, str] = {}
     token_hits: dict[str, int] = {}
+    suspicious_core_signals_blocked = 0
+    core_live_extra_sanity_blocked = 0
 
     for eid, group in sorted(by_eid.items(), key=lambda kv: (kv[0] == "—", kv[0])):
         mname = str(group[0].match.match_name or "—") if group else "—"
@@ -271,6 +273,11 @@ def apply_final_live_send_gate(
                 chosen_why = tok_ok
                 ok_sanity_res = res
                 break
+            tk = str(res.block_token or "")
+            if tk == "blocked_suspicious_core_live_signal":
+                suspicious_core_signals_blocked += 1
+            elif tk == "blocked_core_late_high_gap_total":
+                core_live_extra_sanity_blocked += 1
 
         row["sanity_attempts"] = sanity_attempts
 
@@ -366,5 +373,7 @@ def apply_final_live_send_gate(
         "blocked_non_main_live_market_hits": int(token_hits.get("blocked_non_main_live_market", 0)),
         "blocked_family_hits": sum(v for k, v in token_hits.items() if k.startswith("blocked_family_")),
         "core_main_only": True,
+        "suspicious_core_signals_blocked": suspicious_core_signals_blocked,
+        "core_live_extra_sanity_blocked": core_live_extra_sanity_blocked,
     }
     return out, debug_blob, drop_by_eid, drop_reasons

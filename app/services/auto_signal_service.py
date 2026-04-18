@@ -1246,6 +1246,8 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_invalid_live_market_text": "некорректный маппинг/текст live-рынка",
         "blocked_impossible_live_outcome": "исход несовместим с текущим счётом (невозможен)",
         "blocked_low_live_plausibility": "низкая plausibility (поздний тайм / счёт / тотал)",
+        "blocked_suspicious_core_live_signal": "сомнительный core live-сигнал (контекст/линия)",
+        "blocked_core_late_high_gap_total": "тотал: слишком много голов нужно на поздней стадии",
     }
     return m.get(str(token), str(token).replace("_", " "))
 
@@ -1273,6 +1275,13 @@ def format_final_live_gate_summary_lines(fg: dict, *, max_rows: int = 24) -> lis
     )
     if msan:
         lines.append(f"   Матчей отсеяно live sanity (все core-кандидаты): {msan}")
+    s_core = int(fg.get("suspicious_core_signals_blocked") or 0)
+    x_core = int(fg.get("core_live_extra_sanity_blocked") or 0)
+    if s_core or x_core:
+        lines.append(
+            f"   core live quality (попытки sanity): suspicious blocked={s_core} · "
+            f"late-gap / plausibility={x_core}"
+        )
     bc = int(fg.get("blocked_cards_or_special_hits") or 0)
     if bc:
         lines.append(f"   Карточки/мусор (whitelist): {bc}")

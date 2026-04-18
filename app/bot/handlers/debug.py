@@ -919,6 +919,8 @@ def _humanize_status_token(token: str | None) -> str:
         "blocked_invalid_live_market_text": "некорректный live-текст / маппинг рынка",
         "blocked_impossible_live_outcome": "исход противоречит счёту/минуте",
         "blocked_low_live_plausibility": "низкая plausibility (поздно / слабая логика)",
+        "blocked_suspicious_core_live_signal": "сомнительный core live (контекст/агрессивный тотал)",
+        "blocked_core_late_high_gap_total": "тотал: слишком много голов на поздней стадии",
     }
     return m.get(token, token.replace("_", " "))
 
