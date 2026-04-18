@@ -155,6 +155,16 @@ class IngestionService:
                 v = fs0.get(key)
                 if v is not None:
                     audit[key] = v
+            rat0 = ex0.get("football_live_signal_rationale")
+            if isinstance(rat0, dict):
+                audit["live_rationale"] = {
+                    "why_selected_codes": rat0.get("why_selected_codes"),
+                    "limited_live_context": rat0.get("limited_live_context"),
+                    "warnings": rat0.get("warnings"),
+                    "send_path": rat0.get("send_path"),
+                    "market_family": rat0.get("market_family"),
+                    "plausibility_score": rat0.get("plausibility_score"),
+                }
             prev = fs0.get("football_send_audit")
             if isinstance(prev, dict):
                 merged = {**prev, **audit}

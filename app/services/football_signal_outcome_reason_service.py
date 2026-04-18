@@ -17,6 +17,7 @@ from app.db.models.signal import Signal
 from app.schemas.event_result import EventResultInput
 from app.schemas.provider_models import ProviderMatch, ProviderOddsMarket, ProviderSignalCandidate
 from app.services.football_bet_formatter_service import FootballBetFormatterService
+from app.services.football_live_signal_rationale_service import slim_rationale_for_settlement
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 
@@ -177,11 +178,19 @@ def _learning_from_snap(snap0: dict, ex0: dict) -> dict[str, Any]:
     if isinstance(ls, dict):
         pls = int(ls.get("plausibility_score", 100) or 100)
         plev = str(ls.get("plausibility") or "ok")
-    return {
+    out: dict[str, Any] = {
         "send_path": sp,
         "live_plausibility": plev,
         "live_plausibility_score": pls,
     }
+    rat = ex0.get("football_live_signal_rationale")
+    if isinstance(rat, dict):
+        out["pre_send_why_selected_codes"] = list(rat.get("why_selected_codes") or [])
+        out["pre_send_limited_live_context"] = bool(rat.get("limited_live_context"))
+        w = rat.get("warnings")
+        if isinstance(w, dict):
+            out["pre_send_warning_keys"] = sorted([k for k, v in w.items() if v])
+    return out
 
 
 def _is_corner_match_market(lab: str) -> bool:
@@ -387,10 +396,36 @@ class FootballSignalOutcomeReasonService:
         merged = dict(f0)
         oa = dict(merged.get("football_outcome_audit") or {})
         oa.update((r.feature_patch or {}).get("football_outcome_audit") or {})
+        rat0 = e0.get("football_live_signal_rationale")
+        if isinstance(rat0, dict):
+            oa["pre_send_why_selected_codes"] = list(rat0.get("why_selected_codes") or [])
+            oa["pre_send_limited_live_context"] = bool(rat0.get("limited_live_context"))
+            w0 = rat0.get("warnings")
+            if isinstance(w0, dict):
+                oa["pre_send_warning_keys"] = sorted([k for k, v in w0.items() if v])
+            oa["pre_send_market_family"] = rat0.get("market_family")
+            oa["pre_send_send_path"] = rat0.get("send_path")
+            ocode = str(oa.get("outcome_reason_code") or "").strip() or "—"
+            oa["rationale_outcome_pair"] = "|".join(
+                [
+                    "codes:" + ",".join(oa["pre_send_why_selected_codes"][:24]),
+                    "outcome:" + ocode,
+                ]
+            )[:900]
         merged["football_outcome_audit"] = oa
         exn = dict(e0)
         es = dict(exn.get("football_settlement") or {})
         es.update((r.explanation_patch or {}).get("football_settlement") or {})
+        if isinstance(rat0, dict):
+            es["pre_send_rationale_slim"] = slim_rationale_for_settlement(rat0)
+            ocode2 = str(es.get("outcome_reason_code") or oa.get("outcome_reason_code") or "").strip() or "—"
+            es["rationale_vs_outcome"] = {
+                "why_selected_codes": list(rat0.get("why_selected_codes") or []),
+                "limited_live_context": bool(rat0.get("limited_live_context")),
+                "warnings": rat0.get("warnings") if isinstance(rat0.get("warnings"), dict) else {},
+                "outcome_reason_code": ocode2,
+                "settlement_bet_result": es.get("settlement_bet_result"),
+            }
         exn["football_settlement"] = es
         pl0.feature_snapshot_json = merged
         pl0.explanation_json = exn
@@ -452,6 +487,15 @@ async def _refresh_football_postmatch_summary(session: AsyncSession) -> None:
         "voids": n_v,
         "loss_by_reason": dict(top),
     }
+    rat_json: str | None = None
+    try:
+        from app.services.football_live_signal_rationale_service import aggregate_football_live_rationale_outcomes
+
+        rat_blob = await aggregate_football_live_rationale_outcomes(session, lookback=150)
+        rat_json = json.dumps(rat_blob, ensure_ascii=False)[:20000]
+    except Exception:
+        logger.exception("football rationale aggregate refresh failed")
+
     SignalRuntimeDiagnosticsService().update(
         football_postmatch_settled_count=len(sigs),
         football_postmatch_wins_last=n_w,
@@ -459,6 +503,7 @@ async def _refresh_football_postmatch_summary(session: AsyncSession) -> None:
         football_postmatch_voids_last=n_v,
         football_postmatch_top_loss_reasons=" | ".join(f"{a}:{b}" for a, b in top) if top else None,
         football_postmatch_status_lines_json=json.dumps(blob, ensure_ascii=False)[:20000],
+        football_postmatch_rationale_aggregate_json=rat_json,
     )
 
 
@@ -481,6 +526,9 @@ async def build_football_postmatch_verify_report(
     sigs = await srepo.list_latest_settled_football_with_logs(session, limit=lim)
     await _refresh_football_postmatch_summary(session)
     diag = SignalRuntimeDiagnosticsService().get_state()
+    from app.services.football_live_signal_rationale_service import aggregate_football_live_rationale_outcomes
+
+    rationale_agg = await aggregate_football_live_rationale_outcomes(session, lookback=max(80, int(loss_lookback)))
     loss_rows = await FootballLearningService().aggregate_outcome_reason_losses(
         session, lookback=max(50, int(loss_lookback))
     )
@@ -605,6 +653,14 @@ async def build_football_postmatch_verify_report(
                 if not pl0
                 else "сеттл до слоя, apply не писал, или исключение при apply"
             )
+        rat_d = ex0.get("football_live_signal_rationale") if isinstance(ex0.get("football_live_signal_rationale"), dict) else {}
+        rat_line = ""
+        if rat_d:
+            wc = rat_d.get("why_selected_codes") or []
+            rat_line = (
+                f"   rationale_codes={','.join(str(x) for x in wc[:12])}"
+                f"{'…' if len(wc) > 12 else ''}  limited_ctx={rat_d.get('limited_live_context')}\n"
+            )
         lines_d.append(
             f"{i + 1}) id={s.id}  {s.home_team} — {s.away_team}\n"
             f"   fam={fam}  odds={s.odds_at_signal}  res={st.result.value if st else '—'}\n"
@@ -612,6 +668,7 @@ async def build_football_postmatch_verify_report(
             f"   code={code}{why}\n"
             f"   RU: {tru}\n"
             f"   send_path={sp}  live_sanity={lshort}\n"
+            f"{rat_line}"
         )
 
     def _pct(n: int, d: int) -> str:
@@ -630,6 +687,32 @@ async def build_football_postmatch_verify_report(
         f"n={diag.get('football_postmatch_settled_count')}",
         f"W/L/V: {diag.get('football_postmatch_wins_last')}/{diag.get('football_postmatch_losses_last')}/{diag.get('football_postmatch_voids_last')}",
         f"top loss: {diag.get('football_postmatch_top_loss_reasons') or '—'}",
+        "",
+        "— Live send rationale × outcome (settled, lookback) —",
+        f"sample wins/losses with rationale payload: {rationale_agg.get('wins_with_rationale')}/"
+        f"{rationale_agg.get('losses_with_rationale')} (rows_scanned={rationale_agg.get('rows_used')})",
+        "top why_selected_codes on WINS:",
+        *[
+            f"  {row.get('code')}: {row.get('count')}"
+            for row in (rationale_agg.get("why_codes_top_wins") or [])[:10]
+        ],
+        "top why_selected_codes on LOSSES:",
+        *[
+            f"  {row.get('code')}: {row.get('count')}"
+            for row in (rationale_agg.get("why_codes_top_losses") or [])[:10]
+        ],
+        "warnings on losses:",
+        *[
+            f"  {row.get('code')}: {row.get('count')}"
+            for row in (rationale_agg.get("warnings_on_losses") or [])[:8]
+        ],
+        f"losses with late_stage_signal warning: {rationale_agg.get('losses_late_stage_warning_hits')}",
+        f"losses with limited_live_context: {rationale_agg.get('losses_limited_live_context_hits')}",
+        "top market_family × primary_code on losses:",
+        *[
+            f"  {row.get('market_family')} / {row.get('primary_code')}: {row.get('count')}"
+            for row in (rationale_agg.get("losses_by_market_family_primary_code") or [])[:10]
+        ],
         "",
         "— Learning aggregate_outcome_reason_losses —",
     ]

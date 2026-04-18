@@ -152,6 +152,8 @@ class SignalRuntimeDiagnosticsState:
     """Short joined list of top loss reason codes in the last sample."""
     football_postmatch_status_lines_json: str | None = None
     """JSON blob: sample wins/losses/voids and loss_by_reason."""
+    football_postmatch_rationale_aggregate_json: str | None = None
+    """WIN/LOSE aggregates for football_live_signal_rationale codes (last refresh)."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()

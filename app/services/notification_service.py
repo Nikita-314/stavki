@@ -153,33 +153,6 @@ class NotificationService:
             return "🕒 Идёт: live"
         return f"🕒 Идёт: {m} мин (live)"
 
-    def _football_live_signal_why_block(self, report: SignalAnalyticsReport) -> list[str]:
-        """Human «Почему сигнал» from prediction_log.explanation_json (live football only)."""
-        pls = report.prediction_logs or []
-        if not pls:
-            return []
-        raw = pls[0].explanation_json or {}
-        w = raw.get("football_live_signal_why")
-        if not isinstance(w, dict):
-            return []
-        lines = [
-            "🧠 Почему сигнал:",
-            f"• Тип рынка: {w.get('market_family_ru') or '—'}",
-            f"• Live-контекст: {w.get('live_context_ru') or '—'}",
-            "• Причина выбора:",
-        ]
-        for b in w.get("decision_bullets_ru") or []:
-            lines.append(f"  ◦ {b}")
-        pln = w.get("plausibility_line_ru")
-        if pln:
-            lines.append(f"• {pln}")
-        lines.append(f"• Send path: {w.get('send_path_ru') or '—'}")
-        ban = w.get("late_banner_ru")
-        if isinstance(ban, str) and ban.strip():
-            lines.append("")
-            lines.append(ban.strip())
-        return lines
-
     def format_signal_message(self, report: SignalAnalyticsReport) -> str:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
@@ -239,26 +212,20 @@ class NotificationService:
         )
         if bet_presentation.detail_label:
             lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
-        why_lines = self._football_live_signal_why_block(report)
-        if why_lines:
-            lines.append("")
-            lines.extend(why_lines)
-            lines.extend(["", f"📊 Приоритет скоринга в модели: {prio}"])
-        else:
-            lines.extend(
-                [
-                    "",
-                    "🧠 Анализ:",
-                    f"- Тип: {'LIVE' if bool(getattr(s, 'is_live', False)) else 'PREMATCH'}",
-                    f"- Идея: {idea_kind}",
-                    f"- Приоритет: {prio}",
-                ]
-            )
-            extra = self._football_analysis_lines(report)
-            if extra:
-                if "- Причины:" in extra:
-                    idx = extra.index("- Причины:")
-                    lines.extend(["- Причины:", *extra[idx + 1 :]])
+        lines.extend(
+            [
+                "",
+                "🧠 Анализ:",
+                f"- Тип: {'LIVE' if bool(getattr(s, 'is_live', False)) else 'PREMATCH'}",
+                f"- Идея: {idea_kind}",
+                f"- Приоритет: {prio}",
+            ]
+        )
+        extra = self._football_analysis_lines(report)
+        if extra:
+            if "- Причины:" in extra:
+                idx = extra.index("- Причины:")
+                lines.extend(["- Причины:", *extra[idx + 1 :]])
         return "\n".join(lines)
 
     def format_result_message(self, signal_report: SignalAnalyticsReport, quality_report: SignalQualityReport) -> str:

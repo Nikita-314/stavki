@@ -276,88 +276,6 @@ def _football_match_minute_from_candidate(candidate: ProviderSignalCandidate | N
     return None
 
 
-_LIVE_TELEGRAM_REASON_RU: dict[str, str] = {
-    "core_market_family": "основной live-рынок из разрешённого набора (1X2, тотал, фора, ОЗ, двойной шанс)",
-    "combo_market_family": "комбинированный рынок (ниже приоритет)",
-    "non_core_market_penalty": "нишевый рынок (в live-бою обычно не берём)",
-    "corners_cards_like_penalty": "углы / карточки / спецрынок",
-    "near_prematch_bonus": "матч скоро стартует",
-    "mid_horizon_neutral": "средний горизонт до старта",
-    "far_prematch_penalty": "далеко до старта",
-    "too_far_strong_penalty": "слишком далеко по времени",
-    "timing_unknown": "время старта в данных неясно",
-    "prematch_started_or_clock_skew": "возможное расхождение стартовых часов",
-    "live_bonus": "в скоринге учтён приоритет live-матча",
-    "red_card_home_observed": "в снимке учтена красная карточка хозяев",
-    "red_card_away_observed": "в снимке учтена красная карточка гостей",
-    "live_strength_signal_present": "доп. live-сила по счёту (ограниченная эвристика)",
-    "model_prob_and_edge_present": "есть оценка модели и edge",
-    "implied_prob_only": "сильный вклад оценки по коэффициенту (implied probability)",
-}
-
-
-def _build_football_live_signal_why_payload(
-    c: ProviderSignalCandidate, *, send_path: str | None = None
-) -> dict[str, Any] | None:
-    """Structured «Почему сигнал» for Telegram; stored on prediction_log.explanation_json."""
-    if not getattr(c.match, "is_live", False):
-        return None
-    from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
-
-    fam_svc = FootballSignalSendFilterService()
-    fam = fam_svc.get_market_family(c)
-    fam_ru = {
-        "totals": "Тотал",
-        "result": "Исход (1X2)",
-        "double_chance": "Двойной шанс",
-        "handicap": "Фора",
-        "btts": "Обе забьют",
-    }.get(fam, fam)
-    snap = dict(c.feature_snapshot_json or {})
-    fa = snap.get("football_analytics") if isinstance(snap.get("football_analytics"), dict) else {}
-    h = fa.get("score_home")
-    a = fa.get("score_away")
-    mn = _football_match_minute_from_candidate(c)
-    score_bits = []
-    if h is not None and a is not None:
-        score_bits.append(f"{h}:{a}")
-    if mn is not None:
-        score_bits.append(f"{mn}'")
-    if score_bits:
-        live_ctx = "Идёт live: " + ", ".join(score_bits)
-    else:
-        live_ctx = "Идёт live-матч (счёт/минута в снимке неполные — см. линию осторожно)"
-    expl = dict(c.explanation_json or {})
-    codes = list(expl.get("football_scoring_reason_codes") or [])
-    bullets: list[str] = []
-    for code in codes:
-        if isinstance(code, str) and code.startswith("learning_factor:"):
-            bullets.append("корректировка по истории сигналов")
-            continue
-        bullets.append(_LIVE_TELEGRAM_REASON_RU.get(str(code), f"фактор скоринга: {code}"))
-    if not bullets:
-        bullets.append("выбран лучший допустимый кандидат на матч после final live gate и sanity")
-    ls = expl.get("live_sanity") if isinstance(expl.get("live_sanity"), dict) else {}
-    pl = ls.get("plausibility")
-    pscore = ls.get("plausibility_score")
-    ls_ru = ls.get("reason_ru") or "—"
-    path = send_path or expl.get("football_live_send_path") or "normal"
-    path_ru = {
-        "normal": "обычный (normal)",
-        "soft": "мягкий (soft)",
-        "mixed": "смешанный",
-    }.get(str(path), str(path))
-    late = expl.get("football_live_late_stage_warning_ru")
-    return {
-        "market_family_ru": fam_ru,
-        "live_context_ru": live_ctx,
-        "decision_bullets_ru": bullets[:8],
-        "plausibility_line_ru": f"live sanity: {ls_ru} (plausibility={pl}, score={pscore})",
-        "send_path_ru": path_ru,
-        "late_banner_ru": late if isinstance(late, str) and late.strip() else None,
-    }
-
-
 def _attach_football_live_send_meta(
     c: ProviderSignalCandidate,
     meta: tuple[str, str | None] | None,
@@ -369,9 +287,12 @@ def _attach_football_live_send_meta(
     expl["football_live_send_path"] = tier
     if sub:
         expl["football_live_send_soft_label"] = sub
-    why = _build_football_live_signal_why_payload(c, send_path=tier)
-    if why:
-        expl["football_live_signal_why"] = why
+    from app.services.football_live_signal_rationale_service import build_football_live_signal_rationale
+
+    rationale = build_football_live_signal_rationale(c, send_path=tier, send_soft_label=sub)
+    if rationale:
+        expl["football_live_signal_rationale"] = rationale
+    expl.pop("football_live_signal_why", None)
     return c.model_copy(update={"explanation_json": expl})
 
 

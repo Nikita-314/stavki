@@ -332,6 +332,19 @@ def _format_signal_runtime_status_lines() -> list[str]:
         ]
         if tlr_loss:
             postmatch_block.append(f"• Топ причин минуса: {tlr_loss[:600]}")
+        _raj = diag.get("football_postmatch_rationale_aggregate_json")
+        if isinstance(_raj, str) and _raj.strip():
+            try:
+                _rb = json.loads(_raj)
+                postmatch_block.append(
+                    "• Live rationale×outcome (последний refresh): "
+                    f"wins_with_rationale={_rb.get('wins_with_rationale')} "
+                    f"losses_with_rationale={_rb.get('losses_with_rationale')} "
+                    f"late_warn_on_losses={_rb.get('losses_late_stage_warning_hits')} "
+                    f"limited_ctx_on_losses={_rb.get('losses_limited_live_context_hits')}"
+                )
+            except (json.JSONDecodeError, TypeError):
+                postmatch_block.append("• Live rationale×outcome: (не удалось разобрать JSON)")
     else:
         postmatch_block = []
     return [
