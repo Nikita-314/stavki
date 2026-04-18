@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     football_dedup_relaxed_interval_minutes: int = 30
     football_live_session_duration_minutes: int = 15
     football_live_max_signals_per_match: int = 12
+    # Live freshness / staleness (football live-session contour only)
+    football_live_manual_max_age_minutes: int = 45
+    football_live_event_max_kickoff_age_hours: float = 5.0
+    football_live_max_declared_live_minute: int = 130
+    # If the live HTTP payload was fetched this many minutes ago and only then processed, block (abnormal delay / stuck worker)
+    football_live_runtime_snapshot_max_age_minutes: int = 30
 
     model_config = SettingsConfigDict(
         env_file=".env",

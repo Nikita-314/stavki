@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlparse
 
 from aiogram import Bot
@@ -19,6 +20,12 @@ from app.schemas.provider_client import ProviderClientConfig
 from app.services.adapter_ingestion_service import AdapterIngestionService
 from app.services.candidate_filter_service import CandidateFilterService
 from app.services.deduplication_service import DeduplicationService
+from app.services.football_live_freshness_service import (
+    filter_stale_live_football_candidates,
+    evaluate_manual_live_source_freshness,
+    http_fetch_processing_delay_is_stale,
+    log_live_freshness_block,
+)
 from app.services.football_live_session_service import FootballLiveSessionService, build_live_idea_key
 from app.services.football_analytics_service import FootballAnalyticsService
 from app.services.football_learning_service import FootballLearningService
@@ -257,6 +264,12 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
         return "blocked_provider_not_configured"
     if msg == "football_live_session_inactive":
         return "blocked_no_live_session"
+    if msg == "blocked_stale_manual_live_source" or rr == "blocked_stale_manual_live_source":
+        return "blocked_stale_manual_live_source"
+    if msg == "blocked_stale_live_source" or rr == "blocked_stale_live_source":
+        return "blocked_stale_live_source"
+    if msg == "blocked_stale_live_events" or rr == "blocked_stale_live_events":
+        return "blocked_stale_live_events"
     if not res.fetch_ok and ("unauthorized" in rr or "quota" in rr or "live_unavailable" in rr):
         return "blocked_live_provider_auth_or_quota"
     if not res.fetch_ok:
@@ -308,6 +321,15 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
         "session_expires_at": snap.expires_at.isoformat() if snap.expires_at else None,
         "remaining_minutes": round(rem / 60.0, 2) if rem is not None else None,
         "last_cycle_at": snap.last_cycle_at.isoformat() if snap.last_cycle_at else None,
+        "source_mode": diag.get("source_mode"),
+        "source_age_seconds": diag.get("football_live_source_age_seconds"),
+        "source_timestamp": diag.get("football_live_source_timestamp"),
+        "source_freshness_label": diag.get("football_live_source_freshness"),
+        "stale_source": diag.get("football_live_stale_source"),
+        "live_freshness_candidates_before": diag.get("football_live_freshness_candidates_before"),
+        "live_freshness_events_accepted": diag.get("football_live_freshness_live_events_accepted"),
+        "live_freshness_stale_events_dropped": diag.get("football_live_freshness_stale_events_dropped"),
+        "live_freshness_stale_markets_dropped": diag.get("football_live_freshness_stale_markets_dropped"),
         "live_matches_found": diag.get("football_live_cycle_live_matches_found"),
         "candidates_before_filter": diag.get("football_live_cycle_candidates_before_filter"),
         "candidates_after_send_filter": diag.get("football_live_cycle_after_send_filter"),
@@ -322,7 +344,6 @@ def _football_log_live_session_report(*, res: AutoSignalCycleResult, diag: dict)
         "dry_run": res.dry_run,
         "provider": res.source_name,
         "live_auth_status": res.live_auth_status,
-        "source_mode": diag.get("source_mode"),
         "effective_source": diag.get("football_live_effective_source"),
         "is_real_source": diag.get("is_real_source"),
         "fetch_ok": res.fetch_ok,
@@ -428,6 +449,14 @@ class AutoSignalService:
             football_live_fields_in_last_cycle=False,
             football_injuries_data_available=False,
             football_line_movement_available=False,
+            football_live_source_timestamp=None,
+            football_live_source_age_seconds=None,
+            football_live_stale_source=False,
+            football_live_source_freshness=None,
+            football_live_freshness_candidates_before=0,
+            football_live_freshness_live_events_accepted=0,
+            football_live_freshness_stale_events_dropped=0,
+            football_live_freshness_stale_markets_dropped=0,
         )
         if runtime.is_paused():
             logger.info("[FOOTBALL][BLOCK] skipped due to paused")
@@ -599,9 +628,13 @@ class AutoSignalService:
         fallback_used = False
         fallback_source_name = None
         source_kind = "live"
+        live_payload_fetched_at_utc: datetime | None = None
+        line_manual_uploaded_at: str | None = None
+        manual_freshness_result = None
 
         if fetch_res.ok and isinstance(fetch_res.payload, dict):
             payload = fetch_res.payload
+            live_payload_fetched_at_utc = datetime.now(timezone.utc)
             source_name = str(fetch_res.source_name or source_name)
             diagnostics.update(
                 last_fetch_status="ok",
@@ -657,6 +690,43 @@ class AutoSignalService:
                             last_live_http_status=fetch_res.status_code,
                             rejection_reason=f"non_real_source_blocked: {manual_source_mode}",
                         )
+                    if str(manual_source_mode).lower() == "semi_live_manual":
+                        mf = evaluate_manual_live_source_freshness(
+                            uploaded_at=fallback.get("uploaded_at"),
+                            file_path=str(fallback.get("file_path") or "") or None,
+                            settings=settings,
+                        )
+                        if mf.stale:
+                            diagnostics.update(
+                                last_fetch_status="blocked_stale_manual_live_source",
+                                last_delivery_reason="blocked_stale_manual_live_source",
+                                note=f"stale_manual_live_source:{mf.reason}",
+                                football_live_stale_source=True,
+                                football_live_source_age_seconds=mf.age_seconds,
+                                football_live_source_freshness="stale",
+                            )
+                            return AutoSignalCycleResult(
+                                endpoint=fetch_res.endpoint,
+                                fetch_ok=True,
+                                preview_candidates=0,
+                                preview_skipped_items=0,
+                                created_signal_ids=[],
+                                created_signals_count=0,
+                                skipped_candidates_count=0,
+                                notifications_sent_count=0,
+                                preview_only=False,
+                                message="blocked_stale_manual_live_source",
+                                runtime_paused=False,
+                                runtime_active_sports=active_sports,
+                                source_name=source_name,
+                                live_auth_status=live_auth_status,
+                                last_live_http_status=fetch_res.status_code,
+                                fallback_used=True,
+                                fallback_source_name="manual_winline_json",
+                                rejection_reason="blocked_stale_manual_live_source",
+                            )
+                        manual_freshness_result = mf
+                    line_manual_uploaded_at = fallback.get("uploaded_at")
                     preview = fallback["preview"]
                     payload = fallback["payload"]
                     fallback_used = True
@@ -785,8 +855,144 @@ class AutoSignalService:
         raw_events_count = int(preview.total_events)
         normalized_markets_count = int(preview.total_markets)
         preview_skipped_items = int(preview.skipped_items)
-        candidates_before_filter = self._filter_football_live_only(list(preview.candidates))
+
+        live_only_pool = self._filter_football_live_only(list(preview.candidates))
+        pre_fresh_len = len(live_only_pool)
+
+        delay_stale = False
+        delay_age: float | None = None
+        if source_kind == "live" and live_payload_fetched_at_utc is not None:
+            delay_stale, delay_age = http_fetch_processing_delay_is_stale(
+                live_payload_fetched_at_utc,
+                settings=settings,
+            )
+        if delay_stale:
+            diagnostics.update(
+                last_delivery_reason="blocked_stale_live_source",
+                last_fetch_status="blocked_stale_live_source",
+                note="blocked_stale_live_source:http_processing_delay",
+                football_live_stale_source=True,
+                football_live_source_age_seconds=delay_age,
+                football_live_source_freshness="stale",
+            )
+            logger.info(
+                "[FOOTBALL][BLOCK] blocked_stale_live_source processing_delay_seconds=%s max_minutes=%s",
+                delay_age,
+                settings.football_live_runtime_snapshot_max_age_minutes,
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=0,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=0,
+                notifications_sent_count=0,
+                preview_only=False,
+                message="blocked_stale_live_source",
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_stale_live_source",
+            )
+
+        source_age_seconds: float | None = None
+        source_ts_iso: str | None = None
+        if source_kind == "live" and live_payload_fetched_at_utc is not None:
+            source_ts_iso = live_payload_fetched_at_utc.isoformat()
+            source_age_seconds = (datetime.now(timezone.utc) - live_payload_fetched_at_utc).total_seconds()
+        elif manual_freshness_result is not None:
+            source_age_seconds = manual_freshness_result.age_seconds
+            source_ts_iso = str(line_manual_uploaded_at) if line_manual_uploaded_at else None
+        elif fallback_used:
+            source_ts_iso = str(line_manual_uploaded_at) if line_manual_uploaded_at else None
+
+        (
+            candidates_before_filter,
+            freshness_rows,
+            fresh_ev_ct,
+            stale_ev_ct,
+            dropped_stale_markets,
+        ) = filter_stale_live_football_candidates(
+            live_only_pool,
+            source_mode=source_kind,
+            source_age_seconds=source_age_seconds,
+            source_timestamp_iso=source_ts_iso,
+            settings=settings,
+        )
+        log_live_freshness_block(freshness_rows)
         preview_candidates = len(candidates_before_filter)
+
+        if source_kind == "live":
+            src_fresh_lbl = "fresh"
+        elif manual_freshness_result is not None:
+            src_fresh_lbl = "fresh"
+        else:
+            src_fresh_lbl = "unknown"
+
+        diagnostics.update(
+            football_live_source_timestamp=source_ts_iso,
+            football_live_source_age_seconds=source_age_seconds,
+            football_live_stale_source=False,
+            football_live_source_freshness=src_fresh_lbl,
+            football_live_freshness_candidates_before=pre_fresh_len,
+            football_live_freshness_live_events_accepted=fresh_ev_ct,
+            football_live_freshness_stale_events_dropped=stale_ev_ct,
+            football_live_freshness_stale_markets_dropped=dropped_stale_markets,
+        )
+
+        if pre_fresh_len > 0 and len(candidates_before_filter) == 0:
+            diagnostics.update(
+                last_delivery_reason="blocked_stale_live_events",
+                football_live_cycle_bottleneck="blocked_stale_live_events",
+            )
+            _dbg_stale = compile_football_cycle_debug(
+                fb_preview=_football_only(live_only_pool),
+                fb_cvf=[],
+                fb_post_send=[],
+                fb_post_integrity=[],
+                enriched_scored=None,
+                finalists=None,
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=None,
+                integrity_dropped_checks=[],
+                dry_run=dry_run,
+                global_block="blocked_stale_live_events",
+            )
+            if isinstance(_dbg_stale, dict):
+                _dbg_stale["football_live_freshness_rows"] = [r.__dict__ for r in freshness_rows]
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=0,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=0,
+                notifications_sent_count=0,
+                preview_only=False,
+                message="blocked_stale_live_events",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=0,
+                candidates_after_filter_count=0,
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_stale_live_events",
+                football_cycle_debug=_dbg_stale,
+            )
+
         logger.info("[FOOTBALL] raw events fetched: %s", raw_events_count)
         if not candidates_before_filter:
             logger.info("[FOOTBALL] candidates before filter: 0 (no live football matches)")

@@ -75,6 +75,14 @@ class SignalRuntimeDiagnosticsState:
     football_live_cycle_bottleneck: str | None = None
     football_live_effective_source: str | None = None
     football_live_last_notify_path: str | None = None
+    football_live_source_timestamp: str | None = None
+    football_live_source_age_seconds: float | None = None
+    football_live_stale_source: bool = False
+    football_live_source_freshness: str | None = None
+    football_live_freshness_candidates_before: int = 0
+    football_live_freshness_live_events_accepted: int = 0
+    football_live_freshness_stale_events_dropped: int = 0
+    football_live_freshness_stale_markets_dropped: int = 0
 
 
 _STATE = SignalRuntimeDiagnosticsState()

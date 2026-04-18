@@ -247,6 +247,9 @@ def _format_signal_runtime_status_lines() -> list[str]:
     started_s = diag.get("football_live_session_started_at") or "—"
     expires_s = diag.get("football_live_session_expires_at") or "—"
     bn = diag.get("football_live_cycle_bottleneck") or "—"
+    src_age = diag.get("football_live_source_age_seconds")
+    src_age_txt = f"{round(float(src_age), 1)} с" if src_age is not None else "—"
+    ff = diag.get("football_live_source_freshness") or "—"
     return [
         "📊 Статус сигналов",
         "",
@@ -256,6 +259,13 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Истекает: {expires_s}",
         f"• Осталось: {rem_txt} мин",
         f"• Live-матчей (последний цикл): {live_m}",
+        f"• Свежесть источника: {ff}",
+        f"• Возраст источника: {src_age_txt}",
+        f"• Источник протухший: {_fmt_yes_no(bool(diag.get('football_live_stale_source')))}",
+        f"• Live-кандидатов до freshness: {diag.get('football_live_freshness_candidates_before') or 0}",
+        f"• Live-матчей принято (freshness): {diag.get('football_live_freshness_live_events_accepted') or 0}",
+        f"• Протухших матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
+        f"• Рынков отсеяно со stale-матчей: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
         f"• Новых идей к отправке (последний цикл): {new_ideas}",
         f"• Повторов идей отсеяно (сессия): {diag.get('football_live_duplicate_ideas_blocked') or 0}",
         f"• Отправлено в Telegram (сессия): {diag.get('football_live_telegram_sent_session') or 0}",
@@ -720,6 +730,9 @@ def _humanize_rejection_for_owner(raw: str | None) -> str:
         ("dropped_invalid_total_scope", "несовпадение тотала по области действия"),
         ("payload_is_not_dict", "ошибка формата данных провайдера"),
         ("football_live_session_inactive", "live-сессия не запущена — нажмите ▶️ Старт"),
+        ("blocked_stale_manual_live_source", "ручной live JSON слишком старый"),
+        ("blocked_stale_live_source", "снимок live устарел по задержке обработки"),
+        ("blocked_stale_live_events", "все live-матчи признаны протухшими"),
     ]
     for needle, nice in mapping:
         if needle.lower() in s:
@@ -749,6 +762,9 @@ def _humanize_live_bottleneck_ru(token: str | None) -> str:
         "dry_run_ok": "тестовый прогон: сигнал был бы выбран",
         "ok_no_signal_selected": "цикл завершён без выбранной ставки",
         "blocked_unknown": "причина не классифицирована",
+        "blocked_stale_manual_live_source": "ручной live JSON слишком старый",
+        "blocked_stale_live_source": "снимок live устарел по задержке обработки",
+        "blocked_stale_live_events": "все live-матчи признаны протухшими",
     }
     return m.get(token, token.replace("_", " "))
 
@@ -878,12 +894,24 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         lines.append(f"⚠️ Режим источника: {sm} (не чистый live).")
         lines.append("")
 
+    src_age_v = diag.get("football_live_source_age_seconds")
+    src_age_line = f"{round(float(src_age_v), 1)} с" if src_age_v is not None else "—"
+
     lines.extend(
         [
             "📡 Источник:",
             f"• Режим: {mode_line}",
             f"• Статус Live API: {live_api_human}",
             f"• Эффективный источник данных: {eff}",
+            "",
+            "🧪 Freshness (live-only):",
+            f"• Свежесть источника: {diag.get('football_live_source_freshness') or '—'}",
+            f"• Возраст источника: {src_age_line}",
+            f"• Источник stale: {_fmt_yes_no(bool(diag.get('football_live_stale_source')))}",
+            f"• Live-кандидатов до freshness: {diag.get('football_live_freshness_candidates_before') or 0}",
+            f"• Live-матчей принято (freshness): {diag.get('football_live_freshness_live_events_accepted') or 0}",
+            f"• Протухших матчей отсеяно: {diag.get('football_live_freshness_stale_events_dropped') or 0}",
+            f"• Рынков отсеяно со stale-матчей: {diag.get('football_live_freshness_stale_markets_dropped') or 0}",
             "",
             "📊 Сводка (live-only цепочка):",
             f"• Матчей найдено: {matches_found}",
