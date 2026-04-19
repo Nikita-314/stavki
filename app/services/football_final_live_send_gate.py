@@ -307,7 +307,7 @@ def apply_final_live_send_gate(
                 ok_sanity_res = res
                 break
             tk = str(res.block_token or "")
-            if tk == "blocked_suspicious_core_live_signal":
+            if tk in ("blocked_suspicious_core_live_signal", "blocked_missing_live_context_from_source"):
                 suspicious_core_signals_blocked += 1
             elif tk == "blocked_core_late_high_gap_total":
                 core_live_extra_sanity_blocked += 1

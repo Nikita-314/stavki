@@ -141,23 +141,78 @@ class FootballAnalyticsService:
             red_a = red_a if red_a is not None else ra
         return score_h, score_a, minute, red_h, red_a
 
+    def _minute_from_winline_clock(self, src: str | None) -> int | None:
+        """Match `enrich_winline_event_for_ingest`: last number in clock string, 2H minute offset."""
+        if not src or not str(src).strip():
+            return None
+        s = str(src).strip()
+        nums = re.findall(r"(\d{1,3})", s)
+        if not nums:
+            return None
+        try:
+            minute = int(nums[-1])
+        except ValueError:
+            return None
+        sl = s.lower()
+        if "2т" in sl or "2h" in sl:
+            if minute < 45:
+                minute = 45 + minute
+        return minute if minute >= 0 else None
+
+    def _score_pair_from_text(self, text: str | None) -> tuple[int | None, int | None]:
+        if not text:
+            return None, None
+        mm = re.search(r"\b(\d{1,2})\s*[:\-–]\s*(\d{1,2})\b", text)
+        if not mm:
+            return None, None
+        try:
+            return int(mm.group(1)), int(mm.group(2))
+        except ValueError:
+            return None, None
+
+    def _first_int_candidate(self, lowered_keys: dict[str, Any], *key_opts: str) -> int | None:
+        """Pick first present key (0 is valid — do not use `or` chains on scores)."""
+        for k in key_opts:
+            if k not in lowered_keys:
+                continue
+            v = lowered_keys[k]
+            if v is None:
+                continue
+            coerced = self._coerce_int(v)
+            if coerced is not None:
+                return coerced
+        return None
+
     def _scan_dict_for_live(self, d: dict[str, Any]) -> tuple[int | None, int | None, int | None, int | None, int | None]:
         if not d:
             return None, None, None, None, None
         lowered_keys = {str(k).lower(): v for k, v in d.items()}
-        score_h = self._coerce_int(
-            lowered_keys.get("home_score")
-            or lowered_keys.get("score_home")
-            or lowered_keys.get("homescore")
-            or lowered_keys.get("goals_home")
+        score_h = self._first_int_candidate(
+            lowered_keys, "home_score", "score_home", "homescore", "goals_home"
         )
-        score_a = self._coerce_int(
-            lowered_keys.get("away_score")
-            or lowered_keys.get("score_away")
-            or lowered_keys.get("awayscore")
-            or lowered_keys.get("goals_away")
+        score_a = self._first_int_candidate(
+            lowered_keys, "away_score", "score_away", "awayscore", "goals_away"
         )
-        minute = self._coerce_int(lowered_keys.get("minute") or lowered_keys.get("match_minute") or lowered_keys.get("time"))
+        minute = self._first_int_candidate(lowered_keys, "minute", "match_minute")
+        # `time` is often a Winline display string (e.g. "2Т 57'"), not an int — parse clock instead.
+        if minute is None:
+            for key in ("winline_source_time", "winline_time", "sourcetime", "time"):
+                raw_t = lowered_keys.get(key)
+                if raw_t is None:
+                    continue
+                if isinstance(raw_t, str):
+                    minute = self._minute_from_winline_clock(raw_t)
+                    if minute is not None:
+                        break
+        if score_h is None or score_a is None:
+            for key in ("winline_source_time", "winline_time", "sourcetime", "time"):
+                v = lowered_keys.get(key)
+                if not isinstance(v, str) or not v.strip():
+                    continue
+                sh, sa = self._score_pair_from_text(v)
+                if sh is not None and sa is not None:
+                    score_h, score_a = sh, sa
+                    break
         red_h = self._coerce_int(lowered_keys.get("red_cards_home") or lowered_keys.get("redcardshome"))
         red_a = self._coerce_int(lowered_keys.get("red_cards_away") or lowered_keys.get("redcardsaway"))
         return score_h, score_a, minute, red_h, red_a

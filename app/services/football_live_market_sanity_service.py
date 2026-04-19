@@ -649,13 +649,6 @@ def _coerce_int0(v: Any) -> int | None:
     return i
 
 
-def _as_tuple_from_dict(fa: dict) -> tuple[int | None, int | None, int | None]:
-    h = _coerce_int0(fa.get("score_home"))
-    a = _coerce_int0(fa.get("score_away"))
-    mn = _coerce_int0(fa.get("minute"))
-    return h, a, mn
-
-
 class FootballLiveMarketSanityService:
     """Pre-send live-only checks: bet text, European handicap, totals vs score, late timing, late W outcome."""
 
@@ -663,10 +656,15 @@ class FootballLiveMarketSanityService:
         self, c: ProviderSignalCandidate
     ) -> tuple[int | None, int | None, int | None]:
         raw: dict[str, Any] = dict(c.feature_snapshot_json or {})
-        fa: dict | None = raw.get("football_analytics")
-        if isinstance(fa, dict) and (fa.get("score_home") is not None or fa.get("score_away") is not None):
-            return _as_tuple_from_dict(fa)
         sh, sa, mn, _, _ = FootballAnalyticsService()._extract_live_fields(raw)
+        fa = raw.get("football_analytics")
+        if isinstance(fa, dict):
+            fh = _coerce_int0(fa.get("score_home"))
+            ah = _coerce_int0(fa.get("score_away"))
+            mm = _coerce_int0(fa.get("minute"))
+            sh = sh if sh is not None else fh
+            sa = sa if sa is not None else ah
+            mn = mn if mn is not None else mm
         return sh, sa, mn
 
     def validate(
@@ -730,12 +728,23 @@ class FootballLiveMarketSanityService:
             and not family_svc.is_corner_market(c)
             and (h is None or a is None or minute is None)
         ):
+            missing_bits: list[str] = []
+            if h is None:
+                missing_bits.append("score_home")
+            if a is None:
+                missing_bits.append("score_away")
+            if minute is None:
+                missing_bits.append("minute")
             return LiveSanityResult(
                 passed=False,
                 plausibility="weak",
                 plausibility_score=30,
-                block_token="blocked_suspicious_core_live_signal",
-                reason_ru="Исход 1X2 без полного live-снимка (нужны счёт и минута)",
+                block_token="blocked_missing_live_context_from_source",
+                reason_ru=(
+                    "Нет полного live-контекста в данных провайдера для 1X2: отсутствует "
+                    + ", ".join(missing_bits)
+                    + " (нужны счёт и минута в снимке)"
+                ),
                 bet_text=bet,
             )
         ok_default = LiveSanityResult(

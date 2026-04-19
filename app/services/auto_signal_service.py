@@ -1259,6 +1259,7 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_impossible_live_outcome": "исход несовместим с текущим счётом (невозможен)",
         "blocked_low_live_plausibility": "низкая plausibility (поздний тайм / счёт / тотал)",
         "blocked_suspicious_core_live_signal": "сомнительный core live-сигнал (контекст/линия)",
+        "blocked_missing_live_context_from_source": "нет счёта/минуты в снимке провайдера (1X2)",
         "blocked_core_late_high_gap_total": "тотал: слишком много голов нужно на поздней стадии",
         "blocked_late_live_market": "поздняя стадия / timing: рынок уже неадекватен для live-сигнала",
     }
