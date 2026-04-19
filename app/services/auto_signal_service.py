@@ -1642,6 +1642,7 @@ class AutoSignalService:
         bot: Bot,
         *,
         dry_run: bool = False,
+        adaptive_compare_only: bool = False,
     ) -> AutoSignalCycleResult:
         settings = get_settings()
         runtime = SignalRuntimeSettingsService()
@@ -2603,6 +2604,49 @@ class AutoSignalService:
             logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_total_scope=%s", invalid_total_scope_drops)
         post_integrity_count = len(candidates_to_ingest)
         if not candidates_to_ingest:
+            if adaptive_compare_only:
+                from app.services.football_live_adaptive_compare_service import run_adaptive_compare_report
+
+                _lm = int(send_filter_result.stats.live_matches) if send_filter_result else 0
+                _cmp = await run_adaptive_compare_report(
+                    sessionmaker,
+                    [],
+                    settings,
+                    dry_run=True,
+                    pipeline_meta={
+                        "live_matches_total": _lm,
+                        "matches_after_freshness": len(
+                            {_football_event_id(c) for c in candidates_before_filter if _football_event_id(c)}
+                        ),
+                        "preview_candidates": preview_candidates,
+                    },
+                )
+                return AutoSignalCycleResult(
+                    endpoint=fetch_res.endpoint,
+                    fetch_ok=True,
+                    preview_candidates=preview_candidates,
+                    preview_skipped_items=preview_skipped_items,
+                    created_signal_ids=[],
+                    created_signals_count=0,
+                    skipped_candidates_count=max(0, len(filtered_candidates) - post_integrity_count),
+                    notifications_sent_count=0,
+                    preview_only=False,
+                    message="adaptive_compare_only",
+                    raw_events_count=raw_events_count,
+                    normalized_markets_count=normalized_markets_count,
+                    candidates_before_filter_count=len(candidates_before_filter),
+                    candidates_after_filter_count=len(filtered_candidates),
+                    runtime_paused=False,
+                    runtime_active_sports=active_sports,
+                    source_name=source_name,
+                    live_auth_status=live_auth_status,
+                    last_live_http_status=fetch_res.status_code,
+                    fallback_used=fallback_used,
+                    fallback_source_name=fallback_source_name,
+                    rejection_reason="no_post_integrity_candidates",
+                    dry_run=True,
+                    football_adaptive_compare=_cmp,
+                )
             too_far_drops = (
                 0
                 if send_filter_result is None
@@ -2691,6 +2735,52 @@ class AutoSignalService:
 
         logger.info("[FOOTBALL] final signals to send: %s", len(candidates_to_ingest))
         self._log_final_candidates(candidates_to_ingest)
+
+        if adaptive_compare_only:
+            from app.services.football_live_adaptive_compare_service import run_adaptive_compare_report
+
+            _lm = int(send_filter_result.stats.live_matches) if send_filter_result else 0
+            _cmp = await run_adaptive_compare_report(
+                sessionmaker,
+                list(candidates_to_ingest),
+                settings,
+                dry_run=True,
+                pipeline_meta={
+                    "live_matches_total": _lm,
+                    "matches_after_freshness": len(
+                        {_football_event_id(c) for c in candidates_before_filter if _football_event_id(c)}
+                    ),
+                    "preview_candidates": preview_candidates,
+                },
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="adaptive_compare_only",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                report_after_filter=post_send_filter_count,
+                report_after_integrity=len(candidates_to_ingest),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason=None,
+                dry_run=True,
+                football_adaptive_compare=_cmp,
+            )
 
         analytics_enabled = bool(settings.football_analytics_enabled)
         learning_enabled = bool(settings.football_learning_enabled)

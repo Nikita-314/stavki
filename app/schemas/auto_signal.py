@@ -43,4 +43,6 @@ class AutoSignalCycleResult(BaseModel):
     report_dedup_skipped: int | None = None
     football_cycle_debug: dict | None = None
     """Structured football-only diagnostics for dry_run / logging (per-match rows, counts, samples)."""
+    football_adaptive_compare: dict | None = None
+    """OFF vs ON adaptive learning on same post-integrity candidates (adaptive_compare_only mode)."""
 

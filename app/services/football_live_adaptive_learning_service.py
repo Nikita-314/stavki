@@ -30,11 +30,12 @@ from app.services.football_live_signal_rationale_service import (
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 
 # Win-rate centered at 0.5; keep per-feature impact small.
-_MIN_SAMPLES_TAG = 5
+# Calibrated after OFF vs ON harness: stronger bite when history exists; still bounded.
+_MIN_SAMPLES_TAG = 4
 _MIN_SAMPLES_FAMILY = 8
-_MAX_ABS_PER_KEY = 1.0
-_MAX_ABS_TOTAL = 3.0
-_TAG_RATE_SCALE = 4.0  # (rate - 0.5) * scale before capping
+_MAX_ABS_PER_KEY = 1.15
+_MAX_ABS_TOTAL = 3.5
+_TAG_RATE_SCALE = 5.0  # (rate - 0.5) * scale before capping
 
 
 @dataclass
