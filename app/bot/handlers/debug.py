@@ -347,6 +347,32 @@ def _format_signal_runtime_status_lines() -> list[str]:
                 postmatch_block.append("• Live rationale×outcome: (не удалось разобрать JSON)")
     else:
         postmatch_block = []
+    adaptive_block: list[str] = []
+    _alj = diag.get("football_live_adaptive_learning_json")
+    if isinstance(_alj, str) and _alj.strip():
+        try:
+            alb = json.loads(_alj)
+            meta = alb.get("meta") or {}
+            adaptive_block = [
+                "",
+                "— Football LIVE adaptive (settled → score delta) —",
+                f"• lookback≤{meta.get('lookback_limit', '—')}  rationale_rows={meta.get('rows_with_rationale', '—')}",
+                f"• активных penalty: {len(alb.get('penalties_active') or [])}  boost: {len(alb.get('boosts_active') or [])}",
+            ]
+            pen = alb.get("penalties_active") or []
+            if pen:
+                s = "; ".join(
+                    f"{p.get('key')} ({p.get('delta')})" for p in pen[:6] if isinstance(p, dict)
+                )
+                adaptive_block.append(f"• примеры penalty: {s[:480]}")
+            bst = alb.get("boosts_active") or []
+            if bst:
+                s = "; ".join(
+                    f"{p.get('key')} ({p.get('delta')})" for p in bst[:6] if isinstance(p, dict)
+                )
+                adaptive_block.append(f"• примеры boost: {s[:480]}")
+        except (json.JSONDecodeError, TypeError):
+            adaptive_block = ["", "— Football LIVE adaptive —", "• (не удалось разобрать JSON)"]
     return [
         "📊 Статус сигналов",
         "",
@@ -437,6 +463,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"📨 Отправлено (цикл→канал): {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {delivery_reason}",
         *postmatch_block,
+        *adaptive_block,
         "",
         "— Аналитика и обучение (флаги, без выдуманных данных) —",
         f"Сбор признаков в снимке: {_fmt_yes_no(bool(diag.get('football_analytics_enabled')))}",

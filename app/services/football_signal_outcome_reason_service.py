@@ -496,6 +496,18 @@ async def _refresh_football_postmatch_summary(session: AsyncSession) -> None:
     except Exception:
         logger.exception("football rationale aggregate refresh failed")
 
+    adaptive_json: str | None = None
+    try:
+        from app.services.football_live_adaptive_learning_service import (
+            build_live_adaptive_snapshot,
+            snapshot_json_for_diagnostics,
+        )
+
+        adaptive_snap = await build_live_adaptive_snapshot(session, lookback=400)
+        adaptive_json = snapshot_json_for_diagnostics(adaptive_snap)
+    except Exception:
+        logger.exception("football live adaptive snapshot refresh failed")
+
     SignalRuntimeDiagnosticsService().update(
         football_postmatch_settled_count=len(sigs),
         football_postmatch_wins_last=n_w,
@@ -504,6 +516,7 @@ async def _refresh_football_postmatch_summary(session: AsyncSession) -> None:
         football_postmatch_top_loss_reasons=" | ".join(f"{a}:{b}" for a, b in top) if top else None,
         football_postmatch_status_lines_json=json.dumps(blob, ensure_ascii=False)[:20000],
         football_postmatch_rationale_aggregate_json=rat_json,
+        football_live_adaptive_learning_json=adaptive_json,
     )
 
 
@@ -676,6 +689,28 @@ async def build_football_postmatch_verify_report(
             return "n/a"
         return f"{100.0 * n / d:.1f}%"
 
+    adaptive_section: list[str] = []
+    _aj = diag.get("football_live_adaptive_learning_json") if isinstance(diag, dict) else None
+    if isinstance(_aj, str) and _aj.strip():
+        try:
+            aj = json.loads(_aj)
+            meta = aj.get("meta") or {}
+            adaptive_section = [
+                "",
+                "— LIVE adaptive (score deltas from settled live rationale) —",
+                f"lookback≤{meta.get('lookback_limit', '—')}  scanned={meta.get('rows_scanned', '—')}  "
+                f"rationale_rows={meta.get('rows_with_rationale', '—')}",
+            ]
+            for label, key in (("penalty", "penalties_active"), ("boost", "boosts_active")):
+                for row in (aj.get(key) or [])[:10]:
+                    if isinstance(row, dict):
+                        adaptive_section.append(
+                            f"  {label} {row.get('key')}: delta={row.get('delta')}  "
+                            f"n={row.get('n')}  W/L={row.get('wins')}/{row.get('losses')}"
+                        )
+        except (json.JSONDecodeError, TypeError, KeyError):
+            adaptive_section = ["", "— LIVE adaptive —", "  (не удалось разобрать JSON)"]
+
     out: list[str] = [
         "=== Football post-match verify (settled) ===",
         f"Query: list_latest_settled_football limit={lim} → {len(sigs)} rows",
@@ -713,6 +748,7 @@ async def build_football_postmatch_verify_report(
             f"  {row.get('market_family')} / {row.get('primary_code')}: {row.get('count')}"
             for row in (rationale_agg.get("losses_by_market_family_primary_code") or [])[:10]
         ],
+        *adaptive_section,
         "",
         "— Learning aggregate_outcome_reason_losses —",
     ]

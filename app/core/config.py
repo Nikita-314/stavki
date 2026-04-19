@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     football_allow_manual_production_fallback: bool = False
     football_analytics_enabled: bool = True
     football_learning_enabled: bool = True
+    football_live_adaptive_learning_enabled: bool = True
+    """Football LIVE only: bounded additive score adjustments from settled rationale/outcome history."""
     football_min_signal_score: float = 55.0
     football_dedup_relaxed_interval_minutes: int = 30
     football_live_session_duration_minutes: int = 15

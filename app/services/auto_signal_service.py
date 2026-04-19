@@ -34,6 +34,13 @@ from app.services.football_live_freshness_service import (
 from app.services.football_live_session_service import FootballLiveSessionService, build_live_idea_key
 from app.services.football_analytics_service import FootballAnalyticsService
 from app.services.football_learning_service import FootballLearningService
+from app.services.football_live_adaptive_learning_service import (
+    apply_live_adaptive_adjustment,
+    base_signal_score_for_threshold,
+    build_live_adaptive_snapshot,
+    preview_live_adaptive_tag_keys,
+    snapshot_json_for_diagnostics,
+)
 from app.services.football_signal_integrity_service import FootballSignalIntegrityService
 from app.services.football_signal_scoring_service import FootballSignalScoringService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
@@ -74,7 +81,7 @@ def classify_live_sendable_candidate(
     single_relief_max_gap: float,
 ) -> tuple[str, str | None]:
     """normal | soft | reject — soft only for main markets with reason_codes, not exotic/corners."""
-    sc = float(c.signal_score or 0)
+    sc = base_signal_score_for_threshold(c)
     if sc >= base:
         return "normal", None
     floor = max(_LIVE_ABS_SCORE_FLOOR, base - 3.0)
@@ -684,6 +691,19 @@ def compile_football_cycle_debug(
         if best_c is not None and final_status == "blocked_low_score":
             gap_to_sendable = round(float(base_for_display) - float(best_sc), 2)
 
+        learning_extra: dict[str, Any] = {}
+        if best_c is not None:
+            fsb = best_c.feature_snapshot_json or {}
+            la = fsb.get("football_live_adaptive_learning")
+            if isinstance(la, dict) and la.get("enabled"):
+                learning_extra = {
+                    "best_candidate_score_base": la.get("base_signal_score"),
+                    "best_candidate_learning_adjustment_total": la.get("learning_adjustment_total"),
+                    "best_candidate_learning_reasons_sample": ", ".join(
+                        (la.get("learning_adjustment_reasons") or [])[:10]
+                    )[:500],
+                }
+
         n_scored = int(scored_eid_counts.get(eid, 0))
         best_bet_text: str | None
         if best_c is not None:
@@ -741,6 +761,7 @@ def compile_football_cycle_debug(
                 "best_bet_text": best_bet_text,
                 "best_candidate_odds": best_odds,
                 "best_candidate_score": round(best_sc, 2) if best_c is not None else None,
+                **learning_extra,
                 "best_candidate_is_corner_like": best_is_corner_like,
                 "sendable_status": best_tier,
                 "soft_subreason": soft_sub,
@@ -2673,13 +2694,18 @@ class AutoSignalService:
 
         analytics_enabled = bool(settings.football_analytics_enabled)
         learning_enabled = bool(settings.football_learning_enabled)
+        live_adaptive_enabled = bool(getattr(settings, "football_live_adaptive_learning_enabled", True))
         learning_multipliers: dict[str, float] = {}
         learning_aggregates: list = []
-        if learning_enabled and candidates_to_ingest:
+        live_adaptive_snapshot = None
+        if candidates_to_ingest and (learning_enabled or live_adaptive_enabled):
             async with sessionmaker() as learn_session:
-                learning_multipliers, learning_aggregates = await FootballLearningService().compute_family_multipliers(
-                    learn_session
-                )
+                if learning_enabled:
+                    learning_multipliers, learning_aggregates = await FootballLearningService().compute_family_multipliers(
+                        learn_session
+                    )
+                if live_adaptive_enabled:
+                    live_adaptive_snapshot = await build_live_adaptive_snapshot(learn_session)
 
         analytics_svc = FootballAnalyticsService()
         scoring_svc = FootballSignalScoringService()
@@ -2699,6 +2725,7 @@ class AutoSignalService:
                 market_family=family,
                 learning_factor=lf,
             )
+            base_decimal = scoring_svc.to_signal_score_decimal(breakdown)
             prev_fs = dict(cand.feature_snapshot_json or {})
             prev_expl = dict(cand.explanation_json or {})
             summary = [a.as_dict() for a in learning_aggregates[:20]] if learning_aggregates else []
@@ -2716,9 +2743,36 @@ class AutoSignalService:
             }
             if analytics_enabled:
                 fs_out["football_analytics"] = analytics
+
+            eff_decimal = base_decimal
+            if (
+                live_adaptive_enabled
+                and live_adaptive_snapshot is not None
+                and getattr(cand.match, "is_live", False)
+                and cand.match.sport == SportType.FOOTBALL
+            ):
+                tag_keys, prev_meta = preview_live_adaptive_tag_keys(cand, analytics, family)
+                eff_decimal, _adj_f, la_reasons, la_detail = apply_live_adaptive_adjustment(
+                    base_signal_score=base_decimal,
+                    tag_keys=tag_keys,
+                    snapshot=live_adaptive_snapshot,
+                )
+                fs_out["football_live_adaptive_learning"] = {
+                    "enabled": True,
+                    "base_signal_score": float(base_decimal),
+                    "learning_adjustment_total": la_detail.get("learning_adjustment_total"),
+                    "learning_adjustment_reasons": la_reasons,
+                    "effective_live_score": float(eff_decimal),
+                    "preview_tag_keys": tag_keys,
+                    "preview_meta": prev_meta,
+                    "detail": la_detail,
+                }
+            else:
+                fs_out["football_live_adaptive_learning"] = {"enabled": False}
+
             new_cand = cand.model_copy(
                 update={
-                    "signal_score": scoring_svc.to_signal_score_decimal(breakdown),
+                    "signal_score": eff_decimal,
                     "feature_snapshot_json": fs_out,
                     "explanation_json": {
                         **prev_expl,
@@ -2728,6 +2782,11 @@ class AutoSignalService:
             )
             enriched.append(new_cand)
         candidates_to_ingest = enriched
+
+        if live_adaptive_enabled and live_adaptive_snapshot is not None:
+            diagnostics.update(
+                football_live_adaptive_learning_json=snapshot_json_for_diagnostics(live_adaptive_snapshot)
+            )
 
         fb_pre = [
             x

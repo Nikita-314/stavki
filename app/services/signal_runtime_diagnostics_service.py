@@ -154,6 +154,8 @@ class SignalRuntimeDiagnosticsState:
     """JSON blob: sample wins/losses/voids and loss_by_reason."""
     football_postmatch_rationale_aggregate_json: str | None = None
     """WIN/LOSE aggregates for football_live_signal_rationale codes (last refresh)."""
+    football_live_adaptive_learning_json: str | None = None
+    """Active LIVE adaptive penalties/boosts and per-key deltas (last cycle or postmatch refresh)."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()
