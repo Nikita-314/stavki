@@ -934,6 +934,7 @@ def _humanize_status_token(token: str | None) -> str:
         "blocked_low_live_plausibility": "низкая plausibility (поздно / слабая логика)",
         "blocked_suspicious_core_live_signal": "сомнительный core live (контекст/агрессивный тотал)",
         "blocked_missing_live_context_from_source": "нет счёта/минуты в данных провайдера (1X2)",
+        "blocked_live_quality_gate": "не прошёл combat quality gate (шаблон/юниоры/лотерея)",
         "blocked_core_late_high_gap_total": "тотал: слишком много голов на поздней стадии",
         "blocked_late_live_market": "поздняя стадия / timing: сигнал запоздал для live",
     }

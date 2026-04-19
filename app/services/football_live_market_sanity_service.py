@@ -172,6 +172,149 @@ def _next_goal_broken_bet(bet: str) -> bool:
     return False
 
 
+def _is_youth_or_reserve_match(c: ProviderSignalCandidate) -> bool:
+    """Youth / women / reserve — низкая ценность для общего live-канала (по факту отправленных сигналов)."""
+    blob = f"{c.match.match_name or ''} {c.match.tournament_name or ''}".lower()
+    needles = (
+        "(до",
+        " до19",
+        " до20",
+        " до21",
+        " до22",
+        " до23",
+        "(ж)",
+        " жен",
+        " жен.",
+        " women",
+        "u-19",
+        "u-20",
+        "u-21",
+        "u-23",
+        "u19",
+        "u20",
+        "u21",
+        "u23",
+        "резерв",
+        "молодёж",
+        "молодеж",
+        "академ",
+    )
+    return any(n in blob for n in needles)
+
+
+def _combat_live_quality_gate(
+    c: ProviderSignalCandidate,
+    family: str,
+    h: int | None,
+    a: int | None,
+    minute: int | None,
+    fmt: FootballBetFormatterService,
+    bet: str,
+    family_svc: FootballSignalSendFilterService,
+) -> LiveSanityResult | None:
+    """Жёсткий фильтр качества поверх техники: шаблоны из реальных live_auto отправок."""
+    mtype = (c.market.market_type or "").strip().lower()
+    try:
+        odds_f = float(c.market.odds_value) if c.market.odds_value is not None else None
+    except (TypeError, ValueError):
+        odds_f = None
+
+    if family == "result" and mtype in ("1x2", "match_winner"):
+        if not family_svc.is_corner_market(c) and _is_youth_or_reserve_match(c):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=25,
+                block_token="blocked_live_quality_gate",
+                reason_ru="Молодёжный/резервный/женский матч — не публикуем в общий combat live (низкая переносимость идеи)",
+                bet_text=bet,
+            )
+        pick = _result_pick_side(c, c.market.market_type or "", fmt)
+        if (
+            pick in ("home", "away")
+            and h == 0
+            and a == 0
+            and minute is not None
+            and int(minute) <= 15
+            and odds_f is not None
+            and odds_f < 2.12
+        ):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=22,
+                block_token="blocked_live_quality_gate",
+                reason_ru="Старт матча 0:0 и низкий коэф на фаворита — шаблонный сигнал без игрового смысла для канала",
+                bet_text=bet,
+            )
+        if (
+            pick == "draw"
+            and minute is not None
+            and int(minute) >= 76
+            and odds_f is not None
+            and odds_f >= 5.0
+        ):
+            return LiveSanityResult(
+                passed=False,
+                plausibility="weak",
+                plausibility_score=24,
+                block_token="blocked_live_quality_gate",
+                reason_ru="Поздняя ничья с высоким коэффициентом — лотерейный сценарий, не combat live",
+                bet_text=bet,
+            )
+        if (
+            pick in ("home", "away")
+            and minute is not None
+            and int(minute) >= 86
+            and h is not None
+            and a is not None
+            and odds_f is not None
+            and odds_f >= 6.5
+        ):
+            diff = (h - a) if pick == "home" else (a - h)
+            if diff <= -1:
+                return LiveSanityResult(
+                    passed=False,
+                    plausibility="weak",
+                    plausibility_score=20,
+                    block_token="blocked_live_quality_gate",
+                    reason_ru="Поздний исход «победа» при отставании и высоком коэф — слабое обоснование для live-алерта",
+                    bet_text=bet,
+                )
+
+    if family == "totals" and h is not None and a is not None and minute is not None:
+        ctx: FootballTotalContext | None = fmt.describe_total_context(
+            market_type=c.market.market_type,
+            market_label=c.market.market_label,
+            selection=c.market.selection,
+            home_team=c.match.home_team,
+            away_team=c.match.away_team,
+            section_name=c.market.section_name,
+            subsection_name=c.market.subsection_name,
+        )
+        if ctx and ctx.total_line and _is_total_over_side(ctx):
+            try:
+                line = float((ctx.total_line or "0").replace(",", "."))
+            except ValueError:
+                line = 0.0
+            scope = (ctx.target_scope or "").lower()
+            combined = scope == "match"
+            goals = (h + a) if combined else None
+            if combined and goals is not None:
+                need = max(0, _min_goals_strict_over(line) - int(goals))
+                if line <= 1.5 and int(minute) >= 87 and need >= 1:
+                    return LiveSanityResult(
+                        passed=False,
+                        plausibility="weak",
+                        plausibility_score=21,
+                        block_token="blocked_live_quality_gate",
+                        reason_ru="Микрототал матча в самой концовке без сильного основания — режем как слабый live-сигнал",
+                        bet_text=bet,
+                    )
+
+    return None
+
+
 def _result_pick_side(
     c: ProviderSignalCandidate, mtype: str, fmt: FootballBetFormatterService
 ) -> str | None:
@@ -784,6 +927,9 @@ class FootballLiveMarketSanityService:
                 late = _result_late_comeback(c, pick, h, a, int(minute), mtype)
                 if late is not None and not late.passed:
                     return late
+        qgate = _combat_live_quality_gate(c, family, h, a, minute, fmt, bet, family_svc)
+        if qgate is not None and not qgate.passed:
+            return qgate
         if "служебно" in (bet or "").lower() and "гандик" in (bet or "").lower():
             return LiveSanityResult(
                 passed=False,
