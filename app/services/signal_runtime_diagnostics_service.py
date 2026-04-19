@@ -189,6 +189,8 @@ class SignalRuntimeDiagnosticsState:
     football_live_pacing_last_reason_ru: str | None = None
     football_live_pacing_consecutive_errors: int = 0
     football_live_pacing_consecutive_empty_snapshots: int = 0
+    football_live_last_cycle_debug_telegram_text: str | None = None
+    """Admin-only: full football live cycle breakdown (same as legacy ▶️ Старт dump)."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()

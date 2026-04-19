@@ -1311,6 +1311,7 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_live_quality_gate": "не прошёл combat quality gate",
         "blocked_core_late_high_gap_total": "тотал: слишком много голов нужно на поздней стадии",
         "blocked_late_live_market": "поздняя стадия / timing: рынок уже неадекватен для live-сигнала",
+        "blocked_no_enriched_scored_row": "нет готовой оценённой ставки по матчу после обогащения",
     }
     return m.get(str(token), str(token).replace("_", " "))
 
@@ -1405,19 +1406,153 @@ def _format_football_live_cadence_head_lines() -> list[str]:
     return lines
 
 
+def _format_football_live_cadence_user_short_lines() -> list[str]:
+    """Short cadence lines for normal users (no verbose pacing reason blob)."""
+    from app.core.config import get_settings
+    from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
+
+    settings = get_settings()
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    lines = [
+        "",
+        "⏱ Между циклами — адаптивная пауза "
+        f"({int(settings.football_live_pacing_min_interval_seconds)}–{int(settings.football_live_pacing_max_interval_seconds)} с, "
+        f"ориентир {int(settings.football_live_pacing_base_interval_seconds)} с).",
+    ]
+    iv = diag.get("football_live_pacing_current_interval_seconds")
+    if iv is not None:
+        lines.append(f"Следующий цикл примерно через {float(iv):.0f} с.")
+    return lines
+
+
+def _football_user_friendly_cycle_message(msg: str | None, rejection: str | None) -> str | None:
+    """Map internal cycle messages to short RU lines (no raw tokens in user UI)."""
+    m = (msg or "").strip()
+    r = (rejection or "").strip()
+    if not m and not r:
+        return None
+    low = f"{m} {r}".lower()
+    if "session_inactive" in low or "football_live_session_inactive" in low:
+        return "Сессия была неактивна в начале цикла — при необходимости повторите ▶️ Старт."
+    if "winline" in low and ("unavailable" in low or "blocked" in low):
+        return "Не удалось стабильно получить live-данные с основного источника."
+    if "paused" in low:
+        return "Контур был на паузе."
+    if "provider_not_configured" in low:
+        return "Провайдер odds не настроен в окружении."
+    return None
+
+
 def format_football_session_start_user_message(
     cres: AutoSignalCycleResult,
     *,
     duration_minutes: int | None = None,
     persistent: bool = True,
 ) -> str:
-    """User-facing text after «▶️ Старт»: first combat live-cycle funnel + per-match + bottleneck."""
+    """Short user-facing text after «▶️ Старт» (no internal tokens, no per-match dump)."""
     from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 
     if persistent:
-        head = "⚽ Live-сессия запущена (до ручной остановки ⏸ Стоп)"
+        head = "⚽ Live-сессия запущена"
+        sub = "Работает до остановки ⏸ Стоп."
     else:
         head = f"⚽ Live-сессия запущена на {int(duration_minutes or 15)} мин"
+        sub = ""
+    cadence = _format_football_live_cadence_user_short_lines()
+    d = cres.football_cycle_debug
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    if not isinstance(d, dict) or not d:
+        lines = [head]
+        if sub:
+            lines.append(sub)
+        lines.extend([*cadence, ""])
+        lines.append("Первый цикл завершён. Подробная техническая сводка доступна админам: /football_live_debug")
+        uf = _football_user_friendly_cycle_message(cres.message, cres.rejection_reason)
+        if uf:
+            lines.append(uf)
+        diag0 = SignalRuntimeDiagnosticsService().get_state()
+        bn0 = str(
+            diag0.get("football_last_combat_bottleneck")
+            or _infer_football_live_cycle_bottleneck(cres, diag0)
+        )
+        lines.append(f"Главная причина: {_combat_bottleneck_ru(bn0)}")
+        return "\n".join(lines)
+
+    agg = d.get("football_pipeline_aggregate") or {}
+    lq = d.get("live_quality_summary") or {}
+    live_n = int(agg.get("total_live_matches_tracked") or 0)
+    s_norm = int(agg.get("normal_sendable_matches") or 0)
+    s_soft = int(agg.get("soft_sendable_matches") or 0)
+    s_total = s_norm + s_soft
+    after_sanity = int(diag.get("football_live_sanity_blocked_last_cycle") or 0)
+    n_sent = int(cres.notifications_sent_count or 0)
+    n_db = int(cres.created_signals_count or 0)
+
+    lines_u: list[str] = [head]
+    if sub:
+        lines_u.append(sub)
+    lines_u.extend([*cadence, ""])
+    lines_u.append(f"📊 Сейчас в live: {live_n} матчей")
+    lines_u.append(f"🎯 Подходящих сигналов (готовых к отправке): {s_total}")
+    lines_u.append(f"💾 Записано в базу: {n_db}  ·  📨 Отправлено в Telegram: {n_sent}")
+    lines_u.append("")
+
+    if n_sent > 0:
+        lines_u.append("✅ Сигналы отправлены в канал (если настроен чат сигналов).")
+    elif s_total == 0 and live_n > 0:
+        lines_u.append("❌ Сейчас сигналов нет.")
+    elif s_total > 0 and n_db == 0:
+        lines_u.append("❌ Сигналы не записаны в базу (ограничения или дедупликация).")
+    elif s_total > 0 and n_db > 0 and n_sent == 0:
+        lines_u.append("❌ Сигналы в базе есть, в Telegram не ушли (проверьте чат и настройки).")
+    else:
+        lines_u.append("ℹ️ В этом цикле сигналов нет.")
+
+    bn = str(
+        diag.get("football_last_combat_bottleneck")
+        or diag.get("football_live_cycle_bottleneck")
+        or _infer_football_live_cycle_bottleneck(cres, diag)
+    )
+    lines_u.append(f"Главная причина: {_combat_bottleneck_ru(bn)}")
+
+    wns = lq.get("why_no_signal_lines") or []
+    if isinstance(wns, list) and wns and n_sent == 0:
+        lines_u.append("")
+        lines_u.append("Дополнительно:")
+        for row in wns[:5]:
+            if isinstance(row, str) and row.strip():
+                lines_u.append(f"• {row.strip()}")
+    if after_sanity and n_sent == 0:
+        lines_u.append(f"• Перед отправкой отсеяно проверок честности рынка: {after_sanity}")
+
+    mb_ru = lq.get("main_blocker_ru")
+    if (
+        isinstance(mb_ru, str)
+        and mb_ru.strip()
+        and n_sent == 0
+        and "см." not in mb_ru.lower()
+        and "cycle_debug" not in mb_ru.lower()
+    ):
+        lines_u.append(f"• {mb_ru.strip()[:280]}")
+
+    lines_u.append("")
+    lines_u.append("Подробный технический разбор (админы): /football_live_debug")
+    return "\n".join(lines_u).strip()
+
+
+def format_football_session_start_debug_message(
+    cres: AutoSignalCycleResult,
+    *,
+    duration_minutes: int | None = None,
+    persistent: bool = True,
+) -> str:
+    """Full legacy breakdown: per-match rows, final gate, internal statuses (admin / logs)."""
+    from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
+
+    if persistent:
+        head = "⚽ Live-сессия запущена (до ручной остановки ⏸ Стоп) [debug]"
+    else:
+        head = f"⚽ Live-сессия запущена на {int(duration_minutes or 15)} мин [debug]"
     cadence = _format_football_live_cadence_head_lines()
     d = cres.football_cycle_debug
     if not isinstance(d, dict) or not d:
@@ -1429,7 +1564,7 @@ def format_football_session_start_user_message(
             lines.append(f"Деталь: {cres.rejection_reason}")
         diag0 = SignalRuntimeDiagnosticsService().get_state()
         bn0 = str(diag0.get("football_last_combat_bottleneck") or _infer_football_live_cycle_bottleneck(cres, diag0))
-        lines.append(f"Узкое место: {_combat_bottleneck_ru(bn0)}")
+        lines.append(f"Узкое место: {_combat_bottleneck_ru(bn0)}  ({bn0})")
         return "\n".join(lines)
 
     diag = SignalRuntimeDiagnosticsService().get_state()
@@ -1543,7 +1678,7 @@ def format_football_session_start_user_message(
         if why and why != fst:
             lines.append(f"  {why}")
     if len(matches) > max_rows:
-        lines.append(f"… и ещё {len(matches) - max_rows} матч(ей) (см. логи CYCLE_DEBUG_JSON)")
+        lines.append(f"… и ещё {len(matches) - max_rows} матч(ей) (см. логи сервера)")
 
     lsani = d.get("live_sanity_drops")
     if isinstance(lsani, list) and lsani:
@@ -3573,6 +3708,15 @@ class AutoSignalService:
         SignalRuntimeDiagnosticsService().update(football_live_cycle_bottleneck=bn)
         _apply_last_combat_cycle_diagnostics(res)
         _football_log_live_session_report(res=res, diag=SignalRuntimeDiagnosticsService().get_state())
+        try:
+            snap = FootballLiveSessionService().snapshot()
+            pers = bool(snap.persistent) if snap.active else True
+            dbg_txt = format_football_session_start_debug_message(res, persistent=pers)
+            SignalRuntimeDiagnosticsService().update(
+                football_live_last_cycle_debug_telegram_text=dbg_txt[:12000]
+            )
+        except Exception:
+            logger.debug("football live debug telegram text cache failed", exc_info=True)
 
     def update_football_live_session_diagnostics_with_pacing(
         self, cres: AutoSignalCycleResult, *, cycle_wall_seconds: float

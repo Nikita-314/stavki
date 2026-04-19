@@ -35,6 +35,10 @@ async def main() -> None:
             BotCommand(command="signal_status", description="Статус футбольных сигналов"),
             BotCommand(command="signal_pause", description="Остановить футбольный цикл"),
             BotCommand(command="signal_start", description="Запустить футбольный цикл"),
+            BotCommand(
+                command="football_live_debug",
+                description="[admin] Полный debug последнего football live цикла",
+            ),
             BotCommand(command="signal_football", description="Включить рабочий режим футбола"),
             BotCommand(command="signal_cs2", description="Переключить CS2"),
             BotCommand(command="signal_dota", description="Переключить Dota"),
