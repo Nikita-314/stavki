@@ -172,6 +172,33 @@ class IngestionService:
                 merged = audit
             fs0["football_send_audit"] = merged
 
+        if match.sport == SportType.FOOTBALL and match.is_live:
+            rat = ex0.get("football_live_signal_rationale")
+            if isinstance(rat, dict):
+                lc = rat.get("live_context") if isinstance(rat.get("live_context"), dict) else {}
+                fa = fs0.get("football_analytics")
+                if not isinstance(fa, dict):
+                    fa = {}
+                if lc.get("minute") is not None and fa.get("minute") is None:
+                    try:
+                        fa["minute"] = int(lc["minute"])
+                    except (TypeError, ValueError):
+                        pass
+                if lc.get("score_home") is not None and fa.get("score_home") is None:
+                    fa["score_home"] = lc["score_home"]
+                if lc.get("score_away") is not None and fa.get("score_away") is None:
+                    fa["score_away"] = lc["score_away"]
+                fs0["football_analytics"] = fa
+                if fs0.get("minute") is None and lc.get("minute") is not None:
+                    try:
+                        fs0["minute"] = int(lc["minute"])
+                    except (TypeError, ValueError):
+                        pass
+                if fs0.get("score_home") is None and lc.get("score_home") is not None:
+                    fs0["score_home"] = lc["score_home"]
+                if fs0.get("score_away") is None and lc.get("score_away") is not None:
+                    fs0["score_away"] = lc["score_away"]
+
         signal = SignalCreate(
             sport=match.sport,
             bookmaker=market.bookmaker,

@@ -373,6 +373,22 @@ def _format_signal_runtime_status_lines() -> list[str]:
                 adaptive_block.append(f"• примеры boost: {s[:480]}")
         except (json.JSONDecodeError, TypeError):
             adaptive_block = ["", "— Football LIVE adaptive —", "• (не удалось разобрать JSON)"]
+    training_block: list[str] = []
+    n_combat = int(diag.get("football_live_combat_signals_total") or 0)
+    if n_combat or int(diag.get("adaptive_training_ready_signals_count") or 0):
+        _tw = (diag.get("football_live_adaptive_training_warning_ru") or "").strip()
+        training_block = [
+            "",
+            "— Football LIVE → adaptive (обучающая выборка) —",
+            f"• combat `live_auto` всего (exact): {n_combat}",
+            f"• с rationale (в последнем scan): {int(diag.get('football_live_with_any_rationale_count') or 0)}",
+            f"• rationale полный (коды/path/context): {int(diag.get('football_live_with_training_ready_rationale_count') or 0)}",
+            f"• с исходом WIN/LOSE: {int(diag.get('football_live_with_settlement_winlose_count') or 0)}",
+            f"• с outcome_reason_code в audit: {int(diag.get('football_live_with_outcome_reason_code_count') or 0)}",
+            f"• adaptive_training_ready: {int(diag.get('adaptive_training_ready_signals_count') or 0)}",
+        ]
+        if _tw:
+            training_block.append(f"• ⚠ {_tw[:500]}")
     return [
         "📊 Статус сигналов",
         "",
@@ -463,6 +479,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"📨 Отправлено (цикл→канал): {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {delivery_reason}",
         *postmatch_block,
+        *training_block,
         *adaptive_block,
         "",
         "— Аналитика и обучение (флаги, без выдуманных данных) —",

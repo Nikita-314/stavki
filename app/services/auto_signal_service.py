@@ -283,6 +283,22 @@ def _football_match_minute_from_candidate(candidate: ProviderSignalCandidate | N
     return None
 
 
+def _resolve_football_live_send_meta(
+    cand: ProviderSignalCandidate,
+    ordered: list[tuple[ProviderSignalCandidate, str, str | None]],
+    send_meta_final: dict[int, tuple[str, str | None]],
+) -> tuple[str, str | None] | None:
+    """Match tier/sub after final gate: gate returns model_copy rows with new object ids."""
+    m = send_meta_final.get(id(cand))
+    if m:
+        return m
+    fk = _combat_finalist_dedup_key(cand)
+    for c, t, s in ordered:
+        if _combat_finalist_dedup_key(c) == fk:
+            return (t, s)
+    return None
+
+
 def _attach_football_live_send_meta(
     c: ProviderSignalCandidate,
     meta: tuple[str, str | None] | None,
@@ -299,6 +315,12 @@ def _attach_football_live_send_meta(
     rationale = build_football_live_signal_rationale(c, send_path=tier, send_soft_label=sub)
     if rationale:
         expl["football_live_signal_rationale"] = rationale
+    elif getattr(c.match, "is_live", False) and getattr(c.match, "sport", None) == SportType.FOOTBALL:
+        logger.warning(
+            "[FOOTBALL][RATIONALE] missing rationale after send_meta attach match=%s event_id=%s",
+            c.match.match_name,
+            getattr(c.match, "external_event_id", None),
+        )
     expl.pop("football_live_signal_why", None)
     return c.model_copy(update={"explanation_json": expl})
 
@@ -3183,7 +3205,7 @@ class AutoSignalService:
 
         if dry_run:
             if best is not None:
-                _wsm = send_meta_final.get(id(best), ("normal", None))
+                _wsm = _resolve_football_live_send_meta(best, ordered, send_meta_final) or ("normal", None)
                 _m = "soft" if _wsm[0] == "soft" else "normal"
                 _tr0 = _build_live_ingest_traces(
                     [best], min_score_base, FootballSignalSendFilterService(), send_meta_final
@@ -3253,7 +3275,11 @@ class AutoSignalService:
             )
 
         candidates_to_ingest = [
-            _attach_football_live_send_meta(c, send_meta_final.get(id(c))) for c in finalists
+            _attach_football_live_send_meta(
+                c,
+                _resolve_football_live_send_meta(c, ordered, send_meta_final) or ("normal", None),
+            )
+            for c in finalists
         ]
         relaxed_dedup = runtime_source_kind == "semi_live_manual"
 

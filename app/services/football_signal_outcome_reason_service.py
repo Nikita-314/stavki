@@ -518,6 +518,14 @@ async def _refresh_football_postmatch_summary(session: AsyncSession) -> None:
         football_postmatch_rationale_aggregate_json=rat_json,
         football_live_adaptive_learning_json=adaptive_json,
     )
+    try:
+        from app.services.football_live_adaptive_training_stats_service import (
+            compute_and_publish_football_live_adaptive_training_stats,
+        )
+
+        await compute_and_publish_football_live_adaptive_training_stats(session)
+    except Exception:
+        logger.exception("football live adaptive training stats refresh failed")
 
 
 async def build_football_postmatch_verify_report(
@@ -789,5 +797,19 @@ async def build_football_postmatch_verify_report(
     else:
         out.append("")
         out.append("Settled футбольных сигналов в БД нет — после settle повтори команду.")
+
+    out.extend(
+        [
+            "",
+            "— Adaptive training data coverage (live_auto combat, last DB scan) —",
+            f"combat_total_exact={diag.get('football_live_combat_signals_total')}",
+            f"with_any_rationale={diag.get('football_live_with_any_rationale_count')}",
+            f"with_training_ready_rationale={diag.get('football_live_with_training_ready_rationale_count')}",
+            f"settled_WIN_LOSE={diag.get('football_live_with_settlement_winlose_count')}",
+            f"with_outcome_reason_code={diag.get('football_live_with_outcome_reason_code_count')}",
+            f"adaptive_training_ready_signals_count={diag.get('adaptive_training_ready_signals_count')}",
+            f"warning={(diag.get('football_live_adaptive_training_warning_ru') or '—')[:400]}",
+        ]
+    )
 
     return "\n".join(out)
