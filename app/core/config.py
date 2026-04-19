@@ -61,6 +61,25 @@ class Settings(BaseSettings):
     football_min_signal_score: float = 55.0
     football_dedup_relaxed_interval_minutes: int = 30
     football_live_session_duration_minutes: int = 15
+    """Used only when starting a timed session (scripts); ▶️ Старт uses persistent session (no auto-expiry)."""
+    # Football LIVE loop pacing (between cycles, Winline-friendly). Bounds match prior idle clamp 45–180s and base poll 60s.
+    football_live_pacing_min_interval_seconds: int = 45
+    football_live_pacing_max_interval_seconds: int = 180
+    football_live_pacing_base_interval_seconds: int = 60
+    football_live_pacing_backoff_step: float = 0.12
+    football_live_pacing_max_backoff_level: float = 4.0
+    football_live_pacing_fetch_heavy_seconds: int = 45
+    football_live_pacing_fetch_heavy_extra_seconds: int = 25
+    football_live_pacing_fetch_above_avg_extra_seconds: int = 15
+    football_live_pacing_cycle_heavy_seconds: int = 95
+    football_live_pacing_cycle_heavy_extra_seconds: int = 20
+    football_live_pacing_network_stress_extra_seconds: int = 35
+    football_live_pacing_empty_snapshot_extra_seconds: int = 25
+    football_live_pacing_unchanged_snapshot_extra_seconds: int = 12
+    football_live_pacing_error_extra_seconds: int = 30
+    football_live_pacing_cycle_light_seconds: int = 55
+    football_live_pacing_fetch_light_seconds: int = 28
+    football_live_pacing_light_cycle_relief_seconds: int = 10
     football_live_max_signals_per_match: int = 12
     # Live freshness / staleness (football live-session contour only)
     football_live_manual_max_age_minutes: int = 45

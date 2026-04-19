@@ -50,7 +50,7 @@ async def main() -> None:
     rts.enable_sport("football")
     rts.start()
     dm = int(settings.football_live_session_duration_minutes or 15)
-    FootballLiveSessionService().start_session(duration_minutes=dm)
+    FootballLiveSessionService().start_session(duration_minutes=dm, persistent=False)
 
     res = await asyncio.wait_for(
         AutoSignalService().run_single_cycle(sessionmaker, bot, dry_run=False),

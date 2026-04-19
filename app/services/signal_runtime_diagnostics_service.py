@@ -59,6 +59,8 @@ class SignalRuntimeDiagnosticsState:
     football_live_session_active: bool = False
     football_live_session_started_at: str | None = None
     football_live_session_expires_at: str | None = None
+    football_live_session_persistent: bool = False
+    """True when session has no wall-clock expiry (runs until ⏸ Стоп)."""
     football_live_session_last_cycle_at: str | None = None
     football_live_session_remaining_minutes: float | None = None
     football_live_signals_sent_session: int = 0
@@ -170,6 +172,23 @@ class SignalRuntimeDiagnosticsState:
     """Within last scan: ready rationale + settled WIN/LOSE + outcome_reason_code."""
     football_live_adaptive_training_warning_ru: str | None = None
     """If adaptive_training_ready is low vs threshold."""
+    football_live_winline_fetch_seconds_last: float | None = None
+    """Wall time of last Winline WS fetch attempt in a football live cycle."""
+    football_live_http_fetch_seconds_last: float | None = None
+    """Wall time of last HTTP odds fetch in a football live cycle (if ran)."""
+    football_live_winline_attempted_last_cycle: bool = False
+    """True if Winline WS path was entered for this cycle."""
+    football_live_last_cycle_wall_seconds: float | None = None
+    """Wall time of last run_single_cycle (football live loop)."""
+    football_live_last_cycle_fetch_ok: bool = False
+    football_live_last_cycle_created_signals: int = 0
+    football_live_pacing_current_interval_seconds: float | None = None
+    football_live_pacing_last_fetch_seconds: float | None = None
+    football_live_pacing_avg_fetch_seconds: float | None = None
+    football_live_pacing_backoff_level: float = 0.0
+    football_live_pacing_last_reason_ru: str | None = None
+    football_live_pacing_consecutive_errors: int = 0
+    football_live_pacing_consecutive_empty_snapshots: int = 0
 
 
 _STATE = SignalRuntimeDiagnosticsState()

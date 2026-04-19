@@ -53,7 +53,10 @@ async def main() -> None:
     rt.enable_sport("football")
 
     # Start live session and run 2 cycles.
-    FootballLiveSessionService().start_session(duration_minutes=int(settings.football_live_session_duration_minutes or 15))
+    FootballLiveSessionService().start_session(
+        duration_minutes=int(settings.football_live_session_duration_minutes or 15),
+        persistent=False,
+    )
 
     svc = AutoSignalService()
     diag_svc = SignalRuntimeDiagnosticsService()

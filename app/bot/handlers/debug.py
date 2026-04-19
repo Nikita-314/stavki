@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from io import BytesIO
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -241,6 +242,16 @@ def _fmt_source_age_for_ui(seconds: object) -> str:
     return f"{s / 60.0:.1f} мин"
 
 
+def _fmt_pacing_seconds(value: object) -> str:
+    if value is None:
+        return "—"
+    try:
+        s = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{s:.2f} с"
+
+
 def _sport_toggle_label(key: str, enabled: bool) -> str:
     if key == "football":
         return f"⚽ Футбол: {'включён' if enabled else 'выключен'}"
@@ -273,7 +284,11 @@ def _format_signal_runtime_status_lines() -> list[str]:
         last_fetch = f"{diag.get('last_error')} -> fallback"
     delivery_reason = diag.get("last_delivery_reason") or diag.get("note") or "—"
     rem_m = diag.get("football_live_session_remaining_minutes")
-    rem_txt = f"{round(float(rem_m), 1)}" if rem_m is not None else "—"
+    _pers = bool(diag.get("football_live_session_persistent"))
+    if _pers and bool(diag.get("football_live_session_active")):
+        rem_txt = "до ⏸ Стоп (бессрочно)"
+    else:
+        rem_txt = f"{round(float(rem_m), 1)}" if rem_m is not None else "—"
     last_cy = diag.get("football_live_session_last_cycle_at") or "—"
     live_m = diag.get("football_live_cycle_live_matches_found")
     if live_m is None:
@@ -282,7 +297,10 @@ def _format_signal_runtime_status_lines() -> list[str]:
     if new_ideas is None:
         new_ideas = 0
     started_s = diag.get("football_live_session_started_at") or "—"
-    expires_s = diag.get("football_live_session_expires_at") or "—"
+    if _pers and bool(diag.get("football_live_session_active")):
+        expires_s = "— (бессрочно)"
+    else:
+        expires_s = diag.get("football_live_session_expires_at") or "—"
     bn = diag.get("football_live_cycle_bottleneck") or "—"
     src_age_txt = _fmt_source_age_for_ui(diag.get("football_live_source_age_seconds"))
     ff_ru = _fmt_football_live_source_label_ru(diag)
@@ -405,7 +423,18 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Активна: {_fmt_yes_no(bool(diag.get('football_live_session_active')))}",
         f"• Старт: {started_s}",
         f"• Истекает: {expires_s}",
-        f"• Осталось: {rem_txt} мин",
+        f"• Осталось: {rem_txt}{' мин' if rem_txt != 'до ⏸ Стоп (бессрочно)' else ''}",
+        "",
+        "— Football LIVE runtime cadence —",
+        f"• Сессия: {'активна' if diag.get('football_live_session_active') else 'нет'}",
+        f"• Интервал цикла: {_fmt_pacing_seconds(diag.get('football_live_pacing_current_interval_seconds'))}",
+        f"• Последний fetch (измерено): {_fmt_pacing_seconds(diag.get('football_live_pacing_last_fetch_seconds'))}",
+        f"• Средний fetch (скользящее): {_fmt_pacing_seconds(diag.get('football_live_pacing_avg_fetch_seconds'))}",
+        f"• Backoff: уровень {diag.get('football_live_pacing_backoff_level') if diag.get('football_live_pacing_backoff_level') is not None else '—'}",
+        f"• Причина текущего интервала: {(diag.get('football_live_pacing_last_reason_ru') or '—')[:900]}",
+        f"• Ошибки подряд (pacing): {int(diag.get('football_live_pacing_consecutive_errors') or 0)}",
+        f"• Пустые снимки подряд: {int(diag.get('football_live_pacing_consecutive_empty_snapshots') or 0)}",
+        f"• Wall последнего цикла: {_fmt_pacing_seconds(diag.get('football_live_last_cycle_wall_seconds'))}",
         f"• Live-матчей (последний цикл): {live_m}",
         "— Проверка свежести (live-only) —",
         f"• {ff_ru}",
@@ -804,15 +833,20 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
         return
     from app.services.football_live_session_service import FootballLiveSessionService
 
-    settings = get_settings()
-    dm = int(settings.football_live_session_duration_minutes or 15)
+    from app.services.football_live_runtime_pacing import get_football_live_runtime_pacing
+
     rts = SignalRuntimeSettingsService()
     rts.enable_sport("football")
     rts.start()
-    FootballLiveSessionService().start_session(duration_minutes=dm)
+    get_football_live_runtime_pacing().reset_session()
+    FootballLiveSessionService().start_session()
+    t0 = time.perf_counter()
     cres = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=False)
+    AutoSignalService().update_football_live_session_diagnostics_with_pacing(
+        cres, cycle_wall_seconds=float(time.perf_counter() - t0)
+    )
     AutoSignalService().log_football_cycle_trace(cres)
-    text = format_football_session_start_user_message(cres, duration_minutes=dm)
+    text = format_football_session_start_user_message(cres, persistent=True)
     text = (
         text
         + "\n\n"
@@ -1125,7 +1159,7 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
         lines.extend(
             [
                 "ℹ️ Подсказка:",
-                "• Чтобы бот начал слать live-сигналы 15 минут, нажмите ▶️ Старт.",
+                "• Чтобы бот начал слать live-сигналы, нажмите ▶️ Старт (сессия до ⏸ Стоп, cadence см. статус).",
                 "",
             ]
         )

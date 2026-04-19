@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -30,6 +31,10 @@ from app.services.football_live_freshness_service import (
     evaluate_manual_live_source_freshness,
     http_fetch_processing_delay_is_stale,
     log_live_freshness_block,
+)
+from app.services.football_live_runtime_pacing import (
+    build_football_live_pacing_cycle_snapshot,
+    get_football_live_runtime_pacing,
 )
 from app.services.football_live_session_service import FootballLiveSessionService, build_live_idea_key
 from app.services.football_analytics_service import FootballAnalyticsService
@@ -1372,16 +1377,51 @@ def format_final_live_gate_summary_lines(fg: dict, *, max_rows: int = 24) -> lis
     return lines
 
 
+def _format_football_live_cadence_head_lines() -> list[str]:
+    """Lines for ▶️ Старт / status: bounded adaptive interval policy (telemetry-driven)."""
+    from app.core.config import get_settings
+    from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
+
+    settings = get_settings()
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    lines = [
+        "",
+        "— Football LIVE cadence (между циклами) —",
+        f"• Режим: адаптивная пауза по телеметрии (база {int(settings.football_live_pacing_base_interval_seconds)}s, "
+        f"границы {int(settings.football_live_pacing_min_interval_seconds)}–{int(settings.football_live_pacing_max_interval_seconds)}s).",
+    ]
+    iv = diag.get("football_live_pacing_current_interval_seconds")
+    rs = diag.get("football_live_pacing_last_reason_ru")
+    if iv is not None:
+        lines.append(f"• Текущий интервал до следующего цикла: ~{float(iv):.0f} s")
+    if isinstance(rs, str) and rs.strip():
+        lines.append(f"• Обоснование интервала: {rs[:900]}")
+    else:
+        lines.append("• Интервал после первого цикла подставится из метрик fetch/total cycle.")
+    lines.append(
+        "• Правила: тяжёлый fetch / ошибка / пустой снимок / не меняющийся snapshot → дольше пауза; "
+        "лёгкий успешный цикл → короче; серия сбоев наращивает backoff (с потолком)."
+    )
+    return lines
+
+
 def format_football_session_start_user_message(
-    cres: AutoSignalCycleResult, *, duration_minutes: int
+    cres: AutoSignalCycleResult,
+    *,
+    duration_minutes: int | None = None,
+    persistent: bool = True,
 ) -> str:
     """User-facing text after «▶️ Старт»: first combat live-cycle funnel + per-match + bottleneck."""
     from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 
-    head = f"⚽ Live-сессия запущена на {int(duration_minutes)} мин"
+    if persistent:
+        head = "⚽ Live-сессия запущена (до ручной остановки ⏸ Стоп)"
+    else:
+        head = f"⚽ Live-сессия запущена на {int(duration_minutes or 15)} мин"
+    cadence = _format_football_live_cadence_head_lines()
     d = cres.football_cycle_debug
     if not isinstance(d, dict) or not d:
-        lines = [head, ""]
+        lines = [head, *cadence, ""]
         lines.append("Первый боевой live-цикл завершён, подробной разбивки по матчам в ответе нет.")
         if cres.message:
             lines.append(f"Статус: {cres.message}")
@@ -1413,6 +1453,7 @@ def format_football_session_start_user_message(
 
     lines: list[str] = [
         head,
+        *cadence,
         "",
         f"📊 Сейчас в live: {live_n} матч(ей) (в снимке контура)",
         f"🧩 С кандидатами (после препроцессинга): {w_c}",
@@ -1831,7 +1872,7 @@ class AutoSignalService:
                 diagnostics.update(
                     last_fetch_status="football_live_session_inactive",
                     last_delivery_reason="football_live_session_inactive",
-                    note="Нажмите ▶️ Старт для запуска 15-минутной live-сессии",
+                    note="Нажмите ▶️ Старт для запуска football live-сессии",
                     football_live_cycle_bottleneck="blocked_no_live_session",
                     football_live_cycle_candidates_before_filter=0,
                     football_live_cycle_after_send_filter=0,
@@ -1881,6 +1922,9 @@ class AutoSignalService:
             football_winline_football_candidate_count=0,
             football_winline_error_last=None,
             football_primary_live_source=None,
+            football_live_winline_attempted_last_cycle=False,
+            football_live_winline_fetch_seconds_last=None,
+            football_live_http_fetch_seconds_last=None,
         )
         preview = None
         payload = None
@@ -1895,7 +1939,12 @@ class AutoSignalService:
         live_auth_status: str = "ok"
         winline_werr: str | None = None
         if settings.football_live_winline_primary and (settings.winline_live_ws_url or "").strip():
+            diagnostics.update(football_live_winline_attempted_last_cycle=True)
+            t_winline = time.perf_counter()
             wr, winline_werr = await WinlineLiveFeedService().fetch_football_live_raw_payload(settings)
+            diagnostics.update(
+                football_live_winline_fetch_seconds_last=float(time.perf_counter() - t_winline)
+            )
             if wr and not winline_werr:
                 try:
                     norm = WinlineRawLineBridgeService().normalize_raw_winline_line_payload(wr)
@@ -1998,7 +2047,11 @@ class AutoSignalService:
                 )
 
         if preview is None:
+            t_http = time.perf_counter()
             fetch_res = await asyncio.to_thread(OddsHttpClient().fetch, config)
+            diagnostics.update(
+                football_live_http_fetch_seconds_last=float(time.perf_counter() - t_http)
+            )
             live_auth_status = self._render_live_auth_status(
                 fetch_res.auth_status, fetch_res.response_body_snippet
             )
@@ -3521,15 +3574,56 @@ class AutoSignalService:
         _apply_last_combat_cycle_diagnostics(res)
         _football_log_live_session_report(res=res, diag=SignalRuntimeDiagnosticsService().get_state())
 
+    def update_football_live_session_diagnostics_with_pacing(
+        self, cres: AutoSignalCycleResult, *, cycle_wall_seconds: float
+    ) -> None:
+        """Session snapshot + adaptive pacing fields (same rules as background live loop)."""
+        settings = get_settings()
+        pacing = get_football_live_runtime_pacing()
+        sess = FootballLiveSessionService()
+        snap = sess.snapshot()
+        rem = sess.remaining_seconds()
+        diag_fn = SignalRuntimeDiagnosticsService().update
+        diag_fn(
+            football_live_last_cycle_wall_seconds=float(cycle_wall_seconds),
+            football_live_last_cycle_fetch_ok=bool(cres.fetch_ok),
+            football_live_last_cycle_created_signals=int(cres.created_signals_count or 0),
+        )
+        dcur = SignalRuntimeDiagnosticsService().get_state()
+        p_snap = build_football_live_pacing_cycle_snapshot(
+            dcur, cycle_wall_seconds=float(cycle_wall_seconds)
+        )
+        _next_iv, pacing_updates = pacing.compute_sleep_seconds(settings, p_snap)
+        diag_fn(
+            football_live_session_active=snap.active,
+            football_live_session_started_at=(
+                snap.started_at.isoformat() if snap.started_at else None
+            ),
+            football_live_session_expires_at=(
+                snap.expires_at.isoformat() if snap.expires_at else None
+            ),
+            football_live_session_persistent=bool(snap.persistent),
+            football_live_session_last_cycle_at=(
+                snap.last_cycle_at.isoformat() if snap.last_cycle_at else None
+            ),
+            football_live_session_remaining_minutes=(
+                (rem / 60.0) if rem is not None else None
+            ),
+            football_live_signals_sent_session=snap.signals_sent_in_session,
+            football_live_telegram_sent_session=snap.telegram_messages_sent_in_session,
+            football_live_duplicate_ideas_blocked=snap.duplicate_ideas_blocked_session,
+            football_live_sent_ideas_count=snap.sent_idea_keys_count,
+            **pacing_updates,
+        )
+
     async def run_football_live_forever(
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         bot: Bot,
     ) -> None:
-        """Фоновые циклы только пока активна 15-минутная football live-сессия (после ▶️ Старт)."""
+        """Фоновые циклы пока активна football live-сессия (после ▶️ Старт); пауза между циклами — adaptive pacing."""
         settings = get_settings()
         idle_sleep = max(45, min(180, int(settings.auto_signal_polling_interval_seconds or 60)))
-        poll_sleep = max(15, int(settings.auto_signal_polling_interval_seconds or 60))
         while True:
             sleep_time = idle_sleep
             try:
@@ -3537,45 +3631,43 @@ class AutoSignalService:
                 sess.expire_if_needed()
                 diag_fn = SignalRuntimeDiagnosticsService().update
                 if sess.is_active():
+                    t_cycle = time.perf_counter()
                     cres = await self.run_single_cycle(sessionmaker, bot, dry_run=False)
+                    cycle_wall = float(time.perf_counter() - t_cycle)
+                    self.update_football_live_session_diagnostics_with_pacing(
+                        cres, cycle_wall_seconds=cycle_wall
+                    )
                     snap = sess.snapshot()
                     rem = sess.remaining_seconds()
-                    diag_fn(
-                        football_live_session_active=snap.active,
-                        football_live_session_started_at=(
-                            snap.started_at.isoformat() if snap.started_at else None
-                        ),
-                        football_live_session_expires_at=(
-                            snap.expires_at.isoformat() if snap.expires_at else None
-                        ),
-                        football_live_session_last_cycle_at=(
-                            snap.last_cycle_at.isoformat() if snap.last_cycle_at else None
-                        ),
-                        football_live_session_remaining_minutes=(
-                            (rem / 60.0) if rem is not None else None
-                        ),
-                        football_live_signals_sent_session=snap.signals_sent_in_session,
-                        football_live_telegram_sent_session=snap.telegram_messages_sent_in_session,
-                        football_live_duplicate_ideas_blocked=snap.duplicate_ideas_blocked_session,
-                        football_live_sent_ideas_count=snap.sent_idea_keys_count,
+                    pacing_updates = SignalRuntimeDiagnosticsService().get_state()
+                    next_iv = float(
+                        pacing_updates.get("football_live_pacing_current_interval_seconds") or idle_sleep
                     )
-                    dcur = SignalRuntimeDiagnosticsService().get_state()
-                    bn = _infer_football_live_cycle_bottleneck(cres, dcur)
-                    diag_fn(football_live_cycle_bottleneck=bn)
+                    bn = _infer_football_live_cycle_bottleneck(
+                        cres, SignalRuntimeDiagnosticsService().get_state()
+                    )
+                    SignalRuntimeDiagnosticsService().update(football_live_cycle_bottleneck=bn)
                     _apply_last_combat_cycle_diagnostics(cres)
                     _football_log_live_session_report(
                         res=cres, diag=SignalRuntimeDiagnosticsService().get_state()
                     )
                     logger.info(
-                        "[FOOTBALL][LIVE_LOOP] cycle done signals_sent_session=%s telegram_sent=%s dup_blocked=%s ideas=%s remaining_min=%s bottleneck=%s",
+                        "[FOOTBALL][LIVE_LOOP] cycle done wall=%.2fs next_sleep=%.1fs fetch_s=%s avg_fetch=%s "
+                        "backoff=%s signals_sent_session=%s telegram_sent=%s dup_blocked=%s ideas=%s remaining_min=%s bottleneck=%s reason=%s",
+                        cycle_wall,
+                        next_iv,
+                        str(pacing_updates.get("football_live_pacing_last_fetch_seconds")),
+                        str(pacing_updates.get("football_live_pacing_avg_fetch_seconds")),
+                        str(pacing_updates.get("football_live_pacing_backoff_level")),
                         snap.signals_sent_in_session,
                         snap.telegram_messages_sent_in_session,
                         snap.duplicate_ideas_blocked_session,
                         snap.sent_idea_keys_count,
                         round((rem or 0) / 60.0, 2) if rem is not None else None,
                         bn,
+                        str(pacing_updates.get("football_live_pacing_last_reason_ru") or "")[:240],
                     )
-                    sleep_time = poll_sleep
+                    sleep_time = float(next_iv)
                 else:
                     snap_idle = sess.snapshot()
                     diag_fn(
@@ -3584,6 +3676,7 @@ class AutoSignalService:
                             snap_idle.started_at.isoformat() if snap_idle.started_at else None
                         ),
                         football_live_session_expires_at=None,
+                        football_live_session_persistent=False,
                         football_live_session_last_cycle_at=(
                             snap_idle.last_cycle_at.isoformat() if snap_idle.last_cycle_at else None
                         ),

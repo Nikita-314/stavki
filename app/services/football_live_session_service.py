@@ -13,6 +13,8 @@ class FootballLiveSessionSnapshot:
     active: bool = False
     started_at: datetime | None = None
     expires_at: datetime | None = None
+    persistent: bool = False
+    """No wall-clock expiry; run until manual stop."""
     duration_minutes: int = 15
     stopped_manually: bool = False
     last_cycle_at: datetime | None = None
@@ -38,7 +40,7 @@ _SENT_IDEA_KEYS: set[str] = set()
 
 
 class FootballLiveSessionService:
-    """Процесс-local live-сессия футбола (~15 минут): только после «▶️ Старт».
+    """Процесс-local live-сессия футбола: только после «▶️ Старт» (по умолчанию без авто-таймера).
 
     После перезапуска бота состояние не восстанавливается — сессия считается завершённой.
     """
@@ -50,6 +52,7 @@ class FootballLiveSessionService:
                 active=_ACTIVE,
                 started_at=_STARTED_AT,
                 expires_at=_EXPIRES_AT,
+                persistent=bool(_ACTIVE and _EXPIRES_AT is None),
                 duration_minutes=_DURATION_MINUTES,
                 stopped_manually=_STOPPED_MANUALLY,
                 last_cycle_at=_LAST_CYCLE_AT,
@@ -85,7 +88,9 @@ class FootballLiveSessionService:
     def remaining_seconds(self) -> float | None:
         with _LOCK:
             self._expire_locked()
-            if not _ACTIVE or _EXPIRES_AT is None:
+            if not _ACTIVE:
+                return None
+            if _EXPIRES_AT is None:
                 return None
             now = datetime.now(timezone.utc)
             exp = _EXPIRES_AT
@@ -93,26 +98,40 @@ class FootballLiveSessionService:
                 exp = exp.replace(tzinfo=timezone.utc)
             return max(0.0, (exp - now).total_seconds())
 
-    def start_session(self, *, duration_minutes: int | None = None) -> FootballLiveSessionSnapshot:
+    def start_session(
+        self,
+        *,
+        duration_minutes: int | None = None,
+        persistent: bool = True,
+    ) -> FootballLiveSessionSnapshot:
         global _ACTIVE, _STARTED_AT, _EXPIRES_AT, _DURATION_MINUTES
         global _STOPPED_MANUALLY, _LAST_CYCLE_AT
         global _SIGNALS_SENT, _TELEGRAM_SENT, _DUP_BLOCKED
         global _SENT_IDEA_KEYS
         with _LOCK:
-            dm = int(duration_minutes if duration_minutes is not None else _DURATION_MINUTES)
-            dm = max(1, min(dm, 180))
-            _DURATION_MINUTES = dm
             now = datetime.now(timezone.utc)
             _ACTIVE = True
             _STOPPED_MANUALLY = False
             _STARTED_AT = now
-            _EXPIRES_AT = now + timedelta(minutes=dm)
             _LAST_CYCLE_AT = None
             _SIGNALS_SENT = 0
             _TELEGRAM_SENT = 0
             _DUP_BLOCKED = 0
             _SENT_IDEA_KEYS = set()
-            logger.info("[FOOTBALL][LIVE_SESSION] started expires_at=%s duration_min=%s", _EXPIRES_AT.isoformat(), dm)
+            if persistent:
+                _EXPIRES_AT = None
+                _DURATION_MINUTES = 0
+                logger.info("[FOOTBALL][LIVE_SESSION] started persistent (no auto-expiry)")
+            else:
+                dm = int(duration_minutes if duration_minutes is not None else _DURATION_MINUTES)
+                dm = max(1, min(dm, 180))
+                _DURATION_MINUTES = dm
+                _EXPIRES_AT = now + timedelta(minutes=dm)
+                logger.info(
+                    "[FOOTBALL][LIVE_SESSION] started expires_at=%s duration_min=%s",
+                    _EXPIRES_AT.isoformat(),
+                    dm,
+                )
         return self.snapshot()
 
     def stop_session(self, *, manual: bool = True) -> FootballLiveSessionSnapshot:
