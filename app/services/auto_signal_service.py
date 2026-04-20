@@ -46,7 +46,11 @@ from app.services.football_live_adaptive_learning_service import (
     preview_live_adaptive_tag_keys,
     snapshot_json_for_diagnostics,
 )
-from app.services.football_live_strategy_service import evaluate_football_live_strategies
+from app.services.football_live_strategy_service import (
+    evaluate_football_live_strategies,
+    evaluate_s1_live_1x2_controlled,
+    evaluate_s2_live_total_over_need_1_2,
+)
 from app.services.football_signal_integrity_service import FootballSignalIntegrityService
 from app.services.football_signal_scoring_service import FootballSignalScoringService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
@@ -3118,7 +3122,20 @@ class AutoSignalService:
         strategy_passed: list[ProviderSignalCandidate] = []
         strategy_stats: dict[str, int] = {}
         strategy_by_eid: dict[str, str] = {}
+        s1_fail: dict[str, int] = {}
+        s2_fail: dict[str, int] = {}
+        strategy_gate_debug: dict[str, object] = {}
         for c in candidates_to_ingest:
+            # Always compute breakdown on the same candidate pool we gate on (post scoring/adaptive).
+            d1 = evaluate_s1_live_1x2_controlled(c)
+            if not d1.passed:
+                for r in (d1.reasons or [])[:12]:
+                    s1_fail[str(r)] = int(s1_fail.get(str(r), 0) or 0) + 1
+            d2 = evaluate_s2_live_total_over_need_1_2(c)
+            if not d2.passed:
+                for r in (d2.reasons or [])[:12]:
+                    s2_fail[str(r)] = int(s2_fail.get(str(r), 0) or 0) + 1
+
             d0 = evaluate_football_live_strategies(c)
             if not d0.passed or not d0.strategy_id:
                 continue
@@ -3132,6 +3149,12 @@ class AutoSignalService:
             prev_expl["football_live_strategy_reasons"] = list(d0.reasons or [])
             strategy_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
         candidates_to_ingest = strategy_passed
+        strategy_gate_debug = {
+            "strategy_stats": dict(strategy_stats),
+            "strategy_matches": int(len(strategy_by_eid)),
+            "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
+            "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
+        }
 
         if not candidates_to_ingest:
             diagnostics.update(
@@ -3157,7 +3180,7 @@ class AutoSignalService:
                 global_block="blocked_no_strategy_match",
                 min_score_base=float(settings.football_min_signal_score or 60.0),
                 score_relief_note="explicit_strategies",
-                live_send_stats={"strategy_stats": strategy_stats, "strategy_matches": len(strategy_by_eid)},
+                live_send_stats=strategy_gate_debug,
                 finalist_send_meta={},
                 single_relief_max_gap=float(single_gap_max),
             )
@@ -3231,6 +3254,12 @@ class AutoSignalService:
             ),
             "rejected_total": int(rejected_total),
         }
+        # Preserve strategy gate telemetry for dry_run/debug.
+        if strategy_gate_debug:
+            try:
+                live_send_stats.update({k: v for k, v in strategy_gate_debug.items() if k not in live_send_stats})
+            except Exception:
+                pass
 
         ordered = order_live_finalist_tuples(scored_tuples, min_score_base, family_svc)
         finalists_pre_session = [c for c, _, _ in ordered]

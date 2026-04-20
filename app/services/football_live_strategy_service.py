@@ -5,6 +5,8 @@ from typing import Any
 
 from app.core.enums import SportType
 from app.schemas.provider_models import ProviderSignalCandidate
+from app.services.football_bet_formatter_service import FootballBetFormatterService
+from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,162 @@ def _is_over_selection(sel: str) -> bool:
     return "over" in s or "больше" in s or s.startswith("тб")
 
 
+def _is_draw_selection(sel: str) -> bool:
+    s = _norm(sel)
+    return s in {"x", "draw", "ничья", "ничья ", "ничья."} or s == "х" or "нич" in s
+
+
+def _selection_side_1x2(c: ProviderSignalCandidate) -> str | None:
+    """Normalize 1X2 selection to one of: home|away|draw|unknown."""
+    sel = _norm(str(c.market.selection or ""))
+    if not sel:
+        return None
+    if _is_draw_selection(sel):
+        return "draw"
+    # Common provider tokens
+    if sel in {"1", "1.0", "home", "п1"}:
+        return "home"
+    if sel in {"2", "2.0", "away", "п2"}:
+        return "away"
+    # Some feeds store team name as selection
+    home = _norm(c.match.home_team)
+    away = _norm(c.match.away_team)
+    if sel and home and sel == home:
+        return "home"
+    if sel and away and sel == away:
+        return "away"
+    return None
+
+
+def _min_goals_strict_over(line: float) -> int:
+    # strict over: 2.5 => need 3 total goals
+    return int(line + 0.5)
+
+
+def evaluate_s1_live_1x2_controlled(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+
+    reasons: list[str] = []
+    fam = FootballSignalSendFilterService().get_market_family(c)
+    if fam != "result":
+        reasons.append("market_not_result")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if minute is None or sh is None or sa is None:
+        reasons.append("missing_live_context(minute/score)")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if odds is None:
+        reasons.append("missing_odds")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    # Calibrated bounds (data-driven): keep it strict, but not empty in real cycles.
+    if not (5 <= minute <= 80):
+        reasons.append("minute_window")
+    if abs((sh - sa)) > 1:
+        reasons.append("goal_diff")
+    if (sh + sa) > 3:
+        reasons.append("total_goals_cap")
+    if not (1.35 <= odds <= 8.00):
+        reasons.append("odds_window")
+    side = _selection_side_1x2(c)
+    if side is None:
+        reasons.append("selection_mapping")
+    if side == "draw" and sh != sa:
+        reasons.append("draw_rule")
+
+    if reasons:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    return FootballLiveStrategyDecision(
+        passed=True,
+        strategy_id="S1_LIVE_1X2_CONTROLLED",
+        strategy_name="Strategy 1: LIVE 1X2 (controlled state)",
+        reasons=[
+            "market=result(1X2)",
+            "minute 5..80",
+            "goal_diff<=1 and total_goals<=3",
+            "odds 1.35..8.00",
+        ],
+    )
+
+
+def evaluate_s2_live_total_over_need_1_2(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+
+    reasons2: list[str] = []
+    fam_svc = FootballSignalSendFilterService()
+    fam = fam_svc.get_market_family(c)
+    if fam != "totals":
+        reasons2.append("market_not_totals")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons2)
+    if minute is None or sh is None or sa is None:
+        reasons2.append("missing_live_context(minute/score)")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons2)
+    if odds is None:
+        reasons2.append("missing_odds")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons2)
+
+    if not (15 <= minute <= 75):
+        reasons2.append("minute_window")
+    if not (1.40 <= odds <= 2.60):
+        reasons2.append("odds_window")
+    if not _is_over_selection(str(c.market.selection or "")):
+        reasons2.append("not_pure_over")
+
+    # Derive strict-over remaining goals from the market itself (do not depend on presend rationale).
+    fmt = FootballBetFormatterService()
+    ctx = fmt.describe_total_context(
+        market_type=c.market.market_type,
+        market_label=c.market.market_label,
+        selection=c.market.selection,
+        home_team=c.match.home_team,
+        away_team=c.match.away_team,
+        section_name=c.market.section_name,
+        subsection_name=c.market.subsection_name,
+    )
+    line_f: float | None = None
+    target_scope: str | None = None
+    if ctx and ctx.total_line:
+        try:
+            line_f = float(str(ctx.total_line).replace(",", "."))
+        except ValueError:
+            line_f = None
+        target_scope = ctx.target_scope
+    if line_f is None:
+        reasons2.append("cannot_parse_total_line")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons2)
+    if target_scope and "match" not in _norm(target_scope) and "общ" not in _norm(target_scope):
+        reasons2.append("not_match_total_scope")
+
+    goals_now = sh + sa
+    need_goals = max(0, _min_goals_strict_over(line_f) - int(goals_now))
+    if need_goals not in (1, 2):
+        if need_goals == 3:
+            reasons2.append("need_more_eq_3")
+        else:
+            reasons2.append("need_more_other")
+
+    if reasons2:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons2)
+    return FootballLiveStrategyDecision(
+        passed=True,
+        strategy_id="S2_LIVE_TOTAL_OVER_NEED_1_2",
+        strategy_name="Strategy 2: LIVE Match Total OVER (need 1–2 goals)",
+        reasons=[
+            "market=totals(match)",
+            "minute 15..75",
+            "need_goals in {1,2} (strict-over remaining goals)",
+            "odds 1.40..2.60",
+        ],
+    )
+
+
 def evaluate_football_live_strategies(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
     """Pick one explicit strategy for a candidate (or reject).
 
@@ -85,118 +243,18 @@ def evaluate_football_live_strategies(c: ProviderSignalCandidate) -> FootballLiv
     if c.match.sport != SportType.FOOTBALL or not bool(getattr(c.match, "is_live", False)):
         return FootballLiveStrategyDecision(passed=False, reasons=["not_football_live"])
 
-    lc = _lc_from_candidate(c)
-    minute = _as_int(lc.get("minute"))
-    sh = _as_int(lc.get("score_home"))
-    sa = _as_int(lc.get("score_away"))
-    odds = _odds_float(c)
-
-    if minute is None or sh is None or sa is None:
-        return FootballLiveStrategyDecision(passed=False, reasons=["missing_live_context(minute/score)"])
-    if odds is None:
-        return FootballLiveStrategyDecision(passed=False, reasons=["missing_odds"])
-
-    fam = ""
-    rat0 = (c.explanation_json or {}).get("football_live_signal_rationale")
-    if isinstance(rat0, dict):
-        fam = str(rat0.get("market_family") or "").strip()
-    if not fam:
-        # fallback: best effort from market_type
-        fam = "result" if _norm(c.market.market_type) in {"1x2", "match_winner"} else "totals" if "total" in _norm(c.market.market_type) else ""
-
-    # ------------------------------------------------------------
-    # Strategy 1: LIVE 1X2 (simple, transparent)
-    # ------------------------------------------------------------
-    # Goal: only match-result bets under controlled game state.
-    # Rules:
-    # - market family: result (1X2 / match winner)
-    # - minute: 10..70
-    # - abs(goal diff) <= 1
-    # - total goals <= 3 (avoid crazy states)
-    # - odds: 1.70..6.00
-    # - if selection is Draw -> must be draw right now
-    # - selection must be one of: home_team / away_team / Draw (no exotic tokens)
-    if fam == "result":
-        reasons: list[str] = []
-        if not (10 <= minute <= 70):
-            reasons.append("minute_out_of_range(10..70)")
-        if abs((sh - sa)) > 1:
-            reasons.append("goal_diff_gt_1")
-        if (sh + sa) > 3:
-            reasons.append("total_goals_gt_3")
-        if not (1.70 <= odds <= 6.00):
-            reasons.append("odds_out_of_range(1.70..6.00)")
-        sel = _norm(c.market.selection)
-        home = _norm(c.match.home_team)
-        away = _norm(c.match.away_team)
-        is_draw_sel = sel in {"x", "draw", "ничья", "ничья ", "ничья."} or "нич" in sel
-        if not (sel == home or sel == away or is_draw_sel):
-            reasons.append("selection_not_home_away_or_draw")
-        if is_draw_sel and sh != sa:
-            reasons.append("draw_selection_but_not_draw_score")
-
-        if not reasons:
-            return FootballLiveStrategyDecision(
-                passed=True,
-                strategy_id="S1_LIVE_1X2_CONTROLLED",
-                strategy_name="Strategy 1: LIVE 1X2 (controlled state)",
-                reasons=[
-                    "market=result(1X2)",
-                    "minute 10..70",
-                    "goal_diff<=1 and total_goals<=3",
-                    "odds 1.70..6.00",
-                ],
-            )
-        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
-
-    # ------------------------------------------------------------
-    # Strategy 2: LIVE Match Total OVER (needs 1–2 goals, not too late)
-    # ------------------------------------------------------------
-    # Goal: only match totals when the remaining-goals requirement is small.
-    # Rules:
-    # - market family: totals (match total)
-    # - selection must be Over
-    # - minute: 15..75
-    # - we must be able to parse `what_needed_to_win` computed in rationale selection_context
-    #   like: "match_goals_need_{k}_more_for_strict_over_{line}"
-    # - k must be 1 or 2
-    # - odds: 1.40..2.60
-    if fam == "totals":
-        reasons2: list[str] = []
-        if not (15 <= minute <= 75):
-            reasons2.append("minute_out_of_range(15..75)")
-        if not (1.40 <= odds <= 2.60):
-            reasons2.append("odds_out_of_range(1.40..2.60)")
-        if not _is_over_selection(str(c.market.selection or "")):
-            reasons2.append("not_over_selection")
-
-        sel_ctx = _selection_context_from_candidate(c)
-        wn = str(sel_ctx.get("what_needed_to_win") or "")
-        need_goals: int | None = None
-        if "match_goals_need_" in wn and "_more_for_strict_over_" in wn:
-            try:
-                mid = wn.split("match_goals_need_", 1)[1]
-                need_goals = int(mid.split("_more_for_strict_over_", 1)[0])
-            except Exception:
-                need_goals = None
-        if need_goals is None:
-            reasons2.append("cannot_parse_need_goals")
-        elif need_goals not in (1, 2):
-            reasons2.append("need_goals_not_in(1,2)")
-
-        if not reasons2:
-            return FootballLiveStrategyDecision(
-                passed=True,
-                strategy_id="S2_LIVE_TOTAL_OVER_NEED_1_2",
-                strategy_name="Strategy 2: LIVE Match Total OVER (need 1–2 goals)",
-                reasons=[
-                    "market=totals(match)",
-                    "minute 15..75",
-                    "need_goals in {1,2} (from strict-over requirement)",
-                    "odds 1.40..2.60",
-                ],
-            )
-        return FootballLiveStrategyDecision(passed=False, reasons=reasons2)
-
-    return FootballLiveStrategyDecision(passed=False, reasons=["unsupported_market_family"])
+    # Evaluate both strategies; pick the first that passes (S1 has priority on result markets).
+    d1 = evaluate_s1_live_1x2_controlled(c)
+    if d1.passed:
+        return d1
+    d2 = evaluate_s2_live_total_over_need_1_2(c)
+    if d2.passed:
+        return d2
+    # If neither passed, return a compact union of reasons for debugging.
+    rr = []
+    rr.extend(list(d1.reasons or [])[:6])
+    rr.extend(list(d2.reasons or [])[:6])
+    if not rr:
+        rr = ["no_strategy_match"]
+    return FootballLiveStrategyDecision(passed=False, reasons=rr)
 
