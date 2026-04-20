@@ -61,6 +61,7 @@ from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnos
 from app.services.signal_runtime_settings_service import SignalRuntimeSettingsService
 from app.schemas.provider_client import ProviderClientConfig
 from app.services.remote_smoke_service import RemoteSmokeService
+from app.services.football_live_strategy_performance_service import FootballLiveStrategyPerformanceService
 
 
 router = Router(name="debug")
@@ -873,6 +874,93 @@ async def cmd_football_live_debug(message: Message) -> None:
         )
         return
     await _answer_long_message(message, str(txt), reply_markup=get_signal_control_keyboard())
+
+
+@router.message(Command("football_live_strategy_stats"))
+async def cmd_football_live_strategy_stats(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+
+    async with sessionmaker() as session:
+        svc = FootballLiveStrategyPerformanceService()
+        rows = await svc.load_strategy_rows(session, lookback_hours=24 * 7, limit=2500)
+        rep = svc.build_report(rows)
+
+    def _pct(x: object) -> str:
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return "—"
+        return f"{v * 100.0:.1f}%"
+
+    lines: list[str] = []
+    lines.append("⚽ Football LIVE — Strategy stats (live_auto)")
+    lines.append("Фильтр: sport=FOOTBALL · is_live=true · notes=live_auto · strategy_id present")
+    lines.append("")
+    lines.append("— Общая статистика —")
+    lines.append(f"• Всего strategy signals: {rep.get('total')}")
+    lines.append(
+        f"• Settled: {rep.get('settled')}  · WIN: {rep.get('WIN')}  · LOSE: {rep.get('LOSE')}  · VOID: {rep.get('VOID')}"
+    )
+    lines.append(f"• Win rate (WIN/(WIN+LOSE)): {_pct(rep.get('win_rate'))}")
+    avg_odds = rep.get("avg_odds")
+    lines.append(f"• Avg odds: {avg_odds:.2f}" if isinstance(avg_odds, (int, float)) else "• Avg odds: —")
+    ob = rep.get("odds_buckets") or {}
+    if isinstance(ob, dict) and ob:
+        parts = [f"{k}={int(v)}" for k, v in sorted(ob.items(), key=lambda kv: str(kv[0]))]
+        lines.append("• Odds buckets: " + ", ".join(parts[:12]) + ("…" if len(parts) > 12 else ""))
+
+    lines.append("")
+    lines.append("— По стратегиям —")
+    bys = rep.get("by_strategy") or {}
+    if isinstance(bys, dict) and bys:
+        for sid, st in sorted(
+            bys.items(), key=lambda kv: (-int((kv[1] or {}).get("total") or 0), kv[0])
+        ):
+            if not isinstance(st, dict):
+                continue
+            nm = st.get("strategy_name") or ""
+            avg2 = st.get("avg_odds")
+            avg2s = f"{float(avg2):.2f}" if avg2 is not None else "—"
+            lines.append(
+                f"• {sid}{(' — ' + nm) if nm else ''}: total={st.get('total')} settled={st.get('settled')} "
+                f"WIN={st.get('WIN')} LOSE={st.get('LOSE')} VOID={st.get('VOID')} "
+                f"wr={_pct(st.get('win_rate'))} avg_odds={avg2s}"
+            )
+    else:
+        lines.append("• (пока нет strategy signals в окне)")
+
+    s1 = rep.get("s1_breakdown") or {}
+    if isinstance(s1, dict) and (s1.get("minute_buckets") or s1.get("odds_buckets")):
+        lines.append("")
+        lines.append("— S1 разрезы —")
+        mb = s1.get("minute_buckets") or {}
+        if isinstance(mb, dict) and mb:
+            lines.append("• Minute buckets: " + ", ".join([f"{k}={int(v)}" for k, v in mb.items()]))
+        sb = s1.get("score_states_top") or {}
+        if isinstance(sb, dict) and sb:
+            lines.append("• Score states (top): " + ", ".join([f"{k}={int(v)}" for k, v in sb.items()]))
+        ob2 = s1.get("odds_buckets") or {}
+        if isinstance(ob2, dict) and ob2:
+            lines.append("• Odds buckets: " + ", ".join([f"{k}={int(v)}" for k, v in ob2.items()]))
+
+    latest = rep.get("latest_settled") or []
+    lines.append("")
+    lines.append("— Последние settled strategy signals (top-10) —")
+    if isinstance(latest, list) and latest:
+        for r in latest[:10]:
+            if not isinstance(r, dict):
+                continue
+            lines.append(
+                f"• id={r.get('signal_id')} {r.get('match')} | {r.get('strategy_id')} | "
+                f"{r.get('bet')} | odds={r.get('odds')} | m={r.get('minute')} | score={r.get('score')} | "
+                f"{r.get('result')} | outcome_reason_code={r.get('outcome_reason_code') or '—'}"
+            )
+    else:
+        lines.append("• (пока нет settled сигналов в окне; вероятно матчи ещё не завершились)")
+
+    await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 
 @router.message(_text_is("⚽ Футбол"))
