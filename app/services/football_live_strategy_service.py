@@ -130,7 +130,7 @@ def evaluate_s1_live_1x2_controlled(c: ProviderSignalCandidate) -> FootballLiveS
         return FootballLiveStrategyDecision(passed=False, reasons=reasons)
 
     # Calibrated bounds (data-driven): keep it strict, but not empty in real cycles.
-    if not (5 <= minute <= 80):
+    if not (3 <= minute <= 83):
         reasons.append("minute_window")
     if abs((sh - sa)) > 1:
         reasons.append("goal_diff")
@@ -152,7 +152,7 @@ def evaluate_s1_live_1x2_controlled(c: ProviderSignalCandidate) -> FootballLiveS
         strategy_name="Strategy 1: LIVE 1X2 (controlled state)",
         reasons=[
             "market=result(1X2)",
-            "minute 5..80",
+            "minute 3..83",
             "goal_diff<=1 and total_goals<=3",
             "odds 1.35..8.00",
         ],
