@@ -31,6 +31,8 @@ CODE_SELECTED_LIMITED_LIVE_CONTEXT = "selected_with_limited_live_context"
 CODE_SELECTED_HIGH_PLAUSIBILITY = "selected_high_plausibility"
 CODE_SELECTED_MEDIUM_PLAUSIBILITY = "selected_medium_plausibility"
 CODE_SELECTED_LOW_PLAUSIBILITY = "selected_low_plausibility"
+CODE_SELECTED_STRATEGY_1X2 = "selected_strategy_s1_live_1x2"
+CODE_SELECTED_STRATEGY_TOTAL_OVER = "selected_strategy_s2_total_over"
 
 
 def _minute_from_snapshot(fs: dict[str, Any]) -> int | None:
@@ -125,6 +127,17 @@ def build_football_live_signal_rationale(
         codes.append(CODE_SELECTED_SOFT_SEND_PATH)
     else:
         codes.append(CODE_SELECTED_NORMAL_SEND_PATH)
+
+    strat_id = str(expl.get("football_live_strategy_id") or "").strip()
+    strat_name = str(expl.get("football_live_strategy_name") or "").strip() or None
+    strat_reasons = expl.get("football_live_strategy_reasons")
+    strat_reasons_list = (
+        [str(x) for x in strat_reasons if x] if isinstance(strat_reasons, list) else []
+    )
+    if strat_id.startswith("S1_"):
+        codes.append(CODE_SELECTED_STRATEGY_1X2)
+    elif strat_id.startswith("S2_"):
+        codes.append(CODE_SELECTED_STRATEGY_TOTAL_OVER)
     if limited_live:
         codes.append(CODE_SELECTED_LIMITED_LIVE_CONTEXT)
     if pl_score >= 80:
@@ -206,6 +219,9 @@ def build_football_live_signal_rationale(
         "signal_score": float(c.signal_score or 0.0),
         "send_path": str(send_path).lower(),
         "send_soft_label": send_soft_label,
+        "strategy_id": strat_id or None,
+        "strategy_name": strat_name,
+        "strategy_reasons": strat_reasons_list[:12],
         "is_main_market": bool(final_gate),
         "live_context": {
             "score_home": hi,

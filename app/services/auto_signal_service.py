@@ -46,6 +46,7 @@ from app.services.football_live_adaptive_learning_service import (
     preview_live_adaptive_tag_keys,
     snapshot_json_for_diagnostics,
 )
+from app.services.football_live_strategy_service import evaluate_football_live_strategies
 from app.services.football_signal_integrity_service import FootballSignalIntegrityService
 from app.services.football_signal_scoring_service import FootballSignalScoringService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
@@ -592,6 +593,15 @@ def compile_football_cycle_debug(
     post_int_counts = _count_by_event(fb_post_integrity)
     finalist_counts = _count_by_event(finalists or [])
     scored_eid_counts = _count_by_event(enriched_scored or [])
+    strat_by_eid: dict[str, str] = {}
+    if enriched_scored:
+        for c in enriched_scored:
+            eid = _football_event_id(c)
+            if not eid or eid in strat_by_eid:
+                continue
+            sid = (c.explanation_json or {}).get("football_live_strategy_id")
+            if isinstance(sid, str) and sid.strip():
+                strat_by_eid[eid] = sid.strip()
 
     preview_by_eid: dict[str, ProviderSignalCandidate] = {}
     for c in fb_preview:
@@ -782,6 +792,7 @@ def compile_football_cycle_debug(
                 "candidates_after_send_filter": n_send,
                 "candidates_after_integrity": n_int,
                 "candidates_after_scoring": n_scored,
+                "strategy_id": strat_by_eid.get(eid),
                 "candidates_after_score_threshold": n_final,
                 "best_market_family": best_market_family,
                 "best_candidate_market": best_market,
@@ -3100,6 +3111,90 @@ class AutoSignalService:
 
         min_score_base = float(settings.football_min_signal_score or 60.0)
         single_gap_max = float(getattr(settings, "football_live_single_relief_max_gap", 2.0) or 2.0)
+
+        # --- Explicit strategy gate (primary signal definition) ---
+        # We still keep filters/scoring/final gate as safety layers, but we do not consider a candidate
+        # unless it matches one of the explicit football live strategies.
+        strategy_passed: list[ProviderSignalCandidate] = []
+        strategy_stats: dict[str, int] = {}
+        strategy_by_eid: dict[str, str] = {}
+        for c in candidates_to_ingest:
+            d0 = evaluate_football_live_strategies(c)
+            if not d0.passed or not d0.strategy_id:
+                continue
+            eid = _football_event_id(c)
+            if eid and eid not in strategy_by_eid:
+                strategy_by_eid[eid] = d0.strategy_id
+            strategy_stats[d0.strategy_id] = int(strategy_stats.get(d0.strategy_id, 0) or 0) + 1
+            prev_expl = dict(c.explanation_json or {})
+            prev_expl["football_live_strategy_id"] = d0.strategy_id
+            prev_expl["football_live_strategy_name"] = d0.strategy_name
+            prev_expl["football_live_strategy_reasons"] = list(d0.reasons or [])
+            strategy_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
+        candidates_to_ingest = strategy_passed
+
+        if not candidates_to_ingest:
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="blocked_no_strategy_match",
+                note="no candidate matched explicit football live strategies",
+            )
+            _dbg_strat = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=fb_post_send_saved,
+                fb_post_integrity=fb_post_integrity_saved,
+                enriched_scored=enriched,
+                finalists=[],
+                finalists_pre_session=[],
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=send_filter_result.stats if send_filter_result else None,
+                integrity_dropped_checks=list(integrity_result.dropped_checks),
+                dry_run=dry_run,
+                global_block="blocked_no_strategy_match",
+                min_score_base=float(settings.football_min_signal_score or 60.0),
+                score_relief_note="explicit_strategies",
+                live_send_stats={"strategy_stats": strategy_stats, "strategy_matches": len(strategy_by_eid)},
+                finalist_send_meta={},
+                single_relief_max_gap=float(single_gap_max),
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="no_strategy_match",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_no_strategy_match",
+                dry_run=dry_run,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=0,
+                report_final_signal="НЕТ",
+                report_rejection_code="blocked_no_strategy_match",
+                football_cycle_debug=_dbg_strat,
+            )
+
         scored_sorted = sorted(
             candidates_to_ingest,
             key=lambda c: float(c.signal_score or 0),

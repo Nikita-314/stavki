@@ -101,6 +101,21 @@ class NotificationService:
         pl0 = prediction_logs[0]
         snap = pl0.feature_snapshot_json or {}
         expl = pl0.explanation_json or {}
+
+        strat_id = str(expl.get("football_live_strategy_id") or "").strip()
+        strat_name = str(expl.get("football_live_strategy_name") or "").strip()
+        strat_reasons = expl.get("football_live_strategy_reasons")
+        strat_reason_lines = (
+            [str(x) for x in strat_reasons if str(x).strip()] if isinstance(strat_reasons, list) else []
+        )
+        if strat_id or strat_name:
+            title = strat_name or strat_id
+            reason_lines: list[str] = [f"- Стратегия: {title}"]
+            if strat_reason_lines:
+                reason_lines.append("- Условия:")
+                reason_lines.extend([f"  • {x}" for x in strat_reason_lines[:8]])
+            return ["", "🧠 Анализ:", "- Причины:", *reason_lines]
+
         codes = list(expl.get("football_scoring_reason_codes") or [])
         fs = snap.get("football_scoring") or {}
         if not codes and fs.get("reason_codes"):
