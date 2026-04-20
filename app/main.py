@@ -72,12 +72,17 @@ async def main() -> None:
     sessionmaker = create_sessionmaker(engine)
 
     dp.include_router(debug_router)
-    football_live_task = asyncio.create_task(
-        AutoSignalService().run_football_live_forever(sessionmaker, bot)
-    )
-    settlement_task = asyncio.create_task(
-        WinlineResultAutoSettlementService().run_forever(sessionmaker, interval_seconds=120)
-    )
+
+    async def _football_live_loop_runner() -> None:
+        # IMPORTANT: asyncio.create_task must receive a coroutine *function call* that returns a coroutine,
+        # not an already-instantiated coroutine object.
+        await AutoSignalService().run_football_live_forever(sessionmaker, bot)
+
+    async def _winline_settlement_loop_runner() -> None:
+        await WinlineResultAutoSettlementService().run_forever(sessionmaker, interval_seconds=120)
+
+    football_live_task = asyncio.create_task(_football_live_loop_runner())
+    settlement_task = asyncio.create_task(_winline_settlement_loop_runner())
     try:
         await dp.start_polling(bot, sessionmaker=sessionmaker)
     finally:

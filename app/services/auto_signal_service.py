@@ -67,10 +67,6 @@ from app.db.repositories.signal_repository import SignalRepository
 
 logger = logging.getLogger(__name__)
 
-# Throttle expensive dry-run debug cycles while football live combat session is inactive.
-_LIVE_LOOP_LAST_DEBUG_AT: float | None = None
-_LIVE_LOOP_DEBUG_INTERVAL_SECONDS = 300.0
-
 
 def _football_event_id(candidate: ProviderSignalCandidate) -> str:
     return str(getattr(getattr(candidate, "match", None), "external_event_id", "") or "")
@@ -3919,14 +3915,15 @@ class AutoSignalService:
                 sess.expire_if_needed()
                 diag_fn = SignalRuntimeDiagnosticsService().update
                 snap0 = sess.snapshot()
+                active0 = bool(sess.is_active())
                 logger.info(
-                    "[FOOTBALL][LIVE_LOOP] tick active=%s persistent=%s started_at=%s last_cycle_at=%s",
-                    str(snap0.active).lower(),
-                    str(bool(snap0.active and snap0.expires_at is None)).lower(),
-                    snap0.started_at.isoformat() if snap0.started_at else None,
-                    snap0.last_cycle_at.isoformat() if snap0.last_cycle_at else None,
+                    "[FOOTBALL][LIVE_LOOP] tick session_active=%s persistent=%s started_at=%s last_cycle_at=%s",
+                    str(active0).lower(),
+                    str(bool(getattr(snap0, "persistent", False))).lower(),
+                    (snap0.started_at.isoformat() if snap0.started_at else None),
+                    (snap0.last_cycle_at.isoformat() if snap0.last_cycle_at else None),
                 )
-                if sess.is_active():
+                if active0:
                     t_cycle = time.perf_counter()
                     cres = await self.run_single_cycle(sessionmaker, bot, dry_run=False)
                     cycle_wall = float(time.perf_counter() - t_cycle)
@@ -3982,40 +3979,11 @@ class AutoSignalService:
                         football_live_duplicate_ideas_blocked=snap_idle.duplicate_ideas_blocked_session,
                         football_live_sent_ideas_count=snap_idle.sent_idea_keys_count,
                     )
-                    logger.info(
-                        "[FOOTBALL][LIVE_LOOP] session inactive — skipping combat cycle (sleep=%ss)",
-                        idle_sleep,
-                    )
-                    # Keep admin diagnostics fresh even when the combat session is not started:
-                    # run a lightweight dry-run cycle (no Telegram / no DB signals) to populate football_cycle_debug cache.
-                    global _LIVE_LOOP_LAST_DEBUG_AT
-                    now_m = time.monotonic()
-                    if _LIVE_LOOP_LAST_DEBUG_AT is None or (now_m - float(_LIVE_LOOP_LAST_DEBUG_AT)) >= float(
-                        _LIVE_LOOP_DEBUG_INTERVAL_SECONDS
-                    ):
-                        _LIVE_LOOP_LAST_DEBUG_AT = now_m
-                        try:
-                            t_dbg = time.perf_counter()
-                            dbg_res = await self.run_single_cycle(sessionmaker, bot, dry_run=True)
-                            dbg_wall = float(time.perf_counter() - t_dbg)
-                            self.log_football_cycle_trace(dbg_res)
-                            logger.info(
-                                "[FOOTBALL][LIVE_LOOP] dry_run_debug_cycle wall=%.2fs message=%s",
-                                dbg_wall,
-                                str(dbg_res.message),
-                            )
-                        except Exception:
-                            logger.exception("[FOOTBALL][LIVE_LOOP][ERROR] dry_run_debug_cycle failed")
-                    else:
-                        logger.info(
-                            "[FOOTBALL][LIVE_LOOP] dry_run_debug_cycle skipped (throttle=%ss)",
-                            int(_LIVE_LOOP_DEBUG_INTERVAL_SECONDS),
-                        )
                     sleep_time = idle_sleep
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("[FOOTBALL][LIVE_LOOP][ERROR] football live loop iteration failed")
+                logger.exception("[FOOTBALL][LIVE_LOOP][ERROR] football live session loop failed")
                 sleep_time = idle_sleep
             await asyncio.sleep(sleep_time)
 
