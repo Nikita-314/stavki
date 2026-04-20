@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,6 +20,7 @@ class StrategySignalRow:
     event_id: str | None
     match_name: str
     tournament_name: str
+    created_at: datetime
     signaled_at: datetime
     odds: Decimal
     settlement_result: BetResult | None
@@ -76,20 +77,80 @@ def _score_state(h: int | None, a: int | None) -> str:
     return f"{h}:{a}"
 
 
+_STRATEGY_INTRO_COMMIT_ISO = "2026-04-20T14:25:48+00:00"
+"""UTC timestamp of commit ea23629 (replace heuristic football live selection with explicit strategies)."""
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    # Accept "+00:00" offsets from git show --format=%ci
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def strategy_intro_commit_utc() -> datetime:
+    return _parse_iso_utc(_STRATEGY_INTRO_COMMIT_ISO)
+
+
 class FootballLiveStrategyPerformanceService:
     """Analytics only: strategy -> signal -> settlement -> outcome_reason_code.
 
     IMPORTANT: This service must NOT affect signal logic.
     """
 
+    async def resolve_strategy_epoch_signaled_at_utc(self, session: AsyncSession) -> tuple[datetime, dict[str, Any]]:
+        """Define the start of the "new strategy era" for analytics.
+
+        We use max(commit_time, first_observed_strategy_signal_time) to avoid mixing pre-era history,
+        while also aligning with the moment strategy_id started appearing in combat rows.
+        """
+        commit_ts = strategy_intro_commit_utc()
+
+        # Earliest football live_auto row that already carries strategy_id in prediction_log JSON.
+        # Use JSON operators for Postgres JSON columns (robust vs ORM JSON path quirks).
+        q0 = text(
+            """
+            SELECT MIN(s.signaled_at)
+            FROM signals s
+            JOIN prediction_logs pl ON pl.signal_id = s.id
+            WHERE s.sport = 'FOOTBALL'
+              AND s.is_live IS TRUE
+              AND s.notes = 'live_auto'
+              AND (pl.explanation_json->>'football_live_strategy_id') IS NOT NULL
+              AND btrim(pl.explanation_json->>'football_live_strategy_id') <> ''
+            """
+        )
+        first_ts = (await session.execute(q0)).scalar_one_or_none()
+
+        candidates: list[tuple[datetime, str]] = [(commit_ts, "commit_ea23629_utc")]
+        if isinstance(first_ts, datetime):
+            candidates.append((first_ts.astimezone(timezone.utc), "first_db_strategy_id_signal_signaled_at"))
+        epoch = max(candidates, key=lambda t: t[0])[0]
+        meta = {
+            "commit_iso": _STRATEGY_INTRO_COMMIT_ISO,
+            "commit_ts_utc": commit_ts.isoformat(),
+            "first_db_strategy_id_signal_signaled_at_utc": (
+                first_ts.astimezone(timezone.utc).isoformat() if isinstance(first_ts, datetime) else None
+            ),
+            "epoch_signaled_at_utc": epoch.isoformat(),
+            "epoch_rule": "max(commit_ts, first_db_strategy_id_signal_signaled_at)",
+        }
+        return epoch, meta
+
     async def load_strategy_rows(
         self,
         session: AsyncSession,
         *,
+        since_signaled_at_utc: datetime | None = None,
         lookback_hours: int = 24 * 7,
         limit: int = 2500,
     ) -> list[StrategySignalRow]:
-        horizon = _now_utc() - timedelta(hours=max(1, int(lookback_hours)))
+        now = _now_utc()
+        if since_signaled_at_utc is not None:
+            horizon = since_signaled_at_utc.astimezone(timezone.utc)
+        else:
+            horizon = now - timedelta(hours=max(1, int(lookback_hours)))
 
         q = (
             select(Signal)
@@ -139,6 +200,7 @@ class FootballLiveStrategyPerformanceService:
                     event_id=str(s.event_external_id) if s.event_external_id else None,
                     match_name=str(s.match_name or ""),
                     tournament_name=str(s.tournament_name or ""),
+                    created_at=s.created_at,
                     signaled_at=s.signaled_at,
                     odds=s.odds_at_signal,
                     settlement_result=result,
@@ -154,7 +216,7 @@ class FootballLiveStrategyPerformanceService:
             )
         return out
 
-    def build_report(self, rows: list[StrategySignalRow]) -> dict[str, Any]:
+    def build_report(self, rows: list[StrategySignalRow], *, epoch_meta: dict[str, Any] | None = None) -> dict[str, Any]:
         total = len(rows)
         settled = [r for r in rows if r.settled_at is not None and r.settlement_result is not None]
         win = [r for r in settled if r.settlement_result == BetResult.WIN]
@@ -227,7 +289,33 @@ class FootballLiveStrategyPerformanceService:
         latest_settled = sorted(settled, key=lambda r: (r.settled_at or _now_utc()), reverse=True)[:10]
         with_outcome_code = sum(1 for r in settled if r.outcome_reason_code)
 
+        latest_rows = sorted(rows, key=lambda r: r.signaled_at, reverse=True)[:25]
+        latest_short = [
+            {
+                "signal_id": r.signal_id,
+                "created_at": r.created_at.isoformat(),
+                "signaled_at": r.signaled_at.isoformat(),
+                "strategy_id": r.strategy_id,
+                "match": r.match_name,
+                "minute": r.minute,
+                "score": _score_state(r.score_home, r.score_away),
+                "bet_text": r.bet_text,
+                "odds": str(r.odds),
+                "settlement_status": (
+                    r.settlement_result.value
+                    if r.settlement_result is not None
+                    else ("settled_unknown" if r.settled_at is not None else "not_settled")
+                ),
+                "outcome_reason_code": r.outcome_reason_code,
+            }
+            for r in latest_rows
+        ]
+
+        strat_ids = sorted({r.strategy_id for r in rows})
+
         return {
+            "epoch": epoch_meta or {},
+            "strategy_ids_observed": strat_ids,
             "total": total,
             "settled": len(settled),
             "WIN": len(win),
@@ -258,6 +346,7 @@ class FootballLiveStrategyPerformanceService:
                 }
                 for r in latest_settled
             ],
+            "latest_strategy_signals_short": latest_short,
             "with_outcome_reason_code": with_outcome_code,
         }
 

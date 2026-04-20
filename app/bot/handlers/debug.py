@@ -884,8 +884,9 @@ async def cmd_football_live_strategy_stats(message: Message, sessionmaker: async
 
     async with sessionmaker() as session:
         svc = FootballLiveStrategyPerformanceService()
-        rows = await svc.load_strategy_rows(session, lookback_hours=24 * 7, limit=2500)
-        rep = svc.build_report(rows)
+        epoch, epoch_meta = await svc.resolve_strategy_epoch_signaled_at_utc(session)
+        rows = await svc.load_strategy_rows(session, since_signaled_at_utc=epoch, limit=5000)
+        rep = svc.build_report(rows, epoch_meta=epoch_meta)
 
     def _pct(x: object) -> str:
         try:
@@ -897,9 +898,21 @@ async def cmd_football_live_strategy_stats(message: Message, sessionmaker: async
     lines: list[str] = []
     lines.append("⚽ Football LIVE — Strategy stats (live_auto)")
     lines.append("Фильтр: sport=FOOTBALL · is_live=true · notes=live_auto · strategy_id present")
+    ep = rep.get("epoch") if isinstance(rep.get("epoch"), dict) else {}
+    if isinstance(ep, dict) and ep.get("epoch_signaled_at_utc"):
+        lines.append("")
+        lines.append("— Эпоха стратегии (отсечка) —")
+        lines.append(f"• Правило: {ep.get('epoch_rule')}")
+        lines.append(f"• Коммит стратегий (UTC): {ep.get('commit_ts_utc')}")
+        if ep.get("first_db_strategy_id_signal_signaled_at_utc"):
+            lines.append(f"• Первый сигнал с strategy_id в БД (signaled_at UTC): {ep.get('first_db_strategy_id_signal_signaled_at_utc')}")
+        lines.append(f"• Итоговая отсечка (signaled_at >=): {ep.get('epoch_signaled_at_utc')}")
     lines.append("")
     lines.append("— Общая статистика —")
-    lines.append(f"• Всего strategy signals: {rep.get('total')}")
+    lines.append(f"• Всего strategy signals (после отсечки): {rep.get('total')}")
+    sids = rep.get("strategy_ids_observed") or []
+    if isinstance(sids, list) and sids:
+        lines.append("• strategy_id наблюдались: " + ", ".join([str(x) for x in sids]))
     lines.append(
         f"• Settled: {rep.get('settled')}  · WIN: {rep.get('WIN')}  · LOSE: {rep.get('LOSE')}  · VOID: {rep.get('VOID')}"
     )
@@ -959,6 +972,31 @@ async def cmd_football_live_strategy_stats(message: Message, sessionmaker: async
             )
     else:
         lines.append("• (пока нет settled сигналов в окне; вероятно матчи ещё не завершились)")
+
+    short = rep.get("latest_strategy_signals_short") or []
+    lines.append("")
+    lines.append("— Short report: последние strategy-based сигналы (после отсечки) —")
+    if isinstance(short, list) and short:
+        for r in short[:15]:
+            if not isinstance(r, dict):
+                continue
+            lines.append(
+                f"• id={r.get('signal_id')} created={r.get('created_at')} sig={r.get('signaled_at')} | "
+                f"{r.get('strategy_id')} | {r.get('match')} | m={r.get('minute')} score={r.get('score')} | "
+                f"{r.get('bet_text')} | odds={r.get('odds')} | settle={r.get('settlement_status')} | "
+                f"orc={r.get('outcome_reason_code') or '—'}"
+            )
+    else:
+        lines.append("• (пока нет strategy signals после отсечки)")
+
+    settled_n = int(rep.get("settled") or 0)
+    winlose = int(rep.get("WIN") or 0) + int(rep.get("LOSE") or 0)
+    lines.append("")
+    if settled_n <= 5 or winlose < 20:
+        lines.append(
+            "Оценка качества стратегии: пока рано. Для первых осмысленных выводов обычно нужно "
+            "хотя бы ~20–50 settled WIN/LOSE (а не просто settled), плюс стабильный источник результатов."
+        )
 
     await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
