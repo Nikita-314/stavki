@@ -624,6 +624,21 @@ def compile_football_cycle_debug(
             if prev is None or sc > prev[0]:
                 best_by_eid[eid] = (sc, c)
 
+    # If strategy id is not present on enriched candidates (tagging happens later in the pipeline),
+    # infer it from the best candidate per match for diagnostics only.
+    if best_by_eid:
+        try:
+            from app.services.football_live_strategy_service import evaluate_football_live_strategies
+
+            for eid, (_sc, best_c) in best_by_eid.items():
+                if not eid or eid in strat_by_eid:
+                    continue
+                d0 = evaluate_football_live_strategies(best_c)
+                if d0.passed and d0.strategy_id:
+                    strat_by_eid[eid] = d0.strategy_id
+        except Exception:
+            pass
+
     pre_session_eids: set[str] = set()
     if finalists_pre_session:
         for c in finalists_pre_session:
