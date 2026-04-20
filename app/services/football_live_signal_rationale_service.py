@@ -305,6 +305,13 @@ async def aggregate_football_live_rationale_outcomes(
                 section_name=signal.section_name,
                 subsection_name=signal.subsection_name,
             ),
+            min_entry_odds=signal.min_entry_odds,
+            predicted_prob=signal.predicted_prob,
+            implied_prob=signal.implied_prob,
+            edge=signal.edge,
+            model_name=signal.model_name,
+            model_version_name=signal.model_version_name,
+            signal_score=signal.signal_score,
             feature_snapshot_json=dict(pl0.feature_snapshot_json or {}),
             explanation_json=ex0,
         )

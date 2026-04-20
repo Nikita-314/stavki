@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.bot.handlers import debug_router
 from app.db.session import create_engine, create_sessionmaker
 from app.services.auto_signal_service import AutoSignalService
+from app.services.winline_result_autosettlement_service import WinlineResultAutoSettlementService
 
 
 async def main() -> None:
@@ -74,12 +75,18 @@ async def main() -> None:
     football_live_task = asyncio.create_task(
         AutoSignalService().run_football_live_forever(sessionmaker, bot)
     )
+    settlement_task = asyncio.create_task(
+        WinlineResultAutoSettlementService().run_forever(sessionmaker, interval_seconds=120)
+    )
     try:
         await dp.start_polling(bot, sessionmaker=sessionmaker)
     finally:
         football_live_task.cancel()
+        settlement_task.cancel()
         with suppress(asyncio.CancelledError):
             await football_live_task
+        with suppress(asyncio.CancelledError):
+            await settlement_task
         await engine.dispose()
 
 
