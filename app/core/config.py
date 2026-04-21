@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     odds_provider_timeout_seconds: int = 20
     sportmonks_api_key: str | None = None
     """Sportmonks Football API token (set via SPORTMONKS_API_KEY in .env)."""
+    api_football_api_key: str | None = None
+    """API-Football (API-SPORTS) key (set via API_FOOTBALL_API_KEY in .env)."""
+    api_football_base_url: str = "https://v3.football.api-sports.io"
     auto_signal_polling_enabled: bool = False
     auto_signal_polling_interval_seconds: int = 60
     auto_signal_preview_only: bool = False

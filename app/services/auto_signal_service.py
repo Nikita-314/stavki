@@ -2791,16 +2791,20 @@ class AutoSignalService:
 
         # --- External analytics enrichment (Sportmonks) ---
         # Best-effort: map Winline match -> Sportmonks live fixture; attach stats to feature_snapshot_json.
+        api_football_mapped = 0
+        api_football_not_mapped = 0
+        api_football_stats_loaded = 0
+        api_football_stats_missing = 0
         sportmonks_mapped = 0
         sportmonks_not_mapped = 0
         sportmonks_stats_loaded = 0
         sportmonks_stats_missing = 0
         try:
-            from app.services.sportmonks_service import SportmonksService
+            # Primary: API-Football (API-SPORTS)
+            from app.services.api_football_service import ApiFootballService
 
-            sm = SportmonksService()
-            live_fx = sm.get_live_fixtures()
-            # Enrich only one row per match (event id), then copy to all candidates in that event.
+            af = ApiFootballService()
+            af_live = af.get_live_fixtures()
             by_eid: dict[str, list[int]] = {}
             for idx, c in enumerate(candidates_to_ingest):
                 eid = str(getattr(getattr(c, "match", None), "external_event_id", "") or "").strip()
@@ -2808,6 +2812,65 @@ class AutoSignalService:
                     continue
                 by_eid.setdefault(eid, []).append(idx)
 
+            for eid, idxs in by_eid.items():
+                c0 = candidates_to_ingest[idxs[0]]
+                fx = af.map_winline_match_to_fixture(
+                    winline_home=str(getattr(getattr(c0, "match", None), "home_team", "") or ""),
+                    winline_away=str(getattr(getattr(c0, "match", None), "away_team", "") or ""),
+                    fixtures=af_live,
+                )
+                if fx is None:
+                    api_football_not_mapped += 1
+                    logger.info("[API_FOOTBALL] not_mapped eid=%s match=%s", eid, str(c0.match.match_name or "")[:160])
+                else:
+                    api_football_mapped += 1
+                    logger.info(
+                        "[API_FOOTBALL] mapped eid=%s -> fixture_id=%s (%s vs %s)",
+                        eid,
+                        fx.fixture_id,
+                        fx.home_team,
+                        fx.away_team,
+                    )
+                    st = af.get_fixture_statistics(fx.fixture_id)
+                    if st is None:
+                        api_football_stats_missing += 1
+                        logger.info("[API_FOOTBALL] stats_missing fixture_id=%s eid=%s", fx.fixture_id, eid)
+                    else:
+                        api_football_stats_loaded += 1
+                        logger.info(
+                            "[API_FOOTBALL] stats_loaded fixture_id=%s eid=%s shots_total=%s sot=%s corners=%s yellow=%s red=%s",
+                            st.fixture_id,
+                            eid,
+                            st.shots_total,
+                            st.shots_on_target,
+                            st.corners,
+                            st.cards_yellow,
+                            st.cards_red,
+                        )
+                        payload = {
+                            "fixture_id": st.fixture_id,
+                            "home_team": fx.home_team,
+                            "away_team": fx.away_team,
+                            "minute": fx.minute,
+                            "score_home": fx.score_home,
+                            "score_away": fx.score_away,
+                            "league": fx.league,
+                            "shots_total": st.shots_total,
+                            "shots_on_target": st.shots_on_target,
+                            "corners": st.corners,
+                            "cards_yellow": st.cards_yellow,
+                            "cards_red": st.cards_red,
+                        }
+                        for j in idxs:
+                            cj = candidates_to_ingest[j]
+                            fs0 = dict(cj.feature_snapshot_json or {})
+                            fs0["api_football"] = payload
+                            candidates_to_ingest[j] = cj.model_copy(update={"feature_snapshot_json": fs0})
+
+            from app.services.sportmonks_service import SportmonksService
+
+            sm = SportmonksService()
+            live_fx = sm.get_live_fixtures()
             for eid, idxs in by_eid.items():
                 c0 = candidates_to_ingest[idxs[0]]
                 fx = sm.map_winline_match_to_fixture(
