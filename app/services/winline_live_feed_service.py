@@ -283,15 +283,54 @@ class WinlineLiveFeedService:
 
     async def _do_fetch_football(self, s: Settings) -> tuple[dict[str, Any] | None, str | None]:
         tmo = max(5.0, float(s.winline_live_recv_timeout_seconds or 30))
-        acc, err0 = await winline_websocket_scan_accumulator(s)
+        # Football discovery can be sparse across snapshots even when football is live on site.
+        # To avoid false "not seen" from a single unlucky prescan, try a few quick attempts.
+        max_attempts = 3
+        retry_sleep_seconds = 1.0
+
+        acc: _Accum | None = None
+        err0: str | None = None
+        fball_ids: list[int] = []
+        for attempt in range(1, max_attempts + 1):
+            t0 = time.perf_counter()
+            acc, err0 = await winline_websocket_scan_accumulator(s)
+            wall = float(time.perf_counter() - t0)
+            tips_n = len(acc.tips) if acc and acc.tips else 0
+            champs_n = len(acc.champs) if acc else 0
+            events_n = len(acc.events) if acc else 0
+            lines_n = len(acc.lines) if acc else 0
+            if acc is None:
+                logger.info(
+                    "[FOOTBALL][WINLINE_LIVE][DISCOVERY] attempt=%s/%s wall=%.2fs acc=None err=%s",
+                    attempt,
+                    max_attempts,
+                    wall,
+                    err0,
+                )
+            else:
+                fball_ids = [int(eid) for eid, ev in acc.events.items() if _is_football_event(ev, acc.champs)]
+                fball_ids.sort()
+                logger.info(
+                    "[FOOTBALL][WINLINE_LIVE][DISCOVERY] attempt=%s/%s wall=%.2fs tips=%s champs=%s events=%s lines=%s football_events=%s err=%s",
+                    attempt,
+                    max_attempts,
+                    wall,
+                    tips_n,
+                    champs_n,
+                    events_n,
+                    lines_n,
+                    len(fball_ids),
+                    err0,
+                )
+                if tips_n == 0:
+                    return None, "winline_tipline_missing"
+                if fball_ids:
+                    break
+            if attempt < max_attempts:
+                await asyncio.sleep(retry_sleep_seconds)
+
         if acc is None:
             return None, err0
-        if not acc.tips:
-            return None, "winline_tipline_missing"
-        fball_ids = [
-            int(eid) for eid, ev in acc.events.items() if _is_football_event(ev, acc.champs)
-        ]
-        fball_ids.sort()
         if not fball_ids:
             return None, "winline_football_live_not_seen"
 
