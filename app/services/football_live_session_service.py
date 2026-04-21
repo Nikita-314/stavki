@@ -39,6 +39,8 @@ _DUP_BLOCKED = 0
 # Smarter session-local dedup: remember last sent time and live-state fingerprint per idea.
 # Used to allow repeats after a cooldown or after live-state change.
 _SENT_IDEA_KEYS: dict[str, tuple[datetime, str | None]] = {}
+# Per-event direction guard (combat safety): block result-side flips within a live session.
+_SENT_EVENT_DIRECTION: dict[str, tuple[datetime, str]] = {}
 
 
 class FootballLiveSessionService:
@@ -110,6 +112,7 @@ class FootballLiveSessionService:
         global _STOPPED_MANUALLY, _LAST_CYCLE_AT
         global _SIGNALS_SENT, _TELEGRAM_SENT, _DUP_BLOCKED
         global _SENT_IDEA_KEYS
+        global _SENT_EVENT_DIRECTION
         with _LOCK:
             now = datetime.now(timezone.utc)
             _ACTIVE = True
@@ -120,6 +123,7 @@ class FootballLiveSessionService:
             _TELEGRAM_SENT = 0
             _DUP_BLOCKED = 0
             _SENT_IDEA_KEYS = {}
+            _SENT_EVENT_DIRECTION = {}
             if persistent:
                 _EXPIRES_AT = None
                 _DURATION_MINUTES = 0
@@ -174,6 +178,47 @@ class FootballLiveSessionService:
                 ts = ts.replace(tzinfo=timezone.utc)
             _SENT_IDEA_KEYS[str(idea_key or "")] = (ts, str(state_fingerprint) if state_fingerprint else None)
 
+    def should_block_event_direction_flip(
+        self,
+        *,
+        event_external_id: str | None,
+        direction_key: str,
+        now_utc: datetime | None = None,
+    ) -> tuple[bool, str]:
+        """Block contradictory direction for the same event in a single live session.
+
+        Example: 1X2 side=home was already sent for this event; sending side=away later is blocked.
+        """
+        eid = str(event_external_id or "").strip()
+        dkey = str(direction_key or "").strip().lower()
+        if not eid or not dkey:
+            return False, "no_event_or_direction"
+        with _LOCK:
+            prev = _SENT_EVENT_DIRECTION.get(eid)
+        if prev is None:
+            return False, "no_previous_direction"
+        _prev_ts, prev_key = prev
+        if prev_key == dkey:
+            return False, "same_direction_ok"
+        return True, f"blocked_flip prev={prev_key} new={dkey}"
+
+    def register_event_direction_sent(
+        self,
+        *,
+        event_external_id: str | None,
+        direction_key: str,
+        sent_at_utc: datetime | None = None,
+    ) -> None:
+        eid = str(event_external_id or "").strip()
+        dkey = str(direction_key or "").strip().lower()
+        if not eid or not dkey:
+            return
+        ts = sent_at_utc or datetime.now(timezone.utc)
+        if getattr(ts, "tzinfo", None) is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        with _LOCK:
+            _SENT_EVENT_DIRECTION[eid] = (ts, dkey)
+
     def has_idea(self, idea_key: str) -> bool:
         with _LOCK:
             return str(idea_key or "") in _SENT_IDEA_KEYS
@@ -225,6 +270,7 @@ def reset_live_session_for_tests() -> None:
     """Сброс процесс-local состояния (только тесты / локальные демо)."""
     global _ACTIVE, _STARTED_AT, _EXPIRES_AT, _DURATION_MINUTES
     global _STOPPED_MANUALLY, _LAST_CYCLE_AT, _SIGNALS_SENT, _TELEGRAM_SENT, _DUP_BLOCKED, _SENT_IDEA_KEYS
+    global _SENT_EVENT_DIRECTION
     with _LOCK:
         _ACTIVE = False
         _STARTED_AT = None
@@ -236,6 +282,7 @@ def reset_live_session_for_tests() -> None:
         _TELEGRAM_SENT = 0
         _DUP_BLOCKED = 0
         _SENT_IDEA_KEYS = {}
+        _SENT_EVENT_DIRECTION = {}
 
 
 def build_live_idea_key(candidate) -> str:

@@ -3350,6 +3350,36 @@ class AutoSignalService:
                 if minute is None:
                     return f"s{sh}:{sa}"
                 return f"m{minute}_s{sh}:{sa}"
+
+            def _norm(s: str) -> str:
+                return (s or "").strip().lower().replace("ё", "е")
+
+            def _result_1x2_direction_key(cand: ProviderSignalCandidate) -> str | None:
+                """Direction key used to block flip per event: result_1x2:{home|away|draw}."""
+                try:
+                    mt = _norm(str(cand.market.market_type or ""))
+                    if mt not in {"1x2", "match_winner"}:
+                        return None
+                    sel = _norm(str(cand.market.selection or ""))
+                    if not sel:
+                        return None
+                    home = _norm(str(cand.match.home_team or ""))
+                    away = _norm(str(cand.match.away_team or ""))
+                    tok = sel.replace("х", "x").replace(" ", "")
+                    if tok in {"1", "p1", "п1", "home"}:
+                        return "result_1x2:home"
+                    if tok in {"2", "p2", "п2", "away"}:
+                        return "result_1x2:away"
+                    if tok in {"x", "draw", "н", "ничья"}:
+                        return "result_1x2:draw"
+                    # team-name match (provider often sets selection to team)
+                    if home and (sel == home or home in sel or sel in home):
+                        return "result_1x2:home"
+                    if away and (sel == away or away in sel or sel in away):
+                        return "result_1x2:away"
+                    return None
+                except Exception:
+                    return None
             for c, t, s in ordered:
                 ik = build_live_idea_key(c)
                 fp = _candidate_live_state_fingerprint(c)
@@ -3358,6 +3388,13 @@ class AutoSignalService:
                     min_repeat_minutes=10,
                     state_fingerprint=fp,
                 )
+                # Hard safety: do not allow flip (opposite side) on the same live event within one session.
+                # This is applied only to classic 1X2 result markets.
+                dkey = _result_1x2_direction_key(c)
+                flip_blocked, flip_reason = ls_fin.should_block_event_direction_flip(
+                    event_external_id=str(getattr(getattr(c, "match", None), "external_event_id", "") or "") or None,
+                    direction_key=(dkey or ""),
+                )
                 if ik in batch_seen or blocked:
                     ls_fin.record_duplicate_idea_blocked(1)
                     logger.info(
@@ -3365,6 +3402,15 @@ class AutoSignalService:
                         ik[:200],
                         breason,
                         (fp or "—"),
+                    )
+                    continue
+                if dkey and flip_blocked:
+                    ls_fin.record_duplicate_idea_blocked(1)
+                    logger.info(
+                        "[FOOTBALL][SESSION_IDEA_DEDUP] blocked_flip event_id=%s dkey=%s reason=%s",
+                        str(getattr(getattr(c, "match", None), "external_event_id", "") or "")[:32],
+                        dkey,
+                        flip_reason,
                     )
                     continue
                 batch_seen.add(ik)
@@ -3738,6 +3784,16 @@ class AutoSignalService:
                     elif shv is not None and sav is not None:
                         fp = f"s{shv}:{sav}"
                 ls_ing.register_idea_sent_with_state(build_live_idea_key(cr), state_fingerprint=fp)
+                # Register per-event direction to prevent flip within the same session.
+                try:
+                    dkey = _result_1x2_direction_key(cr)
+                    if dkey:
+                        ls_ing.register_event_direction_sent(
+                            event_external_id=str(getattr(getattr(cr, "match", None), "external_event_id", "") or "") or None,
+                            direction_key=dkey,
+                        )
+                except Exception:
+                    pass
             except Exception:
                 ls_ing.register_idea_sent(build_live_idea_key(cr))
         ls_ing.record_signals_created(len(ingest_res.created_signal_ids))

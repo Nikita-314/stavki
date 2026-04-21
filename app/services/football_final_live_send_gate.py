@@ -171,6 +171,24 @@ def main_combat_live_send_ok(
     if fam not in ALLOWED_LIVE_FAMILIES:
         return False, f"blocked_family_{fam}"
     if fam == "result":
+        # Combat safety: avoid ultra-early 0:0 1X2 picks (high noise, low context).
+        try:
+            fs = getattr(c, "feature_snapshot_json", None) or {}
+            if not isinstance(fs, dict):
+                fs = {}
+            fa = fs.get("football_analytics") if isinstance(fs.get("football_analytics"), dict) else {}
+            minute = fs.get("minute") if fs.get("minute") is not None else fa.get("minute")
+            sh = fs.get("score_home") if fs.get("score_home") is not None else fa.get("score_home")
+            sa = fs.get("score_away") if fs.get("score_away") is not None else fa.get("score_away")
+            minute_i = int(minute) if minute is not None else None
+            sh_i = int(sh) if sh is not None else None
+            sa_i = int(sa) if sa is not None else None
+            mt = str(c.market.market_type or "").strip().lower()
+            if minute_i is not None and sh_i == 0 and sa_i == 0 and mt in {"1x2", "match_winner"}:
+                if minute_i < 4:
+                    return False, "blocked_ultra_early_00_1x2"
+        except Exception:
+            pass
         if _is_exotic_result_like(c):
             return False, "blocked_exotic_result_market"
         if not (_is_plain_main_result_1x2(c, family_svc) or _is_remainder_result_1x2(c, family_svc)):
