@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     odds_provider_odds_format: str | None = "decimal"
     odds_provider_date_format: str | None = "iso"
     odds_provider_timeout_seconds: int = 20
+    sportmonks_api_key: str | None = None
+    """Sportmonks Football API token (set via SPORTMONKS_API_KEY in .env)."""
     auto_signal_polling_enabled: bool = False
     auto_signal_polling_interval_seconds: int = 60
     auto_signal_preview_only: bool = False

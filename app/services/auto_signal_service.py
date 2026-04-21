@@ -2788,6 +2788,80 @@ class AutoSignalService:
             )
             for c in filtered_candidates
         ]
+
+        # --- External analytics enrichment (Sportmonks) ---
+        # Best-effort: map Winline match -> Sportmonks live fixture; attach stats to feature_snapshot_json.
+        sportmonks_mapped = 0
+        sportmonks_not_mapped = 0
+        sportmonks_stats_loaded = 0
+        sportmonks_stats_missing = 0
+        try:
+            from app.services.sportmonks_service import SportmonksService
+
+            sm = SportmonksService()
+            live_fx = sm.get_live_fixtures()
+            # Enrich only one row per match (event id), then copy to all candidates in that event.
+            by_eid: dict[str, list[int]] = {}
+            for idx, c in enumerate(candidates_to_ingest):
+                eid = str(getattr(getattr(c, "match", None), "external_event_id", "") or "").strip()
+                if not eid:
+                    continue
+                by_eid.setdefault(eid, []).append(idx)
+
+            for eid, idxs in by_eid.items():
+                c0 = candidates_to_ingest[idxs[0]]
+                fx = sm.map_winline_match_to_fixture(
+                    winline_home=str(getattr(getattr(c0, "match", None), "home_team", "") or ""),
+                    winline_away=str(getattr(getattr(c0, "match", None), "away_team", "") or ""),
+                    live_fixtures=live_fx,
+                )
+                if fx is None:
+                    sportmonks_not_mapped += 1
+                    logger.info("[SPORTMONKS] not_mapped eid=%s match=%s", eid, str(c0.match.match_name or "")[:160])
+                    continue
+                sportmonks_mapped += 1
+                logger.info(
+                    "[SPORTMONKS] mapped eid=%s -> fixture_id=%s (%s vs %s)",
+                    eid,
+                    fx.fixture_id,
+                    fx.home_team,
+                    fx.away_team,
+                )
+                st = sm.get_fixture_stats(fx.fixture_id)
+                if st is None:
+                    sportmonks_stats_missing += 1
+                    logger.info("[SPORTMONKS] stats_missing fixture_id=%s eid=%s", fx.fixture_id, eid)
+                    continue
+                sportmonks_stats_loaded += 1
+                logger.info(
+                    "[SPORTMONKS] stats_loaded fixture_id=%s eid=%s shots_total=%s sot=%s corners=%s cards=%s",
+                    st.fixture_id,
+                    eid,
+                    st.shots_total,
+                    st.shots_on_target,
+                    st.corners,
+                    st.cards_total,
+                )
+                payload = {
+                    "fixture_id": st.fixture_id,
+                    "home_team": fx.home_team,
+                    "away_team": fx.away_team,
+                    "minute": fx.minute,
+                    "score_home": fx.score_home,
+                    "score_away": fx.score_away,
+                    "shots_total": st.shots_total,
+                    "shots_on_target": st.shots_on_target,
+                    "corners": st.corners,
+                    "cards_total": st.cards_total,
+                }
+                for j in idxs:
+                    cj = candidates_to_ingest[j]
+                    fs0 = dict(cj.feature_snapshot_json or {})
+                    fs0["sportmonks"] = payload
+                    candidates_to_ingest[j] = cj.model_copy(update={"feature_snapshot_json": fs0})
+        except Exception:
+            logger.info("[SPORTMONKS] enrichment_failed", exc_info=True)
+
         logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))
         send_filter_result = None
         if settings.football_debug_disable_filter:
