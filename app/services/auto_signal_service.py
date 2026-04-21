@@ -48,6 +48,7 @@ from app.services.football_live_adaptive_learning_service import (
 )
 from app.services.football_live_strategy_service import (
     evaluate_football_live_strategies,
+    evaluate_football_live_strategies_async,
     evaluate_s1_live_1x2_controlled,
     evaluate_s2_live_total_over_need_1_2,
 )
@@ -3147,6 +3148,7 @@ class AutoSignalService:
         strategy_by_eid: dict[str, str] = {}
         s1_fail: dict[str, int] = {}
         s2_fail: dict[str, int] = {}
+        s3_fail: dict[str, int] = {}
         strategy_gate_debug: dict[str, object] = {}
         for c in candidates_to_ingest:
             # Always compute breakdown on the same candidate pool we gate on (post scoring/adaptive).
@@ -3159,8 +3161,11 @@ class AutoSignalService:
                 for r in (d2.reasons or [])[:12]:
                     s2_fail[str(r)] = int(s2_fail.get(str(r), 0) or 0) + 1
 
-            d0 = evaluate_football_live_strategies(c)
+            d0 = await evaluate_football_live_strategies_async(c)
             if not d0.passed or not d0.strategy_id:
+                # Keep a short breakdown for the new primary strategy (S3) by reason strings.
+                for r in (d0.reasons or [])[:12]:
+                    s3_fail[str(r)] = int(s3_fail.get(str(r), 0) or 0) + 1
                 continue
             eid = _football_event_id(c)
             if eid and eid not in strategy_by_eid:
@@ -3177,6 +3182,7 @@ class AutoSignalService:
             "strategy_matches": int(len(strategy_by_eid)),
             "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
+            "strategy_breakdown_async": dict(sorted(s3_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
         }
 
         if not candidates_to_ingest:
