@@ -847,7 +847,7 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
         text
         + "\n\n"
         + "—\n"
-        + "Live-only: только матчи с признаком live. Повтор той же идеи в сессии блокируется."
+        + "Live-only: только матчи с признаком live. Повторы идей в сессии ограничены: допускаются после паузы или при изменении live-состояния."
     )
     await _answer_long_message(
         message, text, reply_markup=get_signal_control_keyboard()
