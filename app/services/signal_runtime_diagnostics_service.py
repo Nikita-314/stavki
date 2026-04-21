@@ -107,6 +107,8 @@ class SignalRuntimeDiagnosticsState:
     """Unique matches that passed explicit strategy gate (last cycle)."""
     football_live_strategy_s1_matches_last_cycle: int = 0
     football_live_strategy_s2_matches_last_cycle: int = 0
+    football_live_sportmonks_baseline_enriched_last_cycle: int = 0
+    football_live_sportmonks_baseline_missing_last_cycle: int = 0
     football_live_post_selection_hint_ru: str | None = None
     """If bottleneck is after scoring (dedup), short RU line for status."""
     football_last_cycle_ingest_normal: int = 0

@@ -2848,6 +2848,10 @@ class AutoSignalService:
                     candidates_to_ingest[j] = cj.model_copy(update={"feature_snapshot_json": fs0})
         except Exception:
             logger.info("[SPORTMONKS_BASELINE] enrichment_failed", exc_info=True)
+        diagnostics.update(
+            football_live_sportmonks_baseline_enriched_last_cycle=int(sportmonks_baseline_enriched),
+            football_live_sportmonks_baseline_missing_last_cycle=int(sportmonks_baseline_missing),
+        )
 
         logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))
         send_filter_result = None
