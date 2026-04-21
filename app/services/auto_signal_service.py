@@ -3435,6 +3435,30 @@ class AutoSignalService:
             codes = list((best.explanation_json or {}).get("football_scoring_reason_codes") or [])
             human_rs = FootballSignalScoringService.humanize_reason_codes(codes)
 
+        # Strategy gate stats (unique matches) — derived from cycle debug rows.
+        s_total_matches = 0
+        s1_matches = 0
+        s2_matches = 0
+        try:
+            _ms = cycle_dbg.get("matches") or []
+            if isinstance(_ms, list):
+                eids = {}
+                for r in _ms:
+                    if not isinstance(r, dict):
+                        continue
+                    eid = str(r.get("event_id") or "").strip()
+                    sid = str(r.get("strategy_id") or "").strip()
+                    if not eid or not sid:
+                        continue
+                    if eid in eids:
+                        continue
+                    eids[eid] = sid
+                s_total_matches = len(eids)
+                s1_matches = sum(1 for _eid, sid in eids.items() if sid.startswith("S1_"))
+                s2_matches = sum(1 for _eid, sid in eids.items() if sid.startswith("S2_"))
+        except Exception:
+            pass
+
         diagnostics.update(
             football_analytics_enabled=analytics_enabled,
             football_learning_enabled=learning_enabled,
@@ -3445,6 +3469,9 @@ class AutoSignalService:
             football_live_cycle_after_score=n_after_min_score,
             football_live_cycle_new_ideas_sendable=len(finalists),
             football_live_cycle_duplicate_ideas_blocked=session_dup_blocked,
+            football_live_strategy_matches_last_cycle=int(s_total_matches),
+            football_live_strategy_s1_matches_last_cycle=int(s1_matches),
+            football_live_strategy_s2_matches_last_cycle=int(s2_matches),
             football_live_quality_fresh_matches=int(lq_live.get("fresh_live_matches") or 0),
             football_live_quality_strong_idea_matches=int(lq_live.get("matches_with_strong_idea") or 0),
             football_live_quality_no_sendable_matches=int(lq_live.get("matches_without_sendable") or 0),
@@ -3939,7 +3966,10 @@ class AutoSignalService:
                     bn = _infer_football_live_cycle_bottleneck(
                         cres, SignalRuntimeDiagnosticsService().get_state()
                     )
-                    SignalRuntimeDiagnosticsService().update(football_live_cycle_bottleneck=bn)
+                    SignalRuntimeDiagnosticsService().update(
+                        football_live_cycle_bottleneck=bn,
+                        football_live_cycle_bottleneck_ru=_combat_bottleneck_ru(bn),
+                    )
                     _apply_last_combat_cycle_diagnostics(cres)
                     _football_log_live_session_report(
                         res=cres, diag=SignalRuntimeDiagnosticsService().get_state()

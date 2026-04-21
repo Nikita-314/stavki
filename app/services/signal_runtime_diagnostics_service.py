@@ -75,6 +75,8 @@ class SignalRuntimeDiagnosticsState:
     football_live_cycle_new_ideas_sendable: int = 0
     football_live_cycle_duplicate_ideas_blocked: int = 0
     football_live_cycle_bottleneck: str | None = None
+    football_live_cycle_bottleneck_ru: str | None = None
+    """Human RU label for football_live_cycle_bottleneck (same cycle)."""
     football_live_effective_source: str | None = None
     football_live_last_notify_path: str | None = None
     football_live_source_timestamp: str | None = None
@@ -101,6 +103,10 @@ class SignalRuntimeDiagnosticsState:
     football_live_soft_sendable_relief_single_count: int = 0
     football_live_rejected_at_send_gate: int = 0
     """Candidates scored but rejected by live send gate (classify: reject)."""
+    football_live_strategy_matches_last_cycle: int = 0
+    """Unique matches that passed explicit strategy gate (last cycle)."""
+    football_live_strategy_s1_matches_last_cycle: int = 0
+    football_live_strategy_s2_matches_last_cycle: int = 0
     football_live_post_selection_hint_ru: str | None = None
     """If bottleneck is after scoring (dedup), short RU line for status."""
     football_last_cycle_ingest_normal: int = 0

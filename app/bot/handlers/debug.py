@@ -303,29 +303,23 @@ def _format_signal_runtime_status_lines() -> list[str]:
     else:
         expires_s = diag.get("football_live_session_expires_at") or "—"
     bn = diag.get("football_live_cycle_bottleneck") or "—"
+    bn_ru = diag.get("football_live_cycle_bottleneck_ru") or "—"
     src_age_txt = _fmt_source_age_for_ui(diag.get("football_live_source_age_seconds"))
     ff_ru = _fmt_football_live_source_label_ru(diag)
-    if diag.get("football_last_combat_cycle_at"):
-        _csm = str(diag.get("football_last_combat_send_mode") or "none")
-        _csm_ru = {
-            "normal": "обычный (normal)",
-            "soft": "мягкий (soft)",
-            "mixed": "смешанный",
-            "none": "нет",
-        }.get(_csm, _csm)
-        combat_status_lines: list[str] = [
-            "— Последний боевой цикл —",
-            f"• Время: {diag.get('football_last_combat_cycle_at')}",
-            f"• Отправлено в Telegram: {int(diag.get('football_last_combat_messages_sent') or 0)}",
-            f"• Режим: {_csm_ru}",
-            f"• Главный блокер: {diag.get('football_last_combat_bottleneck_ru') or '—'} "
-            f"({diag.get('football_last_combat_bottleneck') or '—'})",
-        ]
-    else:
-        combat_status_lines = [
-            "— Последний боевой цикл —",
-            "• Пока нет зафиксированного боя: ▶️ Старт + live-цикл или ожидайте автоцикл.",
-        ]
+    # Strict last-cycle summary (single source of truth, no mixing).
+    last_cycle_lines: list[str] = [
+        "— Последний live-cycle (строго) —",
+        f"• Последний цикл: {last_cy}",
+        f"• Live matches: {live_m}",
+        f"• After scoring pool: {int(diag.get('football_live_cycle_after_score') or 0)}",
+        f"• Strategy matches: {int(diag.get('football_live_strategy_matches_last_cycle') or 0)} "
+        f"(S1={int(diag.get('football_live_strategy_s1_matches_last_cycle') or 0)}, "
+        f"S2={int(diag.get('football_live_strategy_s2_matches_last_cycle') or 0)})",
+        f"• After final gate: {int(diag.get('football_live_cycle_new_ideas_sendable') or 0)}",
+        f"• Created signals: {int(diag.get('football_last_combat_created_signals') or 0)}",
+        f"• Telegram sent: {int(diag.get('football_last_combat_messages_sent') or 0)}",
+        f"• Bottleneck: {bn_ru} ({bn})",
+    ]
     csum = diag.get("football_live_combat_delivery_last_summary")
     e2e_lines: list[str] = [f"• E2E (ingest → TG): {csum}"] if csum else []
     _san_n = int(diag.get("football_live_sanity_blocked_last_cycle") or 0)
@@ -458,7 +452,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• К пулу: soft relief (main, gap до 2): {diag.get('football_live_soft_sendable_relief_single_count') or 0}",
         f"• Схема порога: {diag.get('football_live_score_relief_note') or '—'}",
         f"• Лучшие score: {diag.get('football_live_best_scores_distribution_hint') or '—'}",
-        *combat_status_lines,
+        *last_cycle_lines,
         *e2e_lines,
         *sanity_status_lines,
         "— Последняя запись (не dry-run) —",
@@ -503,11 +497,12 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"⚠ dropped_invalid_market_mapping: {diag.get('dropped_invalid_market_mapping_count') or 0}",
         f"⚠ dropped_invalid_total_scope: {diag.get('dropped_invalid_total_scope_count') or 0}",
         f"⚠ dropped_too_far_in_time: {diag.get('dropped_too_far_in_time_count') or 0}",
-        f"🧭 Почему выбран матч: {diag.get('selected_match_reason') or '—'}",
+        # selected_match_reason is a send-filter ranking trace (priority_score includes +10000 for live),
+        # and must not be shown as "chosen match / signal score" to avoid confusion.
         f"⚽ football_sent: {diag.get('football_sent_count') or 0}",
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено (цикл→канал): {diag.get('messages_sent_count') or 0}",
-        f"🛑 Причина без отправки: {delivery_reason}",
+        f"🛑 Причина без отправки: {bn_ru} ({bn})",
         *postmatch_block,
         *training_block,
         *adaptive_block,
