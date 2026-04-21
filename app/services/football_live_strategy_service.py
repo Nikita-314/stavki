@@ -6,7 +6,7 @@ from typing import Any
 from app.core.enums import SportType
 from app.schemas.provider_models import ProviderSignalCandidate
 from app.services.football_bet_formatter_service import FootballBetFormatterService
-from app.services.football_live_pressure_service import FootballLivePressureService
+from app.services.football_sportmonks_baseline_service import FootballSportmonksBaselineService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 
 
@@ -183,55 +183,103 @@ async def evaluate_s3_live_totals_over_pressure(
             reasons.append("total_line_not_1_5_2_0_2_5")
 
     # C) Pressure stats: require at least 2 of 3
-    pressure = await FootballLivePressureService().get_pressure(
-        home_team=c.match.home_team,
-        away_team=c.match.away_team,
-    )
-    if pressure is None:
-        reasons.append("no_live_pressure_stats")
-    else:
-        shots_total = pressure.shots_total
-        shots_on = pressure.shots_on_target
-        corners = pressure.corners
-        passed_pressure = 0
-        if shots_total is not None and shots_total >= 6:
-            passed_pressure += 1
-        if shots_on is not None and shots_on >= 2:
-            passed_pressure += 1
-        if corners is not None and corners >= 3:
-            passed_pressure += 1
-        if passed_pressure < 2:
-            reasons.append(
-                f"pressure_low shots_total={shots_total} sot={shots_on} corners={corners}"
-            )
+    # Disabled: we are switching to baseline+live confirmation mode (Sportmonks baseline + Winline live).
+    reasons.append("disabled_pressure_strategy")
 
-        # Attach stats into explanation_json for rationale/inspection downstream.
-        try:
-            ex = dict(c.explanation_json or {})
-            ex["football_live_pressure"] = {
-                "source": pressure.source,
-                "shots_total": shots_total,
-                "shots_on_target": shots_on,
-                "corners": corners,
-                "fetched_at_epoch": pressure.fetched_at_epoch,
-            }
-            c.explanation_json = ex  # type: ignore[attr-defined]
-        except Exception:
-            pass
+    if reasons:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+
+async def evaluate_s7_live_1x2_baseline_plus_winline_state(
+    c: ProviderSignalCandidate,
+) -> FootballLiveStrategyDecision:
+    """Primary: 1X2 allowed only when Sportmonks baseline advantage is strong + Winline live state is controlled."""
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+
+    reasons: list[str] = []
+    fam_svc = FootballSignalSendFilterService()
+    fam = fam_svc.get_market_family(c)
+    if fam != "result":
+        reasons.append("market_not_result")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    mt = _norm(str(c.market.market_type or ""))
+    if mt not in {"1x2", "match_winner"}:
+        reasons.append("market_type_not_1x2")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if minute is None or sh is None or sa is None:
+        reasons.append("missing_live_context(minute/score)")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if odds is None:
+        reasons.append("missing_odds")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    # A) Live state (Winline)
+    if not (20 <= minute <= 65):
+        reasons.append("minute_window_20_65")
+    if not ((sh == 0 and sa == 0) or (sh == 1 and sa == 0) or (sh == 0 and sa == 1)):
+        reasons.append("score_state_not_00_or_10")
+    if not (1.70 <= float(odds) <= 3.80):
+        reasons.append("odds_window_1_70_3_80")
+
+    # Baseline
+    side = _selection_side_1x2(c)
+    if side not in {"home", "away"}:
+        reasons.append("selection_not_team_side")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    bsvc = FootballSportmonksBaselineService()
+    bh = bsvc.build_team_baseline(c.match.home_team)
+    ba = bsvc.build_team_baseline(c.match.away_team)
+    if bh.score is None or ba.score is None:
+        reasons.append("baseline_missing_or_insufficient")
+    gap = None
+    if bh.score is not None and ba.score is not None:
+        gap = float(bh.score) - float(ba.score)
+        # threshold: require clear advantage
+        thr = 0.22
+        if side == "home":
+            if gap < thr:
+                reasons.append(f"baseline_gap_below_threshold gap={gap:.3f} thr={thr}")
+        else:
+            if (-gap) < thr:
+                reasons.append(f"baseline_gap_below_threshold gap={gap:.3f} thr={thr}")
+
+    # Live restriction: do not take the advantaged team if it's already trailing 0:1 in this window.
+    if side == "home" and sa == 1 and sh == 0:
+        reasons.append("baseline_conflicts_with_trailing_state")
+    if side == "away" and sh == 1 and sa == 0:
+        reasons.append("baseline_conflicts_with_trailing_state")
+
+    # Attach baseline into explanation_json for rationale/inspection.
+    try:
+        ex = dict(c.explanation_json or {})
+        ex["sportmonks_baseline_home"] = bh.factors
+        ex["sportmonks_baseline_away"] = ba.factors
+        ex["sportmonks_baseline_home_score"] = bh.score
+        ex["sportmonks_baseline_away_score"] = ba.score
+        ex["sportmonks_baseline_gap_home_minus_away"] = gap
+        c.explanation_json = ex  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
     if reasons:
         return FootballLiveStrategyDecision(passed=False, reasons=reasons)
     return FootballLiveStrategyDecision(
         passed=True,
-        strategy_id="S3_LIVE_TOTALS_OVER_PRESSURE",
-        strategy_name="Strategy 3: LIVE Match Total OVER (pressure gate)",
+        strategy_id="S7_LIVE_1X2_BASELINE_PLUS_WINLINE_STATE",
+        strategy_name="Strategy 7: LIVE 1X2 (Sportmonks baseline + Winline state)",
         reasons=[
-            "market=totals(match) over",
-            "minute 15..70",
-            "score in {0:0,1:0,0:1} and no side >=2",
-            "total line in {1.5,2.0,2.5}",
-            "odds 1.6..2.3",
-            "pressure: >=2 of {shots>=6, SOT>=2, corners>=3}",
+            "market=result(1X2)",
+            "minute 20..65",
+            "score in {0:0,1:0,0:1}",
+            "odds 1.70..3.80",
+            "baseline_gap above threshold",
+            "no trailing-against-baseline",
         ],
     )
 
@@ -381,12 +429,11 @@ async def evaluate_football_live_strategies_async(c: ProviderSignalCandidate) ->
     if c.match.sport != SportType.FOOTBALL or not bool(getattr(c.match, "is_live", False)):
         return FootballLiveStrategyDecision(passed=False, reasons=["not_football_live"])
 
-    d3 = await evaluate_s3_live_totals_over_pressure(c)
-    if d3.passed:
-        return d3
-    # Strict mode: do not send without pressure stats; do not fall back to 1X2.
+    d7 = await evaluate_s7_live_1x2_baseline_plus_winline_state(c)
+    if d7.passed:
+        return d7
     rr: list[str] = []
-    rr.extend(list(getattr(d3, "reasons", None) or [])[:12])
+    rr.extend(list(getattr(d7, "reasons", None) or [])[:12])
     if not rr:
         rr = ["no_strategy_match"]
     return FootballLiveStrategyDecision(passed=False, reasons=rr)

@@ -2789,22 +2789,14 @@ class AutoSignalService:
             for c in filtered_candidates
         ]
 
-        # --- External analytics enrichment (Sportmonks) ---
-        # Best-effort: map Winline match -> Sportmonks live fixture; attach stats to feature_snapshot_json.
-        api_football_mapped = 0
-        api_football_not_mapped = 0
-        api_football_stats_loaded = 0
-        api_football_stats_missing = 0
-        sportmonks_mapped = 0
-        sportmonks_not_mapped = 0
-        sportmonks_stats_loaded = 0
-        sportmonks_stats_missing = 0
+        # --- Sportmonks baseline enrichment (pre-match) ---
+        # We do NOT rely on Sportmonks live fixtures (often empty on limited plans).
+        sportmonks_baseline_enriched = 0
+        sportmonks_baseline_missing = 0
         try:
-            # Primary: API-Football (API-SPORTS)
-            from app.services.api_football_service import ApiFootballService
+            from app.services.football_sportmonks_baseline_service import FootballSportmonksBaselineService
 
-            af = ApiFootballService()
-            af_live = af.get_live_fixtures()
+            bsvc = FootballSportmonksBaselineService()
             by_eid: dict[str, list[int]] = {}
             for idx, c in enumerate(candidates_to_ingest):
                 eid = str(getattr(getattr(c, "match", None), "external_event_id", "") or "").strip()
@@ -2814,116 +2806,48 @@ class AutoSignalService:
 
             for eid, idxs in by_eid.items():
                 c0 = candidates_to_ingest[idxs[0]]
-                fx = af.map_winline_match_to_fixture(
-                    winline_home=str(getattr(getattr(c0, "match", None), "home_team", "") or ""),
-                    winline_away=str(getattr(getattr(c0, "match", None), "away_team", "") or ""),
-                    fixtures=af_live,
-                )
-                if fx is None:
-                    api_football_not_mapped += 1
-                    logger.info("[API_FOOTBALL] not_mapped eid=%s match=%s", eid, str(c0.match.match_name or "")[:160])
-                else:
-                    api_football_mapped += 1
+                home = str(getattr(getattr(c0, "match", None), "home_team", "") or "")
+                away = str(getattr(getattr(c0, "match", None), "away_team", "") or "")
+                bh = bsvc.build_team_baseline(home)
+                ba = bsvc.build_team_baseline(away)
+                if bh.score is None or ba.score is None:
+                    sportmonks_baseline_missing += 1
                     logger.info(
-                        "[API_FOOTBALL] mapped eid=%s -> fixture_id=%s (%s vs %s)",
+                        "[SPORTMONKS_BASELINE] missing eid=%s (%s vs %s) home_id=%s away_id=%s played_h=%s played_a=%s",
                         eid,
-                        fx.fixture_id,
-                        fx.home_team,
-                        fx.away_team,
+                        home[:60],
+                        away[:60],
+                        bh.team_id,
+                        ba.team_id,
+                        bh.played,
+                        ba.played,
                     )
-                    st = af.get_fixture_statistics(fx.fixture_id)
-                    if st is None:
-                        api_football_stats_missing += 1
-                        logger.info("[API_FOOTBALL] stats_missing fixture_id=%s eid=%s", fx.fixture_id, eid)
-                    else:
-                        api_football_stats_loaded += 1
-                        logger.info(
-                            "[API_FOOTBALL] stats_loaded fixture_id=%s eid=%s shots_total=%s sot=%s corners=%s yellow=%s red=%s",
-                            st.fixture_id,
-                            eid,
-                            st.shots_total,
-                            st.shots_on_target,
-                            st.corners,
-                            st.cards_yellow,
-                            st.cards_red,
-                        )
-                        payload = {
-                            "fixture_id": st.fixture_id,
-                            "home_team": fx.home_team,
-                            "away_team": fx.away_team,
-                            "minute": fx.minute,
-                            "score_home": fx.score_home,
-                            "score_away": fx.score_away,
-                            "league": fx.league,
-                            "shots_total": st.shots_total,
-                            "shots_on_target": st.shots_on_target,
-                            "corners": st.corners,
-                            "cards_yellow": st.cards_yellow,
-                            "cards_red": st.cards_red,
-                        }
-                        for j in idxs:
-                            cj = candidates_to_ingest[j]
-                            fs0 = dict(cj.feature_snapshot_json or {})
-                            fs0["api_football"] = payload
-                            candidates_to_ingest[j] = cj.model_copy(update={"feature_snapshot_json": fs0})
-
-            from app.services.sportmonks_service import SportmonksService
-
-            sm = SportmonksService()
-            live_fx = sm.get_live_fixtures()
-            for eid, idxs in by_eid.items():
-                c0 = candidates_to_ingest[idxs[0]]
-                fx = sm.map_winline_match_to_fixture(
-                    winline_home=str(getattr(getattr(c0, "match", None), "home_team", "") or ""),
-                    winline_away=str(getattr(getattr(c0, "match", None), "away_team", "") or ""),
-                    live_fixtures=live_fx,
-                )
-                if fx is None:
-                    sportmonks_not_mapped += 1
-                    logger.info("[SPORTMONKS] not_mapped eid=%s match=%s", eid, str(c0.match.match_name or "")[:160])
                     continue
-                sportmonks_mapped += 1
+                sportmonks_baseline_enriched += 1
+                gap = float(bh.score) - float(ba.score)
                 logger.info(
-                    "[SPORTMONKS] mapped eid=%s -> fixture_id=%s (%s vs %s)",
+                    "[SPORTMONKS_BASELINE] ok eid=%s (%s vs %s) home_score=%.3f away_score=%.3f gap=%.3f",
                     eid,
-                    fx.fixture_id,
-                    fx.home_team,
-                    fx.away_team,
-                )
-                st = sm.get_fixture_stats(fx.fixture_id)
-                if st is None:
-                    sportmonks_stats_missing += 1
-                    logger.info("[SPORTMONKS] stats_missing fixture_id=%s eid=%s", fx.fixture_id, eid)
-                    continue
-                sportmonks_stats_loaded += 1
-                logger.info(
-                    "[SPORTMONKS] stats_loaded fixture_id=%s eid=%s shots_total=%s sot=%s corners=%s cards=%s",
-                    st.fixture_id,
-                    eid,
-                    st.shots_total,
-                    st.shots_on_target,
-                    st.corners,
-                    st.cards_total,
+                    home[:60],
+                    away[:60],
+                    float(bh.score),
+                    float(ba.score),
+                    gap,
                 )
                 payload = {
-                    "fixture_id": st.fixture_id,
-                    "home_team": fx.home_team,
-                    "away_team": fx.away_team,
-                    "minute": fx.minute,
-                    "score_home": fx.score_home,
-                    "score_away": fx.score_away,
-                    "shots_total": st.shots_total,
-                    "shots_on_target": st.shots_on_target,
-                    "corners": st.corners,
-                    "cards_total": st.cards_total,
+                    "home": {"team": home, **(bh.factors or {}), "baseline_score": bh.score},
+                    "away": {"team": away, **(ba.factors or {}), "baseline_score": ba.score},
+                    "baseline_gap_home_minus_away": gap,
                 }
                 for j in idxs:
                     cj = candidates_to_ingest[j]
                     fs0 = dict(cj.feature_snapshot_json or {})
-                    fs0["sportmonks"] = payload
+                    fs0["sportmonks_baseline_home"] = payload["home"]
+                    fs0["sportmonks_baseline_away"] = payload["away"]
+                    fs0["baseline_gap"] = payload["baseline_gap_home_minus_away"]
                     candidates_to_ingest[j] = cj.model_copy(update={"feature_snapshot_json": fs0})
         except Exception:
-            logger.info("[SPORTMONKS] enrichment_failed", exc_info=True)
+            logger.info("[SPORTMONKS_BASELINE] enrichment_failed", exc_info=True)
 
         logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))
         send_filter_result = None

@@ -239,29 +239,168 @@ class SportmonksService:
         )
 
     def get_team_recent_form(self, team_id: int) -> dict[str, Any] | None:
-        """Minimal recent form (best-effort). Returns last 5 fixtures results if available."""
+        """Legacy shim: kept for callers. Prefer `get_team_last_fixtures_summary`."""
+        return self.get_team_last_fixtures_summary(team_id, lookback_days=60, limit=5)
+
+    def list_teams(self, *, page: int = 1, per_page: int = 100) -> list[dict[str, Any]]:
         if not self._require_token():
-            return None
-        tid = int(team_id)
-        # Use fixtures by team endpoint if available.
-        url = f"{self.BASE_URL}/teams/{tid}"
-        params = {
-            "api_token": self._token,
-            # Keep light: includes are plan-dependent; this is best-effort.
-            "include": "latest",
-        }
+            return []
+        url = f"{self.BASE_URL}/teams"
+        params = {"api_token": self._token, "page": int(page), "per_page": int(per_page)}
         try:
             with self._client() as c:
                 r = c.get(url, params=params)
                 r.raise_for_status()
                 payload = r.json()
         except Exception as e:
-            logger.info("[SPORTMONKS] team form fetch failed team_id=%s: %s", tid, e)
+            logger.info("[SPORTMONKS] list teams failed: %s", e)
+            return []
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+
+    def find_team_id_by_name(self, team_name: str) -> int | None:
+        """Best-effort mapping using the teams list available to current subscription."""
+        name_n = _norm_team(team_name)
+        if not name_n:
+            return None
+        for page in range(1, 6):
+            rows = self.list_teams(page=page, per_page=100)
+            if not rows:
+                break
+            for t in rows:
+                nm = _norm_team(str(t.get("name") or ""))
+                if not nm:
+                    continue
+                if nm == name_n or (name_n in nm) or (nm in name_n):
+                    tid = _safe_int(t.get("id"))
+                    if tid is not None:
+                        return tid
+        return None
+
+    def get_team_last_fixtures_summary(
+        self,
+        team_id: int,
+        *,
+        lookback_days: int = 60,
+        limit: int = 5,
+    ) -> dict[str, Any] | None:
+        """Return minimal last-N fixtures summary for baseline scoring."""
+        if not self._require_token():
+            return None
+        tid = int(team_id)
+        from datetime import datetime, timedelta, timezone
+
+        end = datetime.now(timezone.utc).date().isoformat()
+        start = (datetime.now(timezone.utc) - timedelta(days=max(7, int(lookback_days)))).date().isoformat()
+        url = f"{self.BASE_URL}/fixtures/between/{start}/{end}/{tid}"
+        params = {"api_token": self._token, "include": "participants;scores"}
+        try:
+            with self._client() as c:
+                r = c.get(url, params=params)
+                r.raise_for_status()
+                payload = r.json()
+        except Exception as e:
+            logger.info("[SPORTMONKS] team fixtures failed team_id=%s: %s", tid, e)
             return None
         data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict):
-            return None
-        return {"team_id": tid, "data": data}
+        if not isinstance(data, list) or not data:
+            return {"team_id": tid, "fixtures": [], "summary": {"played": 0}}
+
+        fixtures = [x for x in data if isinstance(x, dict)]
+        fixtures.sort(key=lambda x: str(x.get("starting_at") or ""), reverse=True)
+
+        out_rows: list[dict[str, Any]] = []
+        gf = ga = w = d = l = 0
+        played = 0
+        for fx in fixtures:
+            if played >= int(limit):
+                break
+            state_id = _safe_int(fx.get("state_id"))
+            if state_id not in (5, 6, 7, 8, None):
+                continue
+            parts = fx.get("participants") if isinstance(fx.get("participants"), list) else []
+            home_id = away_id = None
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                meta = p.get("meta") if isinstance(p.get("meta"), dict) else {}
+                loc = str(meta.get("location") or p.get("location") or "").strip().lower()
+                pid = _safe_int(p.get("id"))
+                if loc == "home":
+                    home_id = pid
+                elif loc == "away":
+                    away_id = pid
+
+            sh = sa = None
+            scores = fx.get("scores") if isinstance(fx.get("scores"), list) else []
+            for sc in scores:
+                if not isinstance(sc, dict):
+                    continue
+                scr = sc.get("score") if isinstance(sc.get("score"), dict) else {}
+                hh = scr.get("home") if isinstance(scr, dict) else sc.get("home_score")
+                aa = scr.get("away") if isinstance(scr, dict) else sc.get("away_score")
+                hi = _safe_int(hh)
+                ai = _safe_int(aa)
+                if hi is None or ai is None:
+                    continue
+                sh, sa = hi, ai
+            if sh is None or sa is None:
+                continue
+
+            is_home = home_id == tid
+            is_away = away_id == tid
+            if not is_home and not is_away:
+                continue
+            played += 1
+            if is_home:
+                gf += sh
+                ga += sa
+                if sh > sa:
+                    w += 1
+                elif sh == sa:
+                    d += 1
+                else:
+                    l += 1
+            else:
+                gf += sa
+                ga += sh
+                if sa > sh:
+                    w += 1
+                elif sa == sh:
+                    d += 1
+                else:
+                    l += 1
+            out_rows.append(
+                {
+                    "fixture_id": _safe_int(fx.get("id")),
+                    "starting_at": fx.get("starting_at"),
+                    "result_info": fx.get("result_info"),
+                    "is_home": is_home,
+                    "goals_for": (sh if is_home else sa),
+                    "goals_against": (sa if is_home else sh),
+                }
+            )
+
+        avg_gf = round(gf / played, 3) if played else None
+        avg_ga = round(ga / played, 3) if played else None
+        points = w * 3 + d
+        ppg = round(points / played, 3) if played else None
+        return {
+            "team_id": tid,
+            "fixtures": out_rows,
+            "summary": {
+                "played": played,
+                "w": w,
+                "d": d,
+                "l": l,
+                "points": points,
+                "ppg": ppg,
+                "gf": gf,
+                "ga": ga,
+                "avg_gf": avg_gf,
+                "avg_ga": avg_ga,
+            },
+        }
 
     @staticmethod
     def map_winline_match_to_fixture(
