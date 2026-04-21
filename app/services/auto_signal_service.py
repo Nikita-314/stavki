@@ -3964,17 +3964,19 @@ class AutoSignalService:
         _apply_last_combat_cycle_diagnostics(res)
         _football_log_live_session_report(res=res, diag=SignalRuntimeDiagnosticsService().get_state())
         try:
-            # IMPORTANT: `/football_live_debug` must reflect the last *combat* (non-dry) cycle.
-            # Dry-run probes should not overwrite the cached debug blob, otherwise status (combat)
-            # and debug (dry) diverge.
-            if res.dry_run:
-                return
             snap = FootballLiveSessionService().snapshot()
             pers = bool(snap.persistent) if snap.active else True
             dbg_txt = format_football_session_start_debug_message(res, persistent=pers)
-            SignalRuntimeDiagnosticsService().update(
-                football_live_last_cycle_debug_telegram_text=dbg_txt[:12000]
-            )
+            if res.dry_run:
+                SignalRuntimeDiagnosticsService().update(
+                    football_live_last_dry_run_debug_telegram_text=dbg_txt[:12000]
+                )
+            else:
+                # Keep combat/debug stable: never overwrite combat debug with a dry_run snapshot.
+                SignalRuntimeDiagnosticsService().update(
+                    football_live_last_cycle_debug_telegram_text=dbg_txt[:12000],
+                    football_live_last_combat_debug_telegram_text=dbg_txt[:12000],
+                )
         except Exception:
             logger.debug("football live debug telegram text cache failed", exc_info=True)
 

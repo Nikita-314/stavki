@@ -1,20 +1,21 @@
-# Agent runtime protocol (football live)
+## Football LIVE — обязательное runtime правило
 
-This repository runs a long-lived Telegram bot (`python3 -m app.main`) inside a `screen` session.
+Любые изменения кода, которые влияют на runtime/bot/live loop/handlers/services (в т.ч. форматирование Telegram статусов и debug),
+считаются **не применёнными**, пока бот не перезапущен в `screen`.
 
-## Mandatory rule after runtime-affecting changes
+### Обязательная процедура после runtime-правок
 
-After **any** code changes that can affect runtime behavior (bot startup, live loop, handlers, services,
-fetch/ingest pipeline, diagnostics formatting), the agent must:
+- **Остановить** старую `screen`-сессию бота
+- **Запустить** новую `screen`-сессию бота на актуальном коде
+- **Проверить по логам**, что процесс живой и исполняет новый код:
+  - `Start polling`
+  - `[FOOTBALL][LIVE_LOOP] started ...`
+  - `[FOOTBALL][LIVE_LOOP] tick ...`
 
-- stop the previous `screen` process
-- restart the bot in a new `screen` session
-- confirm the new code is executing by providing:
-  - the `screen` session id/name
-  - 1–2 log lines that include:
-    - `Start polling`
-    - `[FOOTBALL][LIVE_LOOP] started`
-    - `[FOOTBALL][LIVE_LOOP] tick`
+### Обязательные артефакты в отчёте после изменений
 
-If this proof is missing, the change must be treated as **not deployed**.
+- **screen session**: `<id>.<name>`
+- **restarted**: `yes`
+- **лог-строки после рестарта**: 1–2 строки, подтверждающие запуск loop/polling
+- **признак нового кода**: лог/поведение, которое невозможно получить на старой версии (например новый формат/поле/маркер)
 

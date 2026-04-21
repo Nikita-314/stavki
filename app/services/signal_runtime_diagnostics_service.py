@@ -197,6 +197,10 @@ class SignalRuntimeDiagnosticsState:
     football_live_pacing_consecutive_empty_snapshots: int = 0
     football_live_last_cycle_debug_telegram_text: str | None = None
     """Admin-only: full football live cycle breakdown (same as legacy ▶️ Старт dump)."""
+    football_live_last_combat_debug_telegram_text: str | None = None
+    """Admin-only: full breakdown for last non-dry (combat) football live cycle."""
+    football_live_last_dry_run_debug_telegram_text: str | None = None
+    """Admin-only: last dry_run debug breakdown (kept separate from combat)."""
 
 
 _STATE = SignalRuntimeDiagnosticsState()
