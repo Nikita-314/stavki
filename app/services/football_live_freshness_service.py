@@ -199,6 +199,26 @@ def evaluate_live_event_staleness(
     start = getattr(m, "event_start_at", None)
     kickoff = _parse_iso_dt(start) if start is not None else None
     if kickoff is None:
+        # Winline live snapshots can be missing / inconsistent on scheduled kickoff (`date`) even while
+        # the event is clearly in-play (minute/clock present). Treat such events as fresh to avoid
+        # killing all real live matches due to a null kickoff timestamp.
+        mx = max(95, int(settings.football_live_max_declared_live_minute or 130))
+        minute = _candidate_live_minute(candidate)
+        if minute is not None and 0 <= int(minute) <= mx:
+            return False, "ok_missing_kickoff_but_live_minute_present"
+        fs = getattr(candidate, "feature_snapshot_json", None) or {}
+        wcl = fs.get("winline_time")
+        wsrc = fs.get("winline_source_time")
+        wclock = (wcl or wsrc) if (wcl or wsrc) else None
+        wn = fs.get("winline_numer")
+        if wn is not None and not isinstance(wn, int):
+            try:
+                wn = int(wn)
+            except (TypeError, ValueError):
+                wn = None
+        wclock_s = wclock if isinstance(wclock, str) else (str(wclock) if wclock is not None else None)
+        if _winline_shows_in_play(wclock_s, wn):
+            return False, "ok_missing_kickoff_but_winline_clock_in_play"
         return True, "missing_kickoff_time"
 
     now = _utc_now()
