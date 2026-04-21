@@ -20,20 +20,12 @@ ALLOWED_LIVE_FAMILIES = frozenset({"result", "double_chance", "totals", "btts", 
 
 # Result-like / special markets that must never go to combat Telegram (label/type/bet heuristics).
 _EXOTIC_RESULT_LIKE_SUBSTRINGS = (
-    "европейск",
-    "european handicap",
-    "european hcap",
     "азиатск",
     "asian handicap",
     "asian hcap",
     "следующий гол",
     "next goal",
     "nextgoal",
-    "остаток матча",
-    "rest of the match",
-    "rest of match",
-    "выиграет остаток",
-    "win the rest",
     "матч с минут",
     "from minute",
     "первый гол",
@@ -92,6 +84,14 @@ _EXOTIC_RESULT_LIKE_SUBSTRINGS = (
     "кто пройдёт",
 )
 
+_REMAINDER_RESULT_SUBSTRINGS = (
+    "остаток матча",
+    "rest of the match",
+    "rest of match",
+    "выиграет остаток",
+    "win the rest",
+)
+
 
 def _bet_line(c: ProviderSignalCandidate) -> str:
     return _format_bet_line(c)
@@ -139,6 +139,22 @@ def _is_plain_main_result_1x2(c: ProviderSignalCandidate, family_svc: FootballSi
     return True
 
 
+def _is_remainder_result_1x2(c: ProviderSignalCandidate, family_svc: FootballSignalSendFilterService) -> bool:
+    """Allow 'rest of the match' / remainder result if it's still a plain 1x2-like bet."""
+    if family_svc.get_market_family(c) != "result":
+        return False
+    mt = str(c.market.market_type or "").strip().lower()
+    if mt not in {"1x2", "match_winner"}:
+        return False
+    blob = _candidate_text_blob(c)
+    if not any(s in blob for s in _REMAINDER_RESULT_SUBSTRINGS):
+        return False
+    # Still forbid other exotic result-like patterns (next goal, correct score, etc.)
+    if any(s in blob for s in _EXOTIC_RESULT_LIKE_SUBSTRINGS):
+        return False
+    return True
+
+
 def main_combat_live_send_ok(
     c: ProviderSignalCandidate,
     family_svc: FootballSignalSendFilterService,
@@ -157,7 +173,7 @@ def main_combat_live_send_ok(
     if fam == "result":
         if _is_exotic_result_like(c):
             return False, "blocked_exotic_result_market"
-        if not _is_plain_main_result_1x2(c, family_svc):
+        if not (_is_plain_main_result_1x2(c, family_svc) or _is_remainder_result_1x2(c, family_svc)):
             return False, "blocked_non_main_live_market"
         return True, "ok_main_result"
     if fam == "double_chance":

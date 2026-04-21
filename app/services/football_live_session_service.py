@@ -36,7 +36,9 @@ _LAST_CYCLE_AT: datetime | None = None
 _SIGNALS_SENT = 0
 _TELEGRAM_SENT = 0
 _DUP_BLOCKED = 0
-_SENT_IDEA_KEYS: set[str] = set()
+# Smarter session-local dedup: remember last sent time and live-state fingerprint per idea.
+# Used to allow repeats after a cooldown or after live-state change.
+_SENT_IDEA_KEYS: dict[str, tuple[datetime, str | None]] = {}
 
 
 class FootballLiveSessionService:
@@ -117,7 +119,7 @@ class FootballLiveSessionService:
             _SIGNALS_SENT = 0
             _TELEGRAM_SENT = 0
             _DUP_BLOCKED = 0
-            _SENT_IDEA_KEYS = set()
+            _SENT_IDEA_KEYS = {}
             if persistent:
                 _EXPIRES_AT = None
                 _DURATION_MINUTES = 0
@@ -155,11 +157,57 @@ class FootballLiveSessionService:
     def register_idea_sent(self, idea_key: str) -> None:
         global _SENT_IDEA_KEYS
         with _LOCK:
-            _SENT_IDEA_KEYS.add(idea_key)
+            # Backwards compatible path: register as sent with no live-state fingerprint.
+            _SENT_IDEA_KEYS[str(idea_key or "")] = (datetime.now(timezone.utc), None)
+
+    def register_idea_sent_with_state(
+        self,
+        idea_key: str,
+        *,
+        state_fingerprint: str | None,
+        sent_at_utc: datetime | None = None,
+    ) -> None:
+        global _SENT_IDEA_KEYS
+        with _LOCK:
+            ts = sent_at_utc or datetime.now(timezone.utc)
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            _SENT_IDEA_KEYS[str(idea_key or "")] = (ts, str(state_fingerprint) if state_fingerprint else None)
 
     def has_idea(self, idea_key: str) -> bool:
         with _LOCK:
-            return idea_key in _SENT_IDEA_KEYS
+            return str(idea_key or "") in _SENT_IDEA_KEYS
+
+    def should_block_duplicate_idea(
+        self,
+        idea_key: str,
+        *,
+        min_repeat_minutes: int = 10,
+        state_fingerprint: str | None = None,
+        now_utc: datetime | None = None,
+    ) -> tuple[bool, str]:
+        """Session-local dedup that allows repeats after cooldown or live-state change."""
+        key = str(idea_key or "")
+        if not key:
+            return False, "empty_key"
+        with _LOCK:
+            prev = _SENT_IDEA_KEYS.get(key)
+        if prev is None:
+            return False, "new_key"
+        prev_ts, prev_state = prev
+        now = now_utc or datetime.now(timezone.utc)
+        if getattr(now, "tzinfo", None) is None:
+            now = now.replace(tzinfo=timezone.utc)
+        if getattr(prev_ts, "tzinfo", None) is None:
+            prev_ts = prev_ts.replace(tzinfo=timezone.utc)
+        age_s = (now - prev_ts).total_seconds()
+        cooldown_s = max(60.0, float(int(min_repeat_minutes) * 60))
+        if age_s >= cooldown_s:
+            return False, "cooldown_elapsed"
+        sfp = str(state_fingerprint) if state_fingerprint else None
+        if sfp and prev_state and sfp != prev_state:
+            return False, "live_state_changed"
+        return True, "blocked_recent_duplicate"
 
     def record_telegram_message_sent(self, n: int = 1) -> None:
         global _TELEGRAM_SENT
@@ -187,7 +235,7 @@ def reset_live_session_for_tests() -> None:
         _SIGNALS_SENT = 0
         _TELEGRAM_SENT = 0
         _DUP_BLOCKED = 0
-        _SENT_IDEA_KEYS = set()
+        _SENT_IDEA_KEYS = {}
 
 
 def build_live_idea_key(candidate) -> str:

@@ -3319,11 +3319,53 @@ class AutoSignalService:
             ls_fin = FootballLiveSessionService()
             kept_fin: list[ProviderSignalCandidate] = []
             batch_seen: set[str] = set()
+            def _safe_int(v: object) -> int | None:
+                if v is None:
+                    return None
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
+            def _candidate_live_state_fingerprint(cand: ProviderSignalCandidate) -> str | None:
+                fs = getattr(cand, "feature_snapshot_json", None) or {}
+                if not isinstance(fs, dict):
+                    fs = {}
+                minute = _football_match_minute_from_candidate(cand)
+                sh = _safe_int(fs.get("score_home"))
+                sa = _safe_int(fs.get("score_away"))
+                fa = fs.get("football_analytics")
+                if isinstance(fa, dict):
+                    if sh is None:
+                        sh = _safe_int(fa.get("score_home"))
+                    if sa is None:
+                        sa = _safe_int(fa.get("score_away"))
+                    if minute is None:
+                        minute = _safe_int(fa.get("minute"))
+                # Compact fingerprint: minute + score if present; otherwise minute only.
+                if minute is None and sh is None and sa is None:
+                    return None
+                if sh is None or sa is None:
+                    return f"m{minute}" if minute is not None else None
+                if minute is None:
+                    return f"s{sh}:{sa}"
+                return f"m{minute}_s{sh}:{sa}"
             for c, t, s in ordered:
                 ik = build_live_idea_key(c)
-                if ik in batch_seen or ls_fin.has_idea(ik):
+                fp = _candidate_live_state_fingerprint(c)
+                blocked, breason = ls_fin.should_block_duplicate_idea(
+                    ik,
+                    min_repeat_minutes=10,
+                    state_fingerprint=fp,
+                )
+                if ik in batch_seen or blocked:
                     ls_fin.record_duplicate_idea_blocked(1)
-                    logger.info("[FOOTBALL][SESSION_IDEA_DEDUP] blocked key=%s", ik[:200])
+                    logger.info(
+                        "[FOOTBALL][SESSION_IDEA_DEDUP] blocked key=%s reason=%s fp=%s",
+                        ik[:200],
+                        breason,
+                        (fp or "—"),
+                    )
                     continue
                 batch_seen.add(ik)
                 kept_fin.append(c)
@@ -3658,7 +3700,46 @@ class AutoSignalService:
 
         ls_ing = FootballLiveSessionService()
         for cr in ingest_res.created_from_candidates:
-            ls_ing.register_idea_sent(build_live_idea_key(cr))
+            try:
+                fs = getattr(cr, "feature_snapshot_json", None) or {}
+                if not isinstance(fs, dict):
+                    fs = {}
+                minute = _football_match_minute_from_candidate(cr)
+                sh = fs.get("score_home")
+                sa = fs.get("score_away")
+                fa = fs.get("football_analytics")
+                if isinstance(fa, dict):
+                    if sh is None:
+                        sh = fa.get("score_home")
+                    if sa is None:
+                        sa = fa.get("score_away")
+                    if minute is None:
+                        minute = fa.get("minute")
+                fp = None
+                try:
+                    mv = int(minute) if minute is not None else None
+                except (TypeError, ValueError):
+                    mv = None
+                try:
+                    shv = int(sh) if sh is not None else None
+                except (TypeError, ValueError):
+                    shv = None
+                try:
+                    sav = int(sa) if sa is not None else None
+                except (TypeError, ValueError):
+                    sav = None
+                if mv is not None or shv is not None or sav is not None:
+                    if shv is not None and sav is not None and mv is not None:
+                        fp = f"m{mv}_s{shv}:{sav}"
+                    elif mv is not None and shv is not None and sav is not None:
+                        fp = f"m{mv}_s{shv}:{sav}"
+                    elif mv is not None:
+                        fp = f"m{mv}"
+                    elif shv is not None and sav is not None:
+                        fp = f"s{shv}:{sav}"
+                ls_ing.register_idea_sent_with_state(build_live_idea_key(cr), state_fingerprint=fp)
+            except Exception:
+                ls_ing.register_idea_sent(build_live_idea_key(cr))
         ls_ing.record_signals_created(len(ingest_res.created_signal_ids))
 
         notifications_sent_count = 0
