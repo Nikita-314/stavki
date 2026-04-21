@@ -2184,6 +2184,14 @@ class AutoSignalService:
                     last_error=winline_werr,
                     last_delivery_reason="blocked_winline_live_unavailable",
                     football_winline_error_last=winline_werr,
+                    # Ensure source diagnostics are truthful: Winline was the primary attempted source.
+                    football_source="winline_live",
+                    football_primary_live_source="winline_live",
+                    football_live_effective_source="winline_live",
+                    source_mode="blocked",
+                    is_real_source=False,
+                    source_origin="winline_websocket",
+                    live_provider_name="winline_live",
                 )
                 return AutoSignalCycleResult(
                     endpoint=str(settings.winline_live_ws_url or ""),
