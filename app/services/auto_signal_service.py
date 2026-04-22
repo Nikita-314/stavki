@@ -3074,6 +3074,100 @@ class AutoSignalService:
         # Build minimal analytics snapshot (minute/score/live_state) pre-strategy.
         analytics_svc = FootballAnalyticsService()
         family_svc = FootballSignalSendFilterService()
+        # --- Market flow diagnostics (after integrity) ---
+        flow_family: dict[str, int] = {}
+        flow_market_type: dict[str, int] = {}
+        flow_norm_bet: dict[str, int] = {}
+        flow_total_scope: dict[str, int] = {}
+        flow_ou: dict[str, int] = {}
+        flow_line: dict[str, int] = {}
+        flow_minute_bucket: dict[str, int] = {}
+        flow_score_bucket: dict[str, int] = {}
+        flow_odds_bucket: dict[str, int] = {}
+
+        def _bump(d: dict[str, int], k: str) -> None:
+            if not k:
+                k = "—"
+            d[k] = int(d.get(k, 0) or 0) + 1
+
+        def _bucket_minute(m: int | None) -> str:
+            if m is None:
+                return "minute:missing"
+            if m < 0:
+                return "minute:<0"
+            if m <= 10:
+                return "minute:0-10"
+            if m <= 20:
+                return "minute:11-20"
+            if m <= 30:
+                return "minute:21-30"
+            if m <= 40:
+                return "minute:31-40"
+            if m <= 50:
+                return "minute:41-50"
+            if m <= 60:
+                return "minute:51-60"
+            if m <= 70:
+                return "minute:61-70"
+            if m <= 80:
+                return "minute:71-80"
+            return "minute:81+"
+
+        def _bucket_odds(o: float | None) -> str:
+            if o is None:
+                return "odds:missing"
+            if o < 1.50:
+                return "odds:<1.50"
+            if o <= 2.20:
+                return "odds:1.50-2.20"
+            if o <= 3.40:
+                return "odds:2.21-3.40"
+            if o <= 5.00:
+                return "odds:3.41-5.00"
+            return "odds:5.01+"
+
+        def _bucket_score(sh: int | None, sa: int | None) -> str:
+            if sh is None or sa is None:
+                return "score:missing"
+            if (sh, sa) == (0, 0):
+                return "score:0-0"
+            if (sh, sa) == (1, 0):
+                return "score:1-0"
+            if (sh, sa) == (0, 1):
+                return "score:0-1"
+            if (sh, sa) == (1, 1):
+                return "score:1-1"
+            return "score:other"
+
+        def _is_exotic_result_like(cand: ProviderSignalCandidate) -> bool:
+            txt = " ".join(
+                [
+                    str(cand.market.section_name or ""),
+                    str(cand.market.subsection_name or ""),
+                    str(cand.market.market_label or ""),
+                    str(cand.market.market_type or ""),
+                ]
+            ).lower()
+            bad = ["remainder", "remain", "остат", "оставш", "handicap", "european", "европ", "фора", "hcp"]
+            return any(b in txt for b in bad)
+
+        def _norm_bet_type(cand: ProviderSignalCandidate, family: str) -> str:
+            mt = str(cand.market.market_type or "").strip().lower()
+            sel = str(cand.market.selection or "").strip().lower()
+            lbl = " ".join([str(cand.market.market_label or ""), str(cand.market.section_name or ""), str(cand.market.subsection_name or "")]).lower()
+            if family == "result":
+                if _is_exotic_result_like(cand):
+                    return "result:exotic_or_remainder_or_handicap"
+                if mt in {"1x2", "match_winner"}:
+                    return "result:1x2"
+                if "следующий" in lbl or "next goal" in lbl:
+                    return "result:next_goal"
+                return f"result:{mt or 'other'}"
+            if family == "totals":
+                ou = "over" if ("over" in sel or "больше" in sel or sel.startswith("тб")) else ("under" if ("under" in sel or "меньше" in sel or sel.startswith("тм")) else "unknown")
+                return f"totals:{ou}:{mt or 'other'}"
+            return f"{family}:{mt or 'other'}"
+
         pre_strategy: list[ProviderSignalCandidate] = []
         for cand in candidates_to_ingest:
             try:
@@ -3083,6 +3177,67 @@ class AutoSignalService:
                 fs_out = dict(prev_fs)
                 fs_out["football_analytics"] = analytics
                 pre_strategy.append(cand.model_copy(update={"feature_snapshot_json": fs_out}))
+
+                # Flow stats (after integrity)
+                _bump(flow_family, str(family or "—"))
+                _bump(flow_market_type, str(cand.market.market_type or "—"))
+                _bump(flow_norm_bet, _norm_bet_type(cand, str(family or "")))
+                minute0 = None
+                sh0 = None
+                sa0 = None
+                if isinstance(analytics, dict):
+                    try:
+                        minute0 = int(analytics.get("minute")) if analytics.get("minute") is not None else None
+                    except Exception:
+                        minute0 = None
+                    try:
+                        sh0 = int(analytics.get("score_home")) if analytics.get("score_home") is not None else None
+                    except Exception:
+                        sh0 = None
+                    try:
+                        sa0 = int(analytics.get("score_away")) if analytics.get("score_away") is not None else None
+                    except Exception:
+                        sa0 = None
+                _bump(flow_minute_bucket, _bucket_minute(minute0))
+                _bump(flow_score_bucket, _bucket_score(sh0, sa0))
+                _bump(flow_odds_bucket, _bucket_odds(_odds_float(cand)))
+
+                # Totals-specific: over/under, line, scope
+                if str(family or "") == "totals":
+                    sel0 = str(cand.market.selection or "")
+                    if "over" in sel0.lower() or "больше" in sel0.lower() or sel0.lower().startswith("тб"):
+                        _bump(flow_ou, "over")
+                    elif "under" in sel0.lower() or "меньше" in sel0.lower() or sel0.lower().startswith("тм"):
+                        _bump(flow_ou, "under")
+                    else:
+                        _bump(flow_ou, "unknown")
+                    try:
+                        fmt0 = FootballBetFormatterService()
+                        ctx0 = fmt0.describe_total_context(
+                            market_type=cand.market.market_type,
+                            market_label=cand.market.market_label,
+                            selection=cand.market.selection,
+                            home_team=cand.match.home_team,
+                            away_team=cand.match.away_team,
+                            section_name=cand.market.section_name,
+                            subsection_name=cand.market.subsection_name,
+                        )
+                        if ctx0 and ctx0.total_line:
+                            _bump(flow_line, str(ctx0.total_line))
+                        else:
+                            _bump(flow_line, "line:missing")
+                        ts0 = str(ctx0.target_scope or "")
+                        if ts0:
+                            tsn = ts0.strip().lower()
+                            if "match" in tsn or "общ" in tsn or "total" in tsn:
+                                _bump(flow_total_scope, "scope:match")
+                            else:
+                                _bump(flow_total_scope, f"scope:{tsn[:24]}")
+                        else:
+                            _bump(flow_total_scope, "scope:missing")
+                    except Exception:
+                        _bump(flow_line, "line:error")
+                        _bump(flow_total_scope, "scope:error")
             except Exception:
                 pre_strategy.append(cand)
         candidates_to_ingest = pre_strategy
@@ -3224,6 +3379,17 @@ class AutoSignalService:
             "strategy_matches": int(len(strategy_by_eid)),
             "post_integrity_result_like": int(post_integrity_result_like),
             "post_integrity_result_like_1x2": int(post_integrity_result_like_1x2),
+            "post_integrity_flow": {
+                "market_family": dict(sorted(flow_family.items(), key=lambda kv: kv[1], reverse=True)),
+                "market_type": dict(sorted(flow_market_type.items(), key=lambda kv: kv[1], reverse=True)[:80]),
+                "normalized_bet_type": dict(sorted(flow_norm_bet.items(), key=lambda kv: kv[1], reverse=True)[:120]),
+                "totals_over_under": dict(sorted(flow_ou.items(), key=lambda kv: kv[1], reverse=True)),
+                "totals_scope": dict(sorted(flow_total_scope.items(), key=lambda kv: kv[1], reverse=True)[:40]),
+                "totals_line": dict(sorted(flow_line.items(), key=lambda kv: kv[1], reverse=True)[:40]),
+                "minute_buckets": dict(sorted(flow_minute_bucket.items(), key=lambda kv: kv[1], reverse=True)),
+                "score_buckets": dict(sorted(flow_score_bucket.items(), key=lambda kv: kv[1], reverse=True)),
+                "odds_buckets": dict(sorted(flow_odds_bucket.items(), key=lambda kv: kv[1], reverse=True)),
+            },
             "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s8": dict(sorted(s8_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
