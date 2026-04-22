@@ -409,7 +409,8 @@ async def evaluate_s9_live_totals_over_controlled(c: ProviderSignalCandidate) ->
         return FootballLiveStrategyDecision(passed=False, reasons=reasons)
 
     mt = _norm(str(c.market.market_type or ""))
-    if mt != "total_goals":
+    # Provider normalization: some feeds label match totals as totals/total while still being total_goals.
+    if mt not in {"total_goals", "totals", "total"}:
         reasons.append("market_type_not_total_goals")
         return FootballLiveStrategyDecision(passed=False, reasons=reasons)
 

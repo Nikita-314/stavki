@@ -3137,7 +3137,12 @@ class AutoSignalService:
             if not d8.passed:
                 for r in (d8.reasons or [])[:12]:
                     s8_fail[str(r)] = int(s8_fail.get(str(r), 0) or 0) + 1
-                s9_candidates.append(c)
+                # Only totals candidates can ever match S9 by definition.
+                try:
+                    if family_svc.get_market_family(c) == "totals":
+                        s9_candidates.append(c)
+                except Exception:
+                    pass
             else:
                 eid = _football_event_id(c)
                 if eid and eid not in strategy_by_eid:
