@@ -71,6 +71,7 @@ class SignalRuntimeDiagnosticsState:
     football_live_cycle_candidates_before_filter: int = 0
     football_live_cycle_after_send_filter: int = 0
     football_live_cycle_after_integrity: int = 0
+    football_live_cycle_after_strategy: int = 0
     football_live_cycle_after_score: int = 0
     football_live_cycle_new_ideas_sendable: int = 0
     football_live_cycle_duplicate_ideas_blocked: int = 0

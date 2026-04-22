@@ -3056,9 +3056,144 @@ class AutoSignalService:
                 if live_adaptive_enabled:
                     live_adaptive_snapshot = await build_live_adaptive_snapshot(learn_session)
 
+        fb_pre = [
+            x
+            for x in candidates_before_filter
+            if getattr(getattr(x, "match", None), "sport", None) == SportType.FOOTBALL
+        ]
+        report_matches_found = len({(x.match.external_event_id, x.match.home_team, x.match.away_team) for x in fb_pre})
+        report_candidates = len(candidates_before_filter)
+        report_after_filter = int(post_send_filter_count)
+        report_after_integrity = int(post_integrity_count)
+
+        min_score_base = float(settings.football_min_signal_score or 60.0)
+        single_gap_max = float(getattr(settings, "football_live_single_relief_max_gap", 2.0) or 2.0)
+
+        # --- Strategy-first (S8 must see real live context BEFORE scoring filters) ---
+        # Build minimal analytics snapshot (minute/score/live_state) pre-strategy.
         analytics_svc = FootballAnalyticsService()
-        scoring_svc = FootballSignalScoringService()
         family_svc = FootballSignalSendFilterService()
+        pre_strategy: list[ProviderSignalCandidate] = []
+        for cand in candidates_to_ingest:
+            try:
+                family = family_svc.get_market_family(cand)
+                analytics = analytics_svc.build_snapshot(cand, market_family=family)
+                prev_fs = dict(cand.feature_snapshot_json or {})
+                fs_out = dict(prev_fs)
+                fs_out["football_analytics"] = analytics
+                pre_strategy.append(cand.model_copy(update={"feature_snapshot_json": fs_out}))
+            except Exception:
+                pre_strategy.append(cand)
+        candidates_to_ingest = pre_strategy
+
+        # --- Explicit strategy gate (primary signal definition) ---
+        strategy_passed: list[ProviderSignalCandidate] = []
+        strategy_stats: dict[str, int] = {}
+        strategy_by_eid: dict[str, str] = {}
+        s1_fail: dict[str, int] = {}
+        s2_fail: dict[str, int] = {}
+        s8_fail: dict[str, int] = {}
+        strategy_gate_debug: dict[str, object] = {}
+        for c in candidates_to_ingest:
+            # Always compute breakdown on the same candidate pool we gate on (post scoring/adaptive).
+            d1 = evaluate_s1_live_1x2_controlled(c)
+            if not d1.passed:
+                for r in (d1.reasons or [])[:12]:
+                    s1_fail[str(r)] = int(s1_fail.get(str(r), 0) or 0) + 1
+            d2 = evaluate_s2_live_total_over_need_1_2(c)
+            if not d2.passed:
+                for r in (d2.reasons or [])[:12]:
+                    s2_fail[str(r)] = int(s2_fail.get(str(r), 0) or 0) + 1
+
+            d0 = await evaluate_football_live_strategies_async(c)
+            if not d0.passed or not d0.strategy_id:
+                # Keep a short breakdown for the primary strategy (S8) by reason strings.
+                for r in (d0.reasons or [])[:12]:
+                    s8_fail[str(r)] = int(s8_fail.get(str(r), 0) or 0) + 1
+                continue
+            eid = _football_event_id(c)
+            if eid and eid not in strategy_by_eid:
+                strategy_by_eid[eid] = d0.strategy_id
+            strategy_stats[d0.strategy_id] = int(strategy_stats.get(d0.strategy_id, 0) or 0) + 1
+            prev_expl = dict(c.explanation_json or {})
+            prev_expl["football_live_strategy_id"] = d0.strategy_id
+            prev_expl["football_live_strategy_name"] = d0.strategy_name
+            prev_expl["football_live_strategy_reasons"] = list(d0.reasons or [])
+            strategy_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
+        candidates_to_ingest = strategy_passed
+        strategy_gate_debug = {
+            "strategy_stats": dict(strategy_stats),
+            "strategy_matches": int(len(strategy_by_eid)),
+            "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
+            "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
+            "strategy_breakdown_s8": dict(sorted(s8_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+        }
+        diagnostics.update(football_live_cycle_after_strategy=int(len(candidates_to_ingest)))
+
+        if not candidates_to_ingest:
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="blocked_no_strategy_match",
+                note="no candidate matched explicit football live strategies",
+            )
+            _dbg_strat = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=fb_post_send_saved,
+                fb_post_integrity=fb_post_integrity_saved,
+                enriched_scored=enriched,
+                finalists=[],
+                finalists_pre_session=[],
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=send_filter_result.stats if send_filter_result else None,
+                integrity_dropped_checks=list(integrity_result.dropped_checks),
+                dry_run=dry_run,
+                global_block="blocked_no_strategy_match",
+                min_score_base=float(settings.football_min_signal_score or 60.0),
+                score_relief_note="explicit_strategies",
+                live_send_stats=strategy_gate_debug,
+                finalist_send_meta={},
+                single_relief_max_gap=float(single_gap_max),
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="no_strategy_match",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_no_strategy_match",
+                dry_run=dry_run,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=0,
+                report_final_signal="НЕТ",
+                report_rejection_code="blocked_no_strategy_match",
+                football_cycle_debug=_dbg_strat,
+            )
+
+        # --- Scoring (applied only to strategy-approved candidates) ---
+        scoring_svc = FootballSignalScoringService()
         learning_helper = FootballLearningService()
         live_fields_seen = False
         enriched: list[ProviderSignalCandidate] = []
@@ -3135,126 +3270,6 @@ class AutoSignalService:
         if live_adaptive_enabled and live_adaptive_snapshot is not None:
             diagnostics.update(
                 football_live_adaptive_learning_json=snapshot_json_for_diagnostics(live_adaptive_snapshot)
-            )
-
-        fb_pre = [
-            x
-            for x in candidates_before_filter
-            if getattr(getattr(x, "match", None), "sport", None) == SportType.FOOTBALL
-        ]
-        report_matches_found = len({(x.match.external_event_id, x.match.home_team, x.match.away_team) for x in fb_pre})
-        report_candidates = len(candidates_before_filter)
-        report_after_filter = int(post_send_filter_count)
-        report_after_integrity = int(post_integrity_count)
-
-        min_score_base = float(settings.football_min_signal_score or 60.0)
-        single_gap_max = float(getattr(settings, "football_live_single_relief_max_gap", 2.0) or 2.0)
-
-        # --- Explicit strategy gate (primary signal definition) ---
-        # We still keep filters/scoring/final gate as safety layers, but we do not consider a candidate
-        # unless it matches one of the explicit football live strategies.
-        strategy_passed: list[ProviderSignalCandidate] = []
-        strategy_stats: dict[str, int] = {}
-        strategy_by_eid: dict[str, str] = {}
-        s1_fail: dict[str, int] = {}
-        s2_fail: dict[str, int] = {}
-        s3_fail: dict[str, int] = {}
-        strategy_gate_debug: dict[str, object] = {}
-        for c in candidates_to_ingest:
-            # Always compute breakdown on the same candidate pool we gate on (post scoring/adaptive).
-            d1 = evaluate_s1_live_1x2_controlled(c)
-            if not d1.passed:
-                for r in (d1.reasons or [])[:12]:
-                    s1_fail[str(r)] = int(s1_fail.get(str(r), 0) or 0) + 1
-            d2 = evaluate_s2_live_total_over_need_1_2(c)
-            if not d2.passed:
-                for r in (d2.reasons or [])[:12]:
-                    s2_fail[str(r)] = int(s2_fail.get(str(r), 0) or 0) + 1
-
-            d0 = await evaluate_football_live_strategies_async(c)
-            if not d0.passed or not d0.strategy_id:
-                # Keep a short breakdown for the new primary strategy (S3) by reason strings.
-                for r in (d0.reasons or [])[:12]:
-                    s3_fail[str(r)] = int(s3_fail.get(str(r), 0) or 0) + 1
-                continue
-            eid = _football_event_id(c)
-            if eid and eid not in strategy_by_eid:
-                strategy_by_eid[eid] = d0.strategy_id
-            strategy_stats[d0.strategy_id] = int(strategy_stats.get(d0.strategy_id, 0) or 0) + 1
-            prev_expl = dict(c.explanation_json or {})
-            prev_expl["football_live_strategy_id"] = d0.strategy_id
-            prev_expl["football_live_strategy_name"] = d0.strategy_name
-            prev_expl["football_live_strategy_reasons"] = list(d0.reasons or [])
-            strategy_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
-        candidates_to_ingest = strategy_passed
-        strategy_gate_debug = {
-            "strategy_stats": dict(strategy_stats),
-            "strategy_matches": int(len(strategy_by_eid)),
-            "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
-            "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
-            "strategy_breakdown_async": dict(sorted(s3_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
-        }
-
-        if not candidates_to_ingest:
-            diagnostics.update(
-                final_signals_count=0,
-                messages_sent_count=0,
-                football_sent_count=0,
-                last_delivery_reason="blocked_no_strategy_match",
-                note="no candidate matched explicit football live strategies",
-            )
-            _dbg_strat = compile_football_cycle_debug(
-                fb_preview=fb_preview,
-                fb_cvf=fb_cvf,
-                fb_post_send=fb_post_send_saved,
-                fb_post_integrity=fb_post_integrity_saved,
-                enriched_scored=enriched,
-                finalists=[],
-                finalists_pre_session=[],
-                min_score=float(settings.football_min_signal_score or 60.0),
-                family_svc=FootballSignalSendFilterService(),
-                send_filter_stats=send_filter_result.stats if send_filter_result else None,
-                integrity_dropped_checks=list(integrity_result.dropped_checks),
-                dry_run=dry_run,
-                global_block="blocked_no_strategy_match",
-                min_score_base=float(settings.football_min_signal_score or 60.0),
-                score_relief_note="explicit_strategies",
-                live_send_stats=strategy_gate_debug,
-                finalist_send_meta={},
-                single_relief_max_gap=float(single_gap_max),
-            )
-            return AutoSignalCycleResult(
-                endpoint=fetch_res.endpoint,
-                fetch_ok=True,
-                preview_candidates=preview_candidates,
-                preview_skipped_items=preview_skipped_items,
-                created_signal_ids=[],
-                created_signals_count=0,
-                skipped_candidates_count=int(omitted_by_limit),
-                notifications_sent_count=0,
-                preview_only=False,
-                message="no_strategy_match",
-                raw_events_count=raw_events_count,
-                normalized_markets_count=normalized_markets_count,
-                candidates_before_filter_count=len(candidates_before_filter),
-                candidates_after_filter_count=len(filtered_candidates),
-                runtime_paused=False,
-                runtime_active_sports=active_sports,
-                source_name=source_name,
-                live_auth_status=live_auth_status,
-                last_live_http_status=fetch_res.status_code,
-                fallback_used=fallback_used,
-                fallback_source_name=fallback_source_name,
-                rejection_reason="blocked_no_strategy_match",
-                dry_run=dry_run,
-                report_matches_found=report_matches_found,
-                report_candidates=report_candidates,
-                report_after_filter=report_after_filter,
-                report_after_integrity=report_after_integrity,
-                report_after_scoring=0,
-                report_final_signal="НЕТ",
-                report_rejection_code="blocked_no_strategy_match",
-                football_cycle_debug=_dbg_strat,
             )
 
         scored_sorted = sorted(
