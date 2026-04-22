@@ -74,6 +74,7 @@ class SignalRuntimeDiagnosticsState:
     football_live_cycle_after_strategy: int = 0
     football_live_cycle_after_s8: int = 0
     football_live_cycle_after_s9: int = 0
+    football_live_cycle_after_value_filter: int = 0
     football_live_cycle_after_score: int = 0
     football_live_cycle_new_ideas_sendable: int = 0
     football_live_cycle_duplicate_ideas_blocked: int = 0
@@ -106,6 +107,11 @@ class SignalRuntimeDiagnosticsState:
     football_live_soft_sendable_relief_single_count: int = 0
     football_live_rejected_at_send_gate: int = 0
     """Candidates scored but rejected by live send gate (classify: reject)."""
+
+    # --- S8 value filter diagnostics (per-cycle) ---
+    football_live_rejected_value_low_favorite: int = 0
+    football_live_rejected_value_no_edge: int = 0
+    football_live_passed_value_filter: int = 0
     football_live_strategy_matches_last_cycle: int = 0
     """Unique matches that passed explicit strategy gate (last cycle)."""
     football_live_strategy_s1_matches_last_cycle: int = 0

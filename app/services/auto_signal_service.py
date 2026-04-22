@@ -3624,6 +3624,10 @@ class AutoSignalService:
             football_live_cycle_after_s8=int(len(s8_passed)),
             football_live_cycle_after_s9=int(len(strategy_passed)),
             football_live_cycle_after_strategy=int(len(strategy_passed)),
+            football_live_cycle_after_value_filter=0,
+            football_live_rejected_value_low_favorite=0,
+            football_live_rejected_value_no_edge=0,
+            football_live_passed_value_filter=0,
         )
 
         if not candidates_to_ingest:
@@ -3697,6 +3701,271 @@ class AutoSignalService:
                 report_final_signal="НЕТ",
                 report_rejection_code="blocked_no_strategy_match",
                 football_cycle_debug=_dbg_strat,
+            )
+
+        # --- VALUE FILTER (post S8, pre scoring) ---
+        # Minimal "value-only" constraints on S8 picks to avoid auto-favorites / no-edge 0:0.
+        # Do NOT change scoring or architecture; this is an explicit gate.
+        def _safe_float(v: object) -> float | None:
+            if v is None or isinstance(v, bool):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _live_ctx_from_candidate(cand: ProviderSignalCandidate) -> tuple[int | None, int | None, int | None]:
+            fs = getattr(cand, "feature_snapshot_json", None) or {}
+            if not isinstance(fs, dict):
+                fs = {}
+            fa = fs.get("football_analytics") if isinstance(fs.get("football_analytics"), dict) else {}
+            minute = fa.get("minute")
+            sh = fa.get("score_home")
+            sa = fa.get("score_away")
+            try:
+                minute_i = int(minute) if minute is not None else None
+            except Exception:
+                minute_i = None
+            try:
+                sh_i = int(sh) if sh is not None else None
+            except Exception:
+                sh_i = None
+            try:
+                sa_i = int(sa) if sa is not None else None
+            except Exception:
+                sa_i = None
+            return minute_i, sh_i, sa_i
+
+        rej_low_fav = 0
+        rej_no_edge = 0
+        passed_value = 0
+        after_value: list[ProviderSignalCandidate] = []
+        value_rejected_samples: list[dict[str, object]] = []
+        value_rejected_limit = 6
+        fmt_v = FootballBetFormatterService()
+
+        for cand in candidates_to_ingest:
+            odds_f = _safe_float(getattr(cand.market, "odds_value", None))
+            minute_i, sh_i, sa_i = _live_ctx_from_candidate(cand)
+            # If context missing, treat as no-edge (we don't want blind favorites)
+            if odds_f is None or minute_i is None or sh_i is None or sa_i is None:
+                rej_no_edge += 1
+                if len(value_rejected_samples) < value_rejected_limit:
+                    bet = fmt_v.format_bet(
+                        market_type=cand.market.market_type,
+                        market_label=cand.market.market_label,
+                        selection=cand.market.selection,
+                        home_team=cand.match.home_team,
+                        away_team=cand.match.away_team,
+                        section_name=cand.market.section_name,
+                        subsection_name=cand.market.subsection_name,
+                    )
+                    value_rejected_samples.append(
+                        {
+                            "event_id": str(_football_event_id(cand) or ""),
+                            "match": str(cand.match.match_name or ""),
+                            "minute": minute_i,
+                            "score": f"{sh_i}:{sa_i}" if sh_i is not None and sa_i is not None else None,
+                            "odds": str(getattr(cand.market, "odds_value", None)),
+                            "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                            "value_reject": "missing_live_context_or_odds",
+                        }
+                    )
+                continue
+
+            # B) Obvious favorites ban (any time)
+            if odds_f < 1.45:
+                rej_no_edge += 1
+                if len(value_rejected_samples) < value_rejected_limit:
+                    bet = fmt_v.format_bet(
+                        market_type=cand.market.market_type,
+                        market_label=cand.market.market_label,
+                        selection=cand.market.selection,
+                        home_team=cand.match.home_team,
+                        away_team=cand.match.away_team,
+                        section_name=cand.market.section_name,
+                        subsection_name=cand.market.subsection_name,
+                    )
+                    value_rejected_samples.append(
+                        {
+                            "event_id": str(_football_event_id(cand) or ""),
+                            "match": str(cand.match.match_name or ""),
+                            "minute": minute_i,
+                            "score": f"{sh_i}:{sa_i}",
+                            "odds": odds_f,
+                            "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                            "value_reject": "blocked_obvious_favorite_odds_lt_1_45",
+                        }
+                    )
+                continue
+
+            # A) Auto-favorites ban (0:0 early-mid)
+            if (sh_i, sa_i) == (0, 0) and minute_i < 40 and odds_f < 1.55:
+                rej_low_fav += 1
+                if len(value_rejected_samples) < value_rejected_limit:
+                    bet = fmt_v.format_bet(
+                        market_type=cand.market.market_type,
+                        market_label=cand.market.market_label,
+                        selection=cand.market.selection,
+                        home_team=cand.match.home_team,
+                        away_team=cand.match.away_team,
+                        section_name=cand.market.section_name,
+                        subsection_name=cand.market.subsection_name,
+                    )
+                    value_rejected_samples.append(
+                        {
+                            "event_id": str(_football_event_id(cand) or ""),
+                            "match": str(cand.match.match_name or ""),
+                            "minute": minute_i,
+                            "score": f"{sh_i}:{sa_i}",
+                            "odds": odds_f,
+                            "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                            "value_reject": "blocked_low_value_favorite",
+                        }
+                    )
+                continue
+
+            # C) Zero-information ban (0:0 very early with short odds)
+            if (sh_i, sa_i) == (0, 0) and minute_i < 25 and odds_f < 2.00:
+                rej_no_edge += 1
+                if len(value_rejected_samples) < value_rejected_limit:
+                    bet = fmt_v.format_bet(
+                        market_type=cand.market.market_type,
+                        market_label=cand.market.market_label,
+                        selection=cand.market.selection,
+                        home_team=cand.match.home_team,
+                        away_team=cand.match.away_team,
+                        section_name=cand.market.section_name,
+                        subsection_name=cand.market.subsection_name,
+                    )
+                    value_rejected_samples.append(
+                        {
+                            "event_id": str(_football_event_id(cand) or ""),
+                            "match": str(cand.match.match_name or ""),
+                            "minute": minute_i,
+                            "score": f"{sh_i}:{sa_i}",
+                            "odds": odds_f,
+                            "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                            "value_reject": "blocked_zero_info_00_odds_lt_2_00",
+                        }
+                    )
+                continue
+
+            # D) Keep only potential value
+            allow = (1.70 <= odds_f <= 3.80) or (((sh_i, sa_i) == (0, 0)) and minute_i >= 25 and odds_f > 2.20)
+            if not allow:
+                rej_no_edge += 1
+                if len(value_rejected_samples) < value_rejected_limit:
+                    bet = fmt_v.format_bet(
+                        market_type=cand.market.market_type,
+                        market_label=cand.market.market_label,
+                        selection=cand.market.selection,
+                        home_team=cand.match.home_team,
+                        away_team=cand.match.away_team,
+                        section_name=cand.market.section_name,
+                        subsection_name=cand.market.subsection_name,
+                    )
+                    value_rejected_samples.append(
+                        {
+                            "event_id": str(_football_event_id(cand) or ""),
+                            "match": str(cand.match.match_name or ""),
+                            "minute": minute_i,
+                            "score": f"{sh_i}:{sa_i}",
+                            "odds": odds_f,
+                            "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                            "value_reject": "blocked_no_edge_outside_value_window",
+                        }
+                    )
+                continue
+
+            passed_value += 1
+            after_value.append(cand)
+
+        candidates_to_ingest = after_value
+        diagnostics.update(
+            football_live_rejected_value_low_favorite=int(rej_low_fav),
+            football_live_rejected_value_no_edge=int(rej_no_edge),
+            football_live_passed_value_filter=int(passed_value),
+            football_live_cycle_after_value_filter=int(len(after_value)),
+        )
+
+        # If value filter wipes pool, return with proper diagnostics (keep pipeline intact).
+        if not candidates_to_ingest:
+            _persist_side_funnel_once(
+                stages={
+                    "after_integrity": side_after_integrity,
+                    "after_s8": side_after_s8,
+                    "after_value_filter": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "after_scoring_all": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "after_scoring": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "final_selected": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                },
+                samples=away_draw_samples,
+            )
+            try:
+                # Attach value filter samples into existing strategy_gate_debug for visibility in debug dumps
+                strategy_gate_debug["value_filter_rejected_samples"] = value_rejected_samples
+            except Exception:
+                pass
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="blocked_value_filter",
+                note="all strategy-approved candidates rejected by value filter",
+            )
+            _dbg_v = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=fb_post_send_saved,
+                fb_post_integrity=fb_post_integrity_saved,
+                enriched_scored=enriched,
+                finalists=[],
+                finalists_pre_session=[],
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=send_filter_result.stats if send_filter_result else None,
+                integrity_dropped_checks=list(integrity_result.dropped_checks),
+                dry_run=dry_run,
+                global_block="blocked_value_filter",
+                min_score_base=float(settings.football_min_signal_score or 60.0),
+                score_relief_note="value_filter",
+                live_send_stats=strategy_gate_debug,
+                finalist_send_meta={},
+                single_relief_max_gap=float(single_gap_max),
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="blocked_value_filter",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_value_filter",
+                dry_run=dry_run,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=0,
+                report_final_signal="НЕТ",
+                report_rejection_code="blocked_value_filter",
+                football_cycle_debug=_dbg_v,
             )
 
         # --- Scoring (applied only to strategy-approved candidates) ---
@@ -4077,6 +4346,7 @@ class AutoSignalService:
             stages={
                 "after_integrity": side_after_integrity,
                 "after_s8": side_after_s8,
+                "after_value_filter": _side_breakdown(list(after_value)),
                 "after_scoring_all": side_after_scoring_all,
                 "after_scoring": side_after_scoring,
                 "final_selected": side_final_selected,
