@@ -6,7 +6,6 @@ from typing import Any
 from app.core.enums import SportType
 from app.schemas.provider_models import ProviderSignalCandidate
 from app.services.football_bet_formatter_service import FootballBetFormatterService
-from app.services.football_sportmonks_baseline_service import FootballSportmonksBaselineService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 
 
@@ -104,6 +103,30 @@ def _selection_side_1x2(c: ProviderSignalCandidate) -> str | None:
     if sel and away and sel == away:
         return "away"
     return None
+
+
+def _is_exotic_result_market(c: ProviderSignalCandidate) -> bool:
+    """Reject remainder/handicap/euro-handicap markets that can masquerade as result."""
+    txt = " ".join(
+        [
+            str(c.market.section_name or ""),
+            str(c.market.subsection_name or ""),
+            str(c.market.market_label or ""),
+            str(c.market.market_type or ""),
+        ]
+    ).lower()
+    bad = [
+        "remainder",
+        "remain",
+        "остат",
+        "оставш",
+        "handicap",
+        "european",
+        "европ",
+        "фора",
+        "hcp",
+    ]
+    return any(b in txt for b in bad)
 
 
 def _min_goals_strict_over(line: float) -> int:
@@ -284,6 +307,87 @@ async def evaluate_s7_live_1x2_baseline_plus_winline_state(
     )
 
 
+async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
+    """Winline-only strict controlled 1X2 strategy (anti-template)."""
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+
+    reasons: list[str] = []
+    fam_svc = FootballSignalSendFilterService()
+    fam = fam_svc.get_market_family(c)
+    if fam != "result":
+        reasons.append("market_not_result")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    mt = _norm(str(c.market.market_type or ""))
+    if mt not in {"1x2", "match_winner"}:
+        reasons.append("market_type_not_1x2")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if _is_exotic_result_market(c):
+        reasons.append("market_exotic_result_like")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if minute is None or sh is None or sa is None:
+        reasons.append("missing_live_context(minute/score)")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if odds is None:
+        reasons.append("missing_odds")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    side = _selection_side_1x2(c)
+    if side not in {"home", "away", "draw"}:
+        reasons.append("selection_not_1x2_side")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    # Base windows
+    if minute < 15 or minute > 60:
+        reasons.append("minute_window_15_60")
+    if not ((sh == 0 and sa == 0) or (sh == 1 and sa == 0) or (sh == 0 and sa == 1)):
+        reasons.append("score_state_not_00_or_10")
+    if not (1.70 <= float(odds) <= 3.40):
+        reasons.append("odds_window_1_70_3_40")
+
+    # Anti-mess rules
+    # 1) Disallow draw late
+    if side == "draw" and minute >= 45:
+        reasons.append("draw_too_late")
+
+    # 2) Disallow taking a trailing side except a very narrow rescue case
+    trailing = (side == "home" and sh < sa) or (side == "away" and sa < sh)
+    if trailing:
+        # Narrow allow: trailing by exactly 1 at <=30min and odds still <=2.00 (market still believes)
+        allow = False
+        if abs((sh or 0) - (sa or 0)) == 1 and minute <= 30 and float(odds) <= 2.00:
+            allow = True
+        if not allow:
+            reasons.append("side_trailing_reject")
+
+    # 3) Extra strict early 0:0 (avoid weak templated picks)
+    if sh == 0 and sa == 0 and minute <= 20:
+        if side == "draw":
+            reasons.append("early_00_draw_reject")
+        if float(odds) > 2.40:
+            reasons.append("early_00_odds_too_high")
+
+    if reasons:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    return FootballLiveStrategyDecision(
+        passed=True,
+        strategy_id="S8_LIVE_1X2_WINLINE_STRICT",
+        strategy_name="Strategy 8: LIVE 1X2 (Winline strict controlled)",
+        reasons=[
+            "market=result(1X2) only (non-exotic)",
+            "minute 15..60",
+            "score in {0:0,1:0,0:1}",
+            "odds 1.70..3.40",
+            "no trailing side (except narrow rescue)",
+            "no late draw",
+            "extra strict early 0:0",
+        ],
+    )
+
+
 def evaluate_s2_live_total_over_need_1_2(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
     lc = _lc_from_candidate(c)
     minute = _as_int(lc.get("minute"))
@@ -429,11 +533,11 @@ async def evaluate_football_live_strategies_async(c: ProviderSignalCandidate) ->
     if c.match.sport != SportType.FOOTBALL or not bool(getattr(c.match, "is_live", False)):
         return FootballLiveStrategyDecision(passed=False, reasons=["not_football_live"])
 
-    d7 = await evaluate_s7_live_1x2_baseline_plus_winline_state(c)
-    if d7.passed:
-        return d7
+    d8 = await evaluate_s8_live_1x2_winline_strict(c)
+    if d8.passed:
+        return d8
     rr: list[str] = []
-    rr.extend(list(getattr(d7, "reasons", None) or [])[:12])
+    rr.extend(list(getattr(d8, "reasons", None) or [])[:12])
     if not rr:
         rr = ["no_strategy_match"]
     return FootballLiveStrategyDecision(passed=False, reasons=rr)
