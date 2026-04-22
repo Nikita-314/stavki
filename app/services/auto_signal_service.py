@@ -3084,6 +3084,7 @@ class AutoSignalService:
         flow_minute_bucket: dict[str, int] = {}
         flow_score_bucket: dict[str, int] = {}
         flow_odds_bucket: dict[str, int] = {}
+        from app.services.football_bet_formatter_service import FootballBetFormatterService
 
         def _bump(d: dict[str, int], k: str) -> None:
             if not k:
@@ -3138,6 +3139,14 @@ class AutoSignalService:
             if (sh, sa) == (1, 1):
                 return "score:1-1"
             return "score:other"
+
+        def _safe_odds_float(v: object) -> float | None:
+            if v is None or isinstance(v, bool):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
 
         def _is_exotic_result_like(cand: ProviderSignalCandidate) -> bool:
             txt = " ".join(
@@ -3200,7 +3209,7 @@ class AutoSignalService:
                         sa0 = None
                 _bump(flow_minute_bucket, _bucket_minute(minute0))
                 _bump(flow_score_bucket, _bucket_score(sh0, sa0))
-                _bump(flow_odds_bucket, _bucket_odds(_odds_float(cand)))
+                _bump(flow_odds_bucket, _bucket_odds(_safe_odds_float(getattr(cand.market, "odds_value", None))))
 
                 # Totals-specific: over/under, line, scope
                 if str(family or "") == "totals":
