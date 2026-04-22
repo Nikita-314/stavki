@@ -345,8 +345,13 @@ async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> Foo
         reasons.append("minute_window_15_60")
     if not ((sh == 0 and sa == 0) or (sh == 1 and sa == 0) or (sh == 0 and sa == 1)):
         reasons.append("score_state_not_00_or_10")
-    if not (1.70 <= float(odds) <= 3.40):
-        reasons.append("odds_window_1_70_3_40")
+    # Odds window: keep strict, but allow a narrow high-odds slice for early 0:0 1X2 (avoid empty flow).
+    if not (1.70 <= float(odds) <= 4.20):
+        reasons.append("odds_window_1_70_4_20")
+    if float(odds) > 3.40:
+        # Only allow high odds in a controlled early 0:0 state, and only on a team side (no draw).
+        if not (sh == 0 and sa == 0 and 20 <= minute <= 35 and side in {"home", "away"} and mt == "1x2"):
+            reasons.append("odds_high_outside_narrow_00_window")
 
     # Anti-mess rules
     # 1) Disallow draw late
@@ -380,7 +385,7 @@ async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> Foo
             "market=result(1X2) only (non-exotic)",
             "minute 15..60",
             "score in {0:0,1:0,0:1}",
-            "odds 1.70..3.40",
+            "odds 1.70..4.20 (high odds only in narrow 0:0 window)",
             "no trailing side (except narrow rescue)",
             "no late draw",
             "extra strict early 0:0",

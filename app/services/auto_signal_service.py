@@ -3094,8 +3094,24 @@ class AutoSignalService:
         s1_fail: dict[str, int] = {}
         s2_fail: dict[str, int] = {}
         s8_fail: dict[str, int] = {}
+        strategy_rejected_samples: list[dict[str, object]] = []
+        strategy_rejected_limit = 5
         strategy_gate_debug: dict[str, object] = {}
+        post_integrity_result_like = 0
+        post_integrity_result_like_1x2 = 0
+        from app.services.football_bet_formatter_service import FootballBetFormatterService
+
+        fmt = FootballBetFormatterService()
         for c in candidates_to_ingest:
+            try:
+                fam0 = family_svc.get_market_family(c)
+                if fam0 == "result":
+                    post_integrity_result_like += 1
+                    mt0 = _norm(str(c.market.market_type or ""))
+                    if mt0 in {"1x2", "match_winner"}:
+                        post_integrity_result_like_1x2 += 1
+            except Exception:
+                pass
             # Always compute breakdown on the same candidate pool we gate on (post scoring/adaptive).
             d1 = evaluate_s1_live_1x2_controlled(c)
             if not d1.passed:
@@ -3111,6 +3127,42 @@ class AutoSignalService:
                 # Keep a short breakdown for the primary strategy (S8) by reason strings.
                 for r in (d0.reasons or [])[:12]:
                     s8_fail[str(r)] = int(s8_fail.get(str(r), 0) or 0) + 1
+                if len(strategy_rejected_samples) < strategy_rejected_limit:
+                    try:
+                        eid0 = _football_event_id(c) or ""
+                        fam0 = family_svc.get_market_family(c)
+                        lc = (c.feature_snapshot_json or {}).get("football_analytics") if isinstance(c.feature_snapshot_json, dict) else None
+                        minute0 = None
+                        sh0 = None
+                        sa0 = None
+                        if isinstance(lc, dict):
+                            minute0 = lc.get("minute")
+                            sh0 = lc.get("score_home")
+                            sa0 = lc.get("score_away")
+                        bet = fmt.format_bet(
+                            market_type=c.market.market_type,
+                            market_label=c.market.market_label,
+                            selection=c.market.selection,
+                            home_team=c.match.home_team,
+                            away_team=c.match.away_team,
+                            section_name=c.market.section_name,
+                            subsection_name=c.market.subsection_name,
+                        )
+                        strategy_rejected_samples.append(
+                            {
+                                "event_id": eid0,
+                                "match": str(c.match.match_name or ""),
+                                "minute": minute0,
+                                "score": f"{sh0}:{sa0}" if sh0 is not None and sa0 is not None else None,
+                                "market_type": str(c.market.market_type or ""),
+                                "market_family": str(fam0 or ""),
+                                "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                                "odds": (str(c.market.odds_value) if c.market.odds_value is not None else None),
+                                "s8_reasons": list(d0.reasons or [])[:12],
+                            }
+                        )
+                    except Exception:
+                        pass
                 continue
             eid = _football_event_id(c)
             if eid and eid not in strategy_by_eid:
@@ -3125,9 +3177,12 @@ class AutoSignalService:
         strategy_gate_debug = {
             "strategy_stats": dict(strategy_stats),
             "strategy_matches": int(len(strategy_by_eid)),
+            "post_integrity_result_like": int(post_integrity_result_like),
+            "post_integrity_result_like_1x2": int(post_integrity_result_like_1x2),
             "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s8": dict(sorted(s8_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+            "strategy_rejected_samples": strategy_rejected_samples,
         }
         diagnostics.update(football_live_cycle_after_strategy=int(len(candidates_to_ingest)))
 
