@@ -3047,6 +3047,7 @@ class AutoSignalService:
         learning_multipliers: dict[str, float] = {}
         learning_aggregates: list = []
         live_adaptive_snapshot = None
+        enriched: list[ProviderSignalCandidate] | None = None
         if candidates_to_ingest and (learning_enabled or live_adaptive_enabled):
             async with sessionmaker() as learn_session:
                 if learning_enabled:
@@ -3197,6 +3198,7 @@ class AutoSignalService:
         learning_helper = FootballLearningService()
         live_fields_seen = False
         enriched: list[ProviderSignalCandidate] = []
+        enriched_scored: list[ProviderSignalCandidate] = []
         for idx, cand in enumerate(candidates_to_ingest):
             family = family_svc.get_market_family(cand)
             analytics = analytics_svc.build_snapshot(cand, market_family=family)
@@ -3264,8 +3266,9 @@ class AutoSignalService:
                     },
                 }
             )
-            enriched.append(new_cand)
-        candidates_to_ingest = enriched
+            enriched_scored.append(new_cand)
+        candidates_to_ingest = enriched_scored
+        enriched = enriched_scored
 
         if live_adaptive_enabled and live_adaptive_snapshot is not None:
             diagnostics.update(
