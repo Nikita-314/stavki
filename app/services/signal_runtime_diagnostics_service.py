@@ -209,6 +209,33 @@ class SignalRuntimeDiagnosticsState:
     football_live_last_dry_run_debug_telegram_text: str | None = None
     """Admin-only: last dry_run debug breakdown (kept separate from combat)."""
 
+    # --- Side funnel diagnostics (home/away/draw) ---
+    football_live_side_funnel_last_cycle_json: str | None = None
+    """
+    JSON object:
+      {
+        "cycle_at": "...",
+        "stages": {
+          "after_integrity": {"home":..,"away":..,"draw":..,"unknown":..,"total":..},
+          "after_s8": {...},
+          "after_scoring": {...},
+          "final_selected": {...}
+        }
+      }
+    """
+    football_live_side_funnel_window_agg_json: str | None = None
+    """JSON object: aggregated counts across last N cycles for each stage."""
+    football_live_side_funnel_window_cycles: int = 0
+    """How many cycles contributed to window agg."""
+    football_live_side_funnel_window_started_at: str | None = None
+    """ISO time when side funnel window started (or last reset)."""
+    football_live_side_away_draw_samples_last_cycle_json: str | None = None
+    """
+    JSON array of up to 10 objects: real after_integrity away/draw candidates with fate:
+      {match, event_id, minute, score, market_type, bet_text, odds, side,
+       fate_stage, s8_reject_reasons?, score?, selected?}
+    """
+
 
 _STATE = SignalRuntimeDiagnosticsState()
 _LOCK = Lock()

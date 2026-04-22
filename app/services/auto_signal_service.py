@@ -3074,6 +3074,46 @@ class AutoSignalService:
         # Build minimal analytics snapshot (minute/score/live_state) pre-strategy.
         analytics_svc = FootballAnalyticsService()
         family_svc = FootballSignalSendFilterService()
+        # --- Side funnel diagnostics (1X2 side distribution through the funnel) ---
+        def _norm_side(s: str) -> str:
+            return (s or "").strip().lower().replace("ё", "е")
+
+        def _side_from_selection_1x2(cand: ProviderSignalCandidate) -> str:
+            """home|away|draw|unknown for 1X2-like markets; unknown for others."""
+            try:
+                mt = _norm_side(str(cand.market.market_type or ""))
+                if mt not in {"1x2", "match_winner"}:
+                    return "unknown"
+                sel = _norm_side(str(cand.market.selection or ""))
+                if not sel:
+                    return "unknown"
+                tok = sel.replace("х", "x").replace(" ", "")
+                # Strict tokens only (no substring "нич": team names can contain it)
+                if tok in {"x", "draw", "н", "ничья"}:
+                    return "draw"
+                if tok in {"1", "p1", "п1", "home"}:
+                    return "home"
+                if tok in {"2", "p2", "п2", "away"}:
+                    return "away"
+                home = _norm_side(str(cand.match.home_team or ""))
+                away = _norm_side(str(cand.match.away_team or ""))
+                if home and (sel == home or home in sel or sel in home):
+                    return "home"
+                if away and (sel == away or away in sel or sel in away):
+                    return "away"
+                return "unknown"
+            except Exception:
+                return "unknown"
+
+        def _side_breakdown(pool: list[ProviderSignalCandidate]) -> dict[str, int]:
+            out = {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0}
+            for c in pool:
+                out["total"] += 1
+                s = _side_from_selection_1x2(c)
+                if s not in ("home", "away", "draw", "unknown"):
+                    s = "unknown"
+                out[s] += 1
+            return out
         # --- Market flow diagnostics (after integrity) ---
         flow_family: dict[str, int] = {}
         flow_market_type: dict[str, int] = {}
@@ -3279,6 +3319,7 @@ class AutoSignalService:
             except Exception:
                 pre_strategy.append(cand)
         candidates_to_ingest = pre_strategy
+        side_after_integrity = _side_breakdown(list(candidates_to_ingest))
 
         # --- Explicit strategy gate (primary signal definition) ---
         # Pipeline: after integrity -> S8 first -> S9 second -> scoring -> final gate.
@@ -3307,6 +3348,54 @@ class AutoSignalService:
             evaluate_s8_live_1x2_winline_strict,
             evaluate_s9_live_totals_over_controlled,
         )
+        away_draw_samples: list[dict[str, object]] = []
+        away_draw_samples_limit = 10
+
+        def _persist_side_funnel_once(*, stages: dict[str, dict[str, int]], samples: list[dict[str, object]]) -> None:
+            """Persist last-cycle funnel + rolling window aggregate (caps at 20 cycles)."""
+            try:
+                import json
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+                funnel = {"cycle_at": now_iso, "stages": stages}
+
+                prev = SignalRuntimeDiagnosticsService().get_state()
+                prev_cycles = int(prev.get("football_live_side_funnel_window_cycles") or 0)
+                started_at = prev.get("football_live_side_funnel_window_started_at") or now_iso
+                agg: dict[str, dict[str, int]] = {}
+                try:
+                    agg0 = json.loads(prev.get("football_live_side_funnel_window_agg_json") or "{}")
+                    if isinstance(agg0, dict):
+                        agg = agg0  # type: ignore[assignment]
+                except Exception:
+                    agg = {}
+
+                # merge
+                for stg, cnt in stages.items():
+                    if not isinstance(cnt, dict):
+                        continue
+                    base = agg.get(stg)
+                    if not isinstance(base, dict):
+                        base = {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0}
+                    for k in ("home", "away", "draw", "unknown", "total"):
+                        base[k] = int(base.get(k, 0) or 0) + int(cnt.get(k, 0) or 0)
+                    agg[stg] = base
+
+                next_cycles = prev_cycles + 1
+                if next_cycles > 20:
+                    agg = {stg: {k: int(cnt.get(k, 0) or 0) for k in ("home", "away", "draw", "unknown", "total")} for stg, cnt in stages.items()}
+                    next_cycles = 1
+                    started_at = now_iso
+
+                diagnostics.update(
+                    football_live_side_funnel_last_cycle_json=json.dumps(funnel, ensure_ascii=False)[:12000],
+                    football_live_side_funnel_window_agg_json=json.dumps(agg, ensure_ascii=False)[:12000],
+                    football_live_side_funnel_window_cycles=int(next_cycles),
+                    football_live_side_funnel_window_started_at=str(started_at),
+                    football_live_side_away_draw_samples_last_cycle_json=json.dumps(samples, ensure_ascii=False)[:12000],
+                )
+            except Exception:
+                pass
 
         for c in candidates_to_ingest:
             try:
@@ -3376,6 +3465,49 @@ class AutoSignalService:
                                 )
                             except Exception:
                                 pass
+                except Exception:
+                    pass
+                # Collect draw candidates (after_integrity) and their S8 reject reasons.
+                # IMPORTANT: include non-FT subtypes too (interval/period/etc) to prove whether draw flow is mostly "junk".
+                try:
+                    if len(away_draw_samples) < away_draw_samples_limit:
+                        famx = family_svc.get_market_family(c)
+                        mt0 = _norm_side(str(c.market.market_type or ""))
+                        if famx == "result" and mt0 in {"1x2", "match_winner"}:
+                            sside = _side_from_selection_1x2(c)
+                            if sside == "draw":
+                                lc = (
+                                    (c.feature_snapshot_json or {}).get("football_analytics")
+                                    if isinstance(c.feature_snapshot_json, dict)
+                                    else None
+                                )
+                                minute0 = (lc.get("minute") if isinstance(lc, dict) else None)
+                                sh0 = (lc.get("score_home") if isinstance(lc, dict) else None)
+                                sa0 = (lc.get("score_away") if isinstance(lc, dict) else None)
+                                bet = fmt.format_bet(
+                                    market_type=c.market.market_type,
+                                    market_label=c.market.market_label,
+                                    selection=c.market.selection,
+                                    home_team=c.match.home_team,
+                                    away_team=c.match.away_team,
+                                    section_name=c.market.section_name,
+                                    subsection_name=c.market.subsection_name,
+                                )
+                                away_draw_samples.append(
+                                    {
+                                        "event_id": str(_football_event_id(c) or ""),
+                                        "match": str(c.match.match_name or ""),
+                                        "minute": minute0,
+                                        "score": f"{sh0}:{sa0}" if sh0 is not None and sa0 is not None else None,
+                                        "market_type": str(c.market.market_type or ""),
+                                        "result_subtype": _result_subtype_local(c),
+                                        "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                                        "odds": (str(c.market.odds_value) if c.market.odds_value is not None else None),
+                                        "side": sside,
+                                        "fate_stage": "rejected_in_s8",
+                                        "s8_reject_reasons": list(d8.reasons or [])[:12],
+                                    }
+                                )
                 except Exception:
                     pass
                 # Only totals candidates can ever match S9 by definition.
@@ -3460,6 +3592,7 @@ class AutoSignalService:
 
         strategy_passed = [*s8_passed, *s9_passed]
         candidates_to_ingest = strategy_passed
+        side_after_s8 = _side_breakdown(list(s8_passed))
         strategy_gate_debug = {
             "strategy_stats": dict(strategy_stats),
             "strategy_matches": int(len(strategy_by_eid)),
@@ -3494,6 +3627,17 @@ class AutoSignalService:
         )
 
         if not candidates_to_ingest:
+            # Persist side funnel even when nothing passes strategy (critical to locate where away/draw disappear).
+            _persist_side_funnel_once(
+                stages={
+                    "after_integrity": side_after_integrity,
+                    "after_s8": side_after_s8,
+                    "after_scoring_all": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "after_scoring": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "final_selected": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                },
+                samples=away_draw_samples,
+            )
             diagnostics.update(
                 final_signals_count=0,
                 messages_sent_count=0,
@@ -3631,6 +3775,7 @@ class AutoSignalService:
             enriched_scored.append(new_cand)
         candidates_to_ingest = enriched_scored
         enriched = enriched_scored
+        side_after_scoring_all = _side_breakdown(list(enriched_scored))
 
         if live_adaptive_enabled and live_adaptive_snapshot is not None:
             diagnostics.update(
@@ -3682,6 +3827,7 @@ class AutoSignalService:
 
         ordered = order_live_finalist_tuples(scored_tuples, min_score_base, family_svc)
         finalists_pre_session = [c for c, _, _ in ordered]
+        side_after_scoring = _side_breakdown(list(finalists_pre_session))
         n_after_min_score = len(finalists_pre_session)
         session_dup_blocked = 0
         send_meta_final: dict[int, tuple[str, str | None]] = {}
@@ -3877,6 +4023,66 @@ class AutoSignalService:
             )
 
         report_after_scoring = n_after_min_score
+        side_final_selected = _side_breakdown(list(finalists))
+
+        # Attach "passed but lost" away/draw candidates (if any) with score/selected.
+        try:
+            if len(away_draw_samples) < away_draw_samples_limit:
+                finalist_ids = {id(x) for x in finalists}
+                for c in finalists_pre_session:
+                    if len(away_draw_samples) >= away_draw_samples_limit:
+                        break
+                    famx = family_svc.get_market_family(c)
+                    if famx != "result" or _result_subtype_local(c) != "ft_1x2_candidate":
+                        continue
+                    sside = _side_from_selection_1x2(c)
+                    if sside not in {"away", "draw"}:
+                        continue
+                    lc = (
+                        (c.feature_snapshot_json or {}).get("football_analytics")
+                        if isinstance(c.feature_snapshot_json, dict)
+                        else None
+                    )
+                    minute0 = (lc.get("minute") if isinstance(lc, dict) else None)
+                    sh0 = (lc.get("score_home") if isinstance(lc, dict) else None)
+                    sa0 = (lc.get("score_away") if isinstance(lc, dict) else None)
+                    bet = fmt.format_bet(
+                        market_type=c.market.market_type,
+                        market_label=c.market.market_label,
+                        selection=c.market.selection,
+                        home_team=c.match.home_team,
+                        away_team=c.match.away_team,
+                        section_name=c.market.section_name,
+                        subsection_name=c.market.subsection_name,
+                    )
+                    away_draw_samples.append(
+                        {
+                            "event_id": str(_football_event_id(c) or ""),
+                            "match": str(c.match.match_name or ""),
+                            "minute": minute0,
+                            "score": f"{sh0}:{sa0}" if sh0 is not None and sa0 is not None else None,
+                            "market_type": str(c.market.market_type or ""),
+                            "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                            "odds": (str(c.market.odds_value) if c.market.odds_value is not None else None),
+                            "side": sside,
+                            "fate_stage": "after_scoring",
+                            "score": float(c.signal_score or 0),
+                            "selected": ("yes" if id(c) in finalist_ids else "no"),
+                        }
+                    )
+        except Exception:
+            pass
+
+        _persist_side_funnel_once(
+            stages={
+                "after_integrity": side_after_integrity,
+                "after_s8": side_after_s8,
+                "after_scoring_all": side_after_scoring_all,
+                "after_scoring": side_after_scoring,
+                "final_selected": side_final_selected,
+            },
+            samples=away_draw_samples,
+        )
 
         cycle_dbg = compile_football_cycle_debug(
             fb_preview=fb_preview,

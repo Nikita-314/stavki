@@ -80,7 +80,9 @@ def _is_over_selection(sel: str) -> bool:
 
 def _is_draw_selection(sel: str) -> bool:
     s = _norm(sel)
-    return s in {"x", "draw", "ничья", "ничья ", "ничья."} or s == "х" or "нич" in s
+    # Be strict: do NOT use substring checks like "нич" because team names can contain it (e.g. "...нич").
+    s = s.strip(" .")
+    return s in {"x", "draw", "ничья", "х", "н"}
 
 
 def _selection_side_1x2(c: ProviderSignalCandidate) -> str | None:
