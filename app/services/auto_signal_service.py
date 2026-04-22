@@ -3289,8 +3289,11 @@ class AutoSignalService:
         s2_fail: dict[str, int] = {}
         s8_fail: dict[str, int] = {}
         s9_fail: dict[str, int] = {}
+        s8_ft_fail: dict[str, int] = {}
         strategy_rejected_samples: list[dict[str, object]] = []
         strategy_rejected_limit = 5
+        ft_1x2_rejected_samples: list[dict[str, object]] = []
+        ft_1x2_rejected_limit = 5
         strategy_gate_debug: dict[str, object] = {}
         post_integrity_result_like = 0
         post_integrity_result_like_1x2 = 0
@@ -3330,6 +3333,51 @@ class AutoSignalService:
             if not d8.passed:
                 for r in (d8.reasons or [])[:12]:
                     s8_fail[str(r)] = int(s8_fail.get(str(r), 0) or 0) + 1
+                # If this is a clean FT 1X2 candidate, track S8 rejects separately.
+                try:
+                    if family_svc.get_market_family(c) == "result" and _result_subtype_local(c) == "ft_1x2_candidate":
+                        for r in (d8.reasons or [])[:12]:
+                            s8_ft_fail[str(r)] = int(s8_ft_fail.get(str(r), 0) or 0) + 1
+                        if len(ft_1x2_rejected_samples) < ft_1x2_rejected_limit:
+                            try:
+                                eid0 = _football_event_id(c) or ""
+                                lc = (
+                                    (c.feature_snapshot_json or {}).get("football_analytics")
+                                    if isinstance(c.feature_snapshot_json, dict)
+                                    else None
+                                )
+                                minute0 = None
+                                sh0 = None
+                                sa0 = None
+                                if isinstance(lc, dict):
+                                    minute0 = lc.get("minute")
+                                    sh0 = lc.get("score_home")
+                                    sa0 = lc.get("score_away")
+                                bet = fmt.format_bet(
+                                    market_type=c.market.market_type,
+                                    market_label=c.market.market_label,
+                                    selection=c.market.selection,
+                                    home_team=c.match.home_team,
+                                    away_team=c.match.away_team,
+                                    section_name=c.market.section_name,
+                                    subsection_name=c.market.subsection_name,
+                                )
+                                ft_1x2_rejected_samples.append(
+                                    {
+                                        "event_id": eid0,
+                                        "match": str(c.match.match_name or ""),
+                                        "minute": minute0,
+                                        "score": f"{sh0}:{sa0}" if sh0 is not None and sa0 is not None else None,
+                                        "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                                        "odds": (str(c.market.odds_value) if c.market.odds_value is not None else None),
+                                        "selection": str(c.market.selection or ""),
+                                        "s8_reasons": list(d8.reasons or [])[:12],
+                                    }
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
                 # Only totals candidates can ever match S9 by definition.
                 try:
                     if family_svc.get_market_family(c) == "totals":
@@ -3432,10 +3480,12 @@ class AutoSignalService:
             "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s8": dict(sorted(s8_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+            "strategy_breakdown_s8_ft_1x2_only": dict(sorted(s8_ft_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
             "strategy_breakdown_s9": dict(sorted(s9_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
             "after_s8": int(len(s8_passed)),
             "after_s9": int(len(strategy_passed)),
             "strategy_rejected_samples": strategy_rejected_samples,
+            "ft_1x2_rejected_samples": ft_1x2_rejected_samples,
         }
         diagnostics.update(
             football_live_cycle_after_s8=int(len(s8_passed)),
