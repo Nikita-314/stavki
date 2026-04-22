@@ -377,13 +377,13 @@ async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> Foo
         return FootballLiveStrategyDecision(passed=False, reasons=reasons)
 
     # Base windows
-    if minute < 15 or minute > 60:
-        reasons.append("minute_window_15_60")
+    if minute < 15 or minute > 70:
+        reasons.append("minute_window_15_70")
     if not ((sh == 0 and sa == 0) or (sh == 1 and sa == 0) or (sh == 0 and sa == 1)):
         reasons.append("score_state_not_00_or_10")
     # Odds window: keep strict, but allow a narrow high-odds slice for early 0:0 1X2 (avoid empty flow).
-    if not (1.70 <= float(odds) <= 4.20):
-        reasons.append("odds_window_1_70_4_20")
+    if not (1.35 <= float(odds) <= 4.20):
+        reasons.append("odds_window_1_35_4_20")
     if float(odds) > 3.40:
         # Only allow high odds in a controlled early 0:0 state, and only on a team side (no draw).
         if not (sh == 0 and sa == 0 and 20 <= minute <= 35 and side in {"home", "away"} and mt == "1x2"):
@@ -419,9 +419,9 @@ async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> Foo
         strategy_name="Strategy 8: LIVE 1X2 (Winline strict controlled)",
         reasons=[
             "market=result(1X2) only (non-exotic)",
-            "minute 15..60",
+            "minute 15..70",
             "score in {0:0,1:0,0:1}",
-            "odds 1.70..4.20 (high odds only in narrow 0:0 window)",
+            "odds 1.35..4.20 (high odds only in narrow 0:0 window)",
             "no trailing side (except narrow rescue)",
             "no late draw",
             "extra strict early 0:0",
