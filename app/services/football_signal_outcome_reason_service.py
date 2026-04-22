@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from app.core.enums import BetResult, SportType
 from app.db.models.prediction_log import PredictionLog
 from app.db.models.signal import Signal
+from app.db.models.settlement import Settlement
 from app.schemas.event_result import EventResultInput
 from app.schemas.provider_models import ProviderMatch, ProviderOddsMarket, ProviderSignalCandidate
 from app.services.football_bet_formatter_service import FootballBetFormatterService
@@ -161,6 +162,132 @@ def _candidate_for_family(signal: Signal, snap0: dict, ex0: dict) -> ProviderSig
         feature_snapshot_json=snap0,
         explanation_json=ex0,
     )
+
+
+def _bucket_minute(m: int | None) -> str:
+    if m is None:
+        return "m:missing"
+    if m <= 10:
+        return "m:0-10"
+    if m <= 20:
+        return "m:11-20"
+    if m <= 30:
+        return "m:21-30"
+    if m <= 40:
+        return "m:31-40"
+    if m <= 55:
+        return "m:41-55"
+    if m <= 70:
+        return "m:56-70"
+    if m <= 80:
+        return "m:71-80"
+    return "m:81+"
+
+
+def _bucket_odds(o: float | None) -> str:
+    if o is None:
+        return "odds:missing"
+    if o < 1.45:
+        return "odds:<1.45"
+    if o < 1.70:
+        return "odds:1.45-1.69"
+    if o <= 2.20:
+        return "odds:1.70-2.20"
+    if o <= 3.40:
+        return "odds:2.21-3.40"
+    if o <= 3.80:
+        return "odds:3.41-3.80"
+    return "odds:3.81+"
+
+
+def _score_bucket(sh: int | None, sa: int | None) -> str:
+    if sh is None or sa is None:
+        return "score:missing"
+    if (sh, sa) == (0, 0):
+        return "score:0-0"
+    if (sh, sa) == (1, 0):
+        return "score:1-0"
+    if (sh, sa) == (0, 1):
+        return "score:0-1"
+    if (sh, sa) == (1, 1):
+        return "score:1-1"
+    return "score:other"
+
+
+def _selection_side(home: str | None, away: str | None, sel: str | None) -> str:
+    s = (sel or "").strip().lower().replace("ё", "е")
+    tok = s.replace("х", "x").replace(" ", "").strip(".")
+    if tok in {"x", "draw", "н", "ничья"}:
+        return "draw"
+    if tok in {"1", "p1", "п1", "home"}:
+        return "home"
+    if tok in {"2", "p2", "п2", "away"}:
+        return "away"
+    h = (home or "").strip().lower().replace("ё", "е")
+    a = (away or "").strip().lower().replace("ё", "е")
+    if h and (s == h or h in s or s in h):
+        return "home"
+    if a and (s == a or a in s or s in a):
+        return "away"
+    return "unknown"
+
+
+def _pattern_keys_for_profit_audit(
+    *,
+    signal: Signal,
+    snap0: dict[str, Any],
+    ex0: dict[str, Any],
+) -> tuple[list[str], list[str], str, str]:
+    """Return (pattern_keys, context_keys, market_pattern_key, live_state_pattern_key)."""
+    fa = snap0.get("football_analytics") if isinstance(snap0.get("football_analytics"), dict) else {}
+    minute = _int_score(fa.get("minute"))
+    sh = _int_score(fa.get("score_home"))
+    sa = _int_score(fa.get("score_away"))
+    try:
+        odds_f = float(signal.odds_at_signal) if signal.odds_at_signal is not None else None
+    except Exception:
+        odds_f = None
+
+    strategy_id = str(ex0.get("football_live_strategy_id") or "").strip() or "—"
+    fam = str(fa.get("market_family") or "").strip() or "—"
+    mt = str(signal.market_type or "").strip().lower() or "—"
+    side = _selection_side(signal.home_team, signal.away_team, signal.selection)
+
+    tags: list[str] = [
+        f"strategy:{strategy_id}",
+        f"fam:{fam}",
+        f"mt:{mt}",
+        f"side:{side}",
+        _bucket_minute(minute),
+        _score_bucket(sh, sa),
+        _bucket_odds(odds_f),
+    ]
+
+    fav = str(fa.get("favorite_side") or "").strip().lower()
+    if fav in {"home", "away"}:
+        tags.append(f"favorite:{fav}")
+        tags.append(f"is_favorite:{'yes' if side == fav else 'no'}")
+
+    # Stable pattern flags (no new data sources)
+    if (sh, sa) == (0, 0) and minute is not None:
+        tags.append("state:00")
+        if odds_f is not None and odds_f < 1.55 and minute < 40:
+            tags.append("flag:00_low_odds_fav_lt1.55_mlt40")
+        if odds_f is not None and odds_f < 2.00 and minute < 25:
+            tags.append("flag:00_no_info_lt25_odds_lt2.00")
+        if side == "home":
+            tags.append("flag:home_at_00")
+
+    ctx: list[str] = []
+    league = str(fa.get("league_or_tournament") or signal.tournament_name or "").strip()
+    if league:
+        ctx.append(f"league:{league[:60]}")
+    if bool(signal.is_live):
+        ctx.append("mode:live")
+
+    market_pattern_key = "|".join([f"fam:{fam}", f"mt:{mt}", f"side:{side}"])
+    live_state_pattern_key = "|".join([_bucket_minute(minute), _score_bucket(sh, sa), _bucket_odds(odds_f)])
+    return tags, ctx, market_pattern_key, live_state_pattern_key
 
 
 def _learning_from_snap(snap0: dict, ex0: dict) -> dict[str, Any]:
@@ -396,6 +523,50 @@ class FootballSignalOutcomeReasonService:
         merged = dict(f0)
         oa = dict(merged.get("football_outcome_audit") or {})
         oa.update((r.feature_patch or {}).get("football_outcome_audit") or {})
+        # --- Profit/Loss audit + pattern keys (machine-usable feedback loop) ---
+        st_row = (
+            (await session.execute(select(Settlement).where(Settlement.signal_id == int(signal.id)).limit(1)))
+            .scalars()
+            .first()
+        )
+        profit_loss = None
+        try:
+            profit_loss = st_row.profit_loss if st_row is not None else None
+        except Exception:
+            profit_loss = None
+        won_or_lost = bet_result.value
+        profit_class = "neutral"
+        try:
+            if bet_result == BetResult.WIN:
+                profit_class = "profitable"
+            elif bet_result == BetResult.LOSE:
+                profit_class = "unprofitable"
+            elif bet_result == BetResult.VOID:
+                profit_class = "neutral"
+            else:
+                # fallback from profit_loss if present
+                if profit_loss is not None:
+                    plf = float(profit_loss)
+                    profit_class = "profitable" if plf > 1e-9 else ("unprofitable" if plf < -1e-9 else "neutral")
+        except Exception:
+            profit_class = "neutral"
+
+        pattern_keys, context_keys, market_pattern_key, live_state_pattern_key = _pattern_keys_for_profit_audit(
+            signal=signal,
+            snap0=merged,
+            ex0=e0,
+        )
+        oa.update(
+            {
+                "won_or_lost": won_or_lost,
+                "signal_profit_class": profit_class,
+                "profit_loss": (str(profit_loss) if profit_loss is not None else None),
+                "signal_pattern_keys": list(pattern_keys),
+                "signal_context_keys": list(context_keys),
+                "market_pattern_key": market_pattern_key,
+                "live_state_pattern_key": live_state_pattern_key,
+            }
+        )
         rat0 = e0.get("football_live_signal_rationale")
         if isinstance(rat0, dict):
             oa["pre_send_why_selected_codes"] = list(rat0.get("why_selected_codes") or [])

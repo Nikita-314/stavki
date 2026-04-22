@@ -31,11 +31,124 @@ from app.services.football_signal_send_filter_service import FootballSignalSendF
 
 # Win-rate centered at 0.5; keep per-feature impact small.
 # Calibrated after OFF vs ON harness: stronger bite when history exists; still bounded.
-_MIN_SAMPLES_TAG = 4
-_MIN_SAMPLES_FAMILY = 8
+_MIN_SAMPLES_TAG = 15
+_MIN_SAMPLES_FAMILY = 25
 _MAX_ABS_PER_KEY = 1.15
 _MAX_ABS_TOTAL = 3.5
 _TAG_RATE_SCALE = 5.0  # (rate - 0.5) * scale before capping
+
+
+def _bucket_minute(m: int | None) -> str:
+    if m is None:
+        return "m:missing"
+    if m <= 10:
+        return "m:0-10"
+    if m <= 20:
+        return "m:11-20"
+    if m <= 30:
+        return "m:21-30"
+    if m <= 40:
+        return "m:31-40"
+    if m <= 55:
+        return "m:41-55"
+    if m <= 70:
+        return "m:56-70"
+    if m <= 80:
+        return "m:71-80"
+    return "m:81+"
+
+
+def _bucket_odds(o: float | None) -> str:
+    if o is None:
+        return "odds:missing"
+    if o < 1.45:
+        return "odds:<1.45"
+    if o < 1.70:
+        return "odds:1.45-1.69"
+    if o <= 2.20:
+        return "odds:1.70-2.20"
+    if o <= 3.40:
+        return "odds:2.21-3.40"
+    if o <= 3.80:
+        return "odds:3.41-3.80"
+    return "odds:3.81+"
+
+
+def _score_bucket(sh: int | None, sa: int | None) -> str:
+    if sh is None or sa is None:
+        return "score:missing"
+    if (sh, sa) == (0, 0):
+        return "score:0-0"
+    if (sh, sa) == (1, 0):
+        return "score:1-0"
+    if (sh, sa) == (0, 1):
+        return "score:0-1"
+    if (sh, sa) == (1, 1):
+        return "score:1-1"
+    return "score:other"
+
+
+def _selection_side(candidate: ProviderSignalCandidate) -> str:
+    sel = str(candidate.market.selection or "").strip().lower().replace("ё", "е")
+    tok = sel.replace("х", "x").replace(" ", "").strip(".")
+    if tok in {"x", "draw", "н", "ничья"}:
+        return "draw"
+    if tok in {"1", "p1", "п1", "home"}:
+        return "home"
+    if tok in {"2", "p2", "п2", "away"}:
+        return "away"
+    home = str(candidate.match.home_team or "").strip().lower().replace("ё", "е")
+    away = str(candidate.match.away_team or "").strip().lower().replace("ё", "е")
+    if home and (sel == home or home in sel or sel in home):
+        return "home"
+    if away and (sel == away or away in sel or sel in away):
+        return "away"
+    return "unknown"
+
+
+def _pattern_tags(candidate: ProviderSignalCandidate, analytics: dict[str, Any], market_family: str) -> list[str]:
+    """Stable pattern keys for learning; must match between preview and settled history."""
+    fa = analytics or {}
+    minute = _minute_from_analytics(fa)
+    try:
+        sh = int(fa.get("score_home")) if fa.get("score_home") is not None else None
+    except (TypeError, ValueError):
+        sh = None
+    try:
+        sa = int(fa.get("score_away")) if fa.get("score_away") is not None else None
+    except (TypeError, ValueError):
+        sa = None
+    try:
+        odds_f = float(candidate.market.odds_value) if candidate.market.odds_value is not None else None
+    except Exception:
+        odds_f = None
+
+    sid = str((candidate.explanation_json or {}).get("football_live_strategy_id") or "").strip() or "—"
+    fam = market_family or str(fa.get("market_family") or "").strip() or "—"
+    mt = str(candidate.market.market_type or "").strip().lower() or "—"
+    side = _selection_side(candidate)
+    tags: list[str] = [
+        f"strategy:{sid}",
+        f"fam:{fam}",
+        f"mt:{mt}",
+        f"side:{side}",
+        _bucket_minute(minute),
+        _score_bucket(sh, sa),
+        _bucket_odds(odds_f),
+    ]
+    fav = str(fa.get("favorite_side") or "").strip().lower()
+    if fav in {"home", "away"}:
+        tags.append(f"favorite:{fav}")
+        tags.append(f"is_favorite:{'yes' if side == fav else 'no'}")
+    if sh == 0 and sa == 0 and minute is not None:
+        tags.append("state:00")
+        if odds_f is not None and odds_f < 1.55 and minute < 40:
+            tags.append("flag:00_low_odds_fav_lt1.55_mlt40")
+        if odds_f is not None and odds_f < 2.00 and minute < 25:
+            tags.append("flag:00_no_info_lt25_odds_lt2.00")
+        if side == "home":
+            tags.append("flag:home_at_00")
+    return tags
 
 
 @dataclass
@@ -87,6 +200,11 @@ def preview_live_adaptive_tag_keys(
     meta: dict[str, Any] = {"market_family_resolved": fam}
 
     tags.append(f"fam:{fam}")
+    # Pattern tags: strategy/side/minute/score/odds/favorite/flags (used for win/lose feedback loop)
+    try:
+        tags.extend(_pattern_tags(candidate, analytics, fam))
+    except Exception:
+        meta["pattern_tags_error"] = True
 
     fa = analytics or {}
     h, a = fa.get("score_home"), fa.get("score_away")
@@ -174,6 +292,8 @@ async def build_live_adaptive_snapshot(
 
     wins_map: dict[str, int] = defaultdict(int)
     losses_map: dict[str, int] = defaultdict(int)
+    profit_sum: dict[str, float] = defaultdict(float)
+    odds_sum: dict[str, float] = defaultdict(float)
 
     used_rationale = 0
     for signal, st in rows:
@@ -181,12 +301,12 @@ async def build_live_adaptive_snapshot(
             continue
         pl0 = min(signal.prediction_logs, key=lambda p: p.id)
         ex0 = dict(pl0.explanation_json or {})
+        fs0 = dict(pl0.feature_snapshot_json or {})
         rat = ex0.get("football_live_signal_rationale")
-        if not isinstance(rat, dict):
-            continue
-        used_rationale += 1
-        codes = [str(x) for x in (rat.get("why_selected_codes") or []) if x]
-        warns = rat.get("warnings") if isinstance(rat.get("warnings"), dict) else {}
+        if isinstance(rat, dict):
+            used_rationale += 1
+        codes = [str(x) for x in ((rat.get("why_selected_codes") or []) if isinstance(rat, dict) else []) if x]
+        warns = (rat.get("warnings") if isinstance(rat, dict) and isinstance(rat.get("warnings"), dict) else {})
 
         cand = ProviderSignalCandidate(
             match=ProviderMatch(
@@ -221,14 +341,44 @@ async def build_live_adaptive_snapshot(
         )
         fam = fam_svc.get_market_family(cand)
         is_win = st.result == BetResult.WIN
+        try:
+            plf = float(st.profit_loss) if st.profit_loss is not None else (1.0 if is_win else -1.0)
+        except Exception:
+            plf = 1.0 if is_win else -1.0
+        try:
+            odds_f = float(signal.odds_at_signal) if signal.odds_at_signal is not None else None
+        except Exception:
+            odds_f = None
+
+        # Prefer stored pattern keys from settlement audit (computed at settle time).
+        stored_keys: list[str] = []
+        try:
+            aud = fs0.get("football_outcome_audit") if isinstance(fs0.get("football_outcome_audit"), dict) else {}
+            sk = aud.get("signal_pattern_keys")
+            if isinstance(sk, list):
+                stored_keys = [str(x) for x in sk if x]
+        except Exception:
+            stored_keys = []
+        # Fall back to live-computed pattern tags if audit absent.
+        fa = fs0.get("football_analytics") if isinstance(fs0.get("football_analytics"), dict) else {}
+        if not stored_keys:
+            try:
+                stored_keys = _pattern_tags(cand, fa, fam)
+            except Exception:
+                stored_keys = []
 
         def bump(key: str) -> None:
             if is_win:
                 wins_map[key] += 1
             else:
                 losses_map[key] += 1
+            profit_sum[key] += float(plf)
+            if odds_f is not None:
+                odds_sum[key] += float(odds_f)
 
         bump(f"fam:{fam}")
+        for k in stored_keys:
+            bump(str(k))
         for code in codes:
             bump(f"why:{code}")
         for wk, wv in warns.items():
@@ -238,7 +388,7 @@ async def build_live_adaptive_snapshot(
 
     all_keys = set(wins_map) | set(losses_map)
     deltas: dict[str, float] = {}
-    stats: dict[str, dict[str, int]] = {}
+    stats: dict[str, dict[str, Any]] = {}
     for key in sorted(all_keys):
         w = wins_map.get(key, 0)
         l = losses_map.get(key, 0)
@@ -247,9 +397,34 @@ async def build_live_adaptive_snapshot(
         else:
             min_s = _MIN_SAMPLES_TAG
         d = _delta_from_counts(w, l, min_samples=min_s)
-        stats[key] = {"wins": w, "losses": l, "n": w + l, "delta": round(d, 4)}
+        n = w + l
+        ps = float(profit_sum.get(key, 0.0) or 0.0)
+        os = float(odds_sum.get(key, 0.0) or 0.0)
+        stats[key] = {
+            "wins": w,
+            "losses": l,
+            "n": n,
+            "delta": round(d, 4),
+            "profit_sum": round(ps, 4),
+            "profit_avg": (round(ps / n, 4) if n > 0 else 0.0),
+            "avg_odds": (round(os / n, 4) if n > 0 and os > 0 else None),
+        }
         if abs(d) > 1e-12:
             deltas[key] = d
+
+    # Top patterns for diagnostics
+    def _roi_sort_key(item: tuple[str, dict[str, Any]]) -> float:
+        _k, v = item
+        try:
+            n = int(v.get("n") or 0)
+            if n < _MIN_SAMPLES_TAG:
+                return -1e9
+            return float(v.get("profit_avg") or 0.0)
+        except Exception:
+            return -1e9
+
+    best = sorted(stats.items(), key=_roi_sort_key, reverse=True)[:10]
+    worst = sorted(stats.items(), key=_roi_sort_key)[:10]
 
     return FootballLiveAdaptiveSnapshot(
         deltas=deltas,
@@ -262,6 +437,10 @@ async def build_live_adaptive_snapshot(
             "min_samples_family": _MIN_SAMPLES_FAMILY,
             "max_abs_per_key": _MAX_ABS_PER_KEY,
             "max_abs_total": _MAX_ABS_TOTAL,
+            "profitable_pattern_count": sum(1 for _k, v in stats.items() if int(v.get("n") or 0) >= _MIN_SAMPLES_TAG and float(v.get("profit_avg") or 0.0) > 0.0),
+            "unprofitable_pattern_count": sum(1 for _k, v in stats.items() if int(v.get("n") or 0) >= _MIN_SAMPLES_TAG and float(v.get("profit_avg") or 0.0) < 0.0),
+            "top_best_patterns": [{"key": k, **v} for k, v in best if isinstance(v, dict)],
+            "top_worst_patterns": [{"key": k, **v} for k, v in worst if isinstance(v, dict)],
         },
     )
 
