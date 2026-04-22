@@ -3088,12 +3088,14 @@ class AutoSignalService:
         candidates_to_ingest = pre_strategy
 
         # --- Explicit strategy gate (primary signal definition) ---
+        # Pipeline: after integrity -> S8 first -> S9 second -> scoring -> final gate.
         strategy_passed: list[ProviderSignalCandidate] = []
         strategy_stats: dict[str, int] = {}
         strategy_by_eid: dict[str, str] = {}
         s1_fail: dict[str, int] = {}
         s2_fail: dict[str, int] = {}
         s8_fail: dict[str, int] = {}
+        s9_fail: dict[str, int] = {}
         strategy_rejected_samples: list[dict[str, object]] = []
         strategy_rejected_limit = 5
         strategy_gate_debug: dict[str, object] = {}
@@ -3102,6 +3104,14 @@ class AutoSignalService:
         from app.services.football_bet_formatter_service import FootballBetFormatterService
 
         fmt = FootballBetFormatterService()
+        s8_passed: list[ProviderSignalCandidate] = []
+        s9_passed: list[ProviderSignalCandidate] = []
+        s9_candidates: list[ProviderSignalCandidate] = []
+        from app.services.football_live_strategy_service import (
+            evaluate_s8_live_1x2_winline_strict,
+            evaluate_s9_live_totals_over_controlled,
+        )
+
         for c in candidates_to_ingest:
             try:
                 fam0 = family_svc.get_market_family(c)
@@ -3122,16 +3132,40 @@ class AutoSignalService:
                 for r in (d2.reasons or [])[:12]:
                     s2_fail[str(r)] = int(s2_fail.get(str(r), 0) or 0) + 1
 
-            d0 = await evaluate_football_live_strategies_async(c)
-            if not d0.passed or not d0.strategy_id:
-                # Keep a short breakdown for the primary strategy (S8) by reason strings.
-                for r in (d0.reasons or [])[:12]:
+            # --- S8 first ---
+            d8 = await evaluate_s8_live_1x2_winline_strict(c)
+            if not d8.passed:
+                for r in (d8.reasons or [])[:12]:
                     s8_fail[str(r)] = int(s8_fail.get(str(r), 0) or 0) + 1
+                s9_candidates.append(c)
+            else:
+                eid = _football_event_id(c)
+                if eid and eid not in strategy_by_eid:
+                    strategy_by_eid[eid] = d8.strategy_id or ""
+                strategy_stats[str(d8.strategy_id or "S8_LIVE_1X2_WINLINE_STRICT")] = int(
+                    strategy_stats.get(str(d8.strategy_id or "S8_LIVE_1X2_WINLINE_STRICT"), 0) or 0
+                ) + 1
+                prev_expl = dict(c.explanation_json or {})
+                prev_expl["football_live_strategy_id"] = d8.strategy_id
+                prev_expl["football_live_strategy_name"] = d8.strategy_name
+                prev_expl["football_live_strategy_reasons"] = list(d8.reasons or [])
+                s8_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
+
+        # --- S9 second (only for candidates that failed S8) ---
+        for c in s9_candidates:
+            d9 = await evaluate_s9_live_totals_over_controlled(c)
+            if not d9.passed:
+                for r in (d9.reasons or [])[:12]:
+                    s9_fail[str(r)] = int(s9_fail.get(str(r), 0) or 0) + 1
                 if len(strategy_rejected_samples) < strategy_rejected_limit:
                     try:
                         eid0 = _football_event_id(c) or ""
                         fam0 = family_svc.get_market_family(c)
-                        lc = (c.feature_snapshot_json or {}).get("football_analytics") if isinstance(c.feature_snapshot_json, dict) else None
+                        lc = (
+                            (c.feature_snapshot_json or {}).get("football_analytics")
+                            if isinstance(c.feature_snapshot_json, dict)
+                            else None
+                        )
                         minute0 = None
                         sh0 = None
                         sa0 = None
@@ -3158,21 +3192,27 @@ class AutoSignalService:
                                 "market_family": str(fam0 or ""),
                                 "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
                                 "odds": (str(c.market.odds_value) if c.market.odds_value is not None else None),
-                                "s8_reasons": list(d0.reasons or [])[:12],
+                                "strategy": "S9_LIVE_TOTALS_OVER_CONTROLLED",
+                                "reasons": list(d9.reasons or [])[:12],
                             }
                         )
                     except Exception:
                         pass
                 continue
+
             eid = _football_event_id(c)
             if eid and eid not in strategy_by_eid:
-                strategy_by_eid[eid] = d0.strategy_id
-            strategy_stats[d0.strategy_id] = int(strategy_stats.get(d0.strategy_id, 0) or 0) + 1
+                strategy_by_eid[eid] = d9.strategy_id or ""
+            strategy_stats[str(d9.strategy_id or "S9_LIVE_TOTALS_OVER_CONTROLLED")] = int(
+                strategy_stats.get(str(d9.strategy_id or "S9_LIVE_TOTALS_OVER_CONTROLLED"), 0) or 0
+            ) + 1
             prev_expl = dict(c.explanation_json or {})
-            prev_expl["football_live_strategy_id"] = d0.strategy_id
-            prev_expl["football_live_strategy_name"] = d0.strategy_name
-            prev_expl["football_live_strategy_reasons"] = list(d0.reasons or [])
-            strategy_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
+            prev_expl["football_live_strategy_id"] = d9.strategy_id
+            prev_expl["football_live_strategy_name"] = d9.strategy_name
+            prev_expl["football_live_strategy_reasons"] = list(d9.reasons or [])
+            s9_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
+
+        strategy_passed = [*s8_passed, *s9_passed]
         candidates_to_ingest = strategy_passed
         strategy_gate_debug = {
             "strategy_stats": dict(strategy_stats),
@@ -3182,9 +3222,16 @@ class AutoSignalService:
             "strategy_breakdown_s1": dict(sorted(s1_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s2": dict(sorted(s2_fail.items(), key=lambda kv: kv[1], reverse=True)[:50]),
             "strategy_breakdown_s8": dict(sorted(s8_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+            "strategy_breakdown_s9": dict(sorted(s9_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+            "after_s8": int(len(s8_passed)),
+            "after_s9": int(len(strategy_passed)),
             "strategy_rejected_samples": strategy_rejected_samples,
         }
-        diagnostics.update(football_live_cycle_after_strategy=int(len(candidates_to_ingest)))
+        diagnostics.update(
+            football_live_cycle_after_s8=int(len(s8_passed)),
+            football_live_cycle_after_s9=int(len(strategy_passed)),
+            football_live_cycle_after_strategy=int(len(strategy_passed)),
+        )
 
         if not candidates_to_ingest:
             diagnostics.update(

@@ -393,6 +393,101 @@ async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> Foo
     )
 
 
+async def evaluate_s9_live_totals_over_controlled(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
+    """Secondary: LIVE match total OVER with strict totals controls (Winline-only)."""
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+
+    reasons: list[str] = []
+    fam_svc = FootballSignalSendFilterService()
+    fam = fam_svc.get_market_family(c)
+    if fam != "totals":
+        reasons.append("market_not_totals")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    mt = _norm(str(c.market.market_type or ""))
+    if mt != "total_goals":
+        reasons.append("market_type_not_total_goals")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if minute is None or sh is None or sa is None:
+        reasons.append("missing_live_context(minute/score)")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if odds is None:
+        reasons.append("missing_odds")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    # Minute window
+    if minute < 20 or minute > 70:
+        reasons.append("minute_window_20_70")
+
+    # Score window
+    allowed_scores = {(0, 0), (1, 0), (0, 1), (1, 1)}
+    if (sh, sa) not in allowed_scores:
+        reasons.append("score_state_not_allowed")
+    if (sh + sa) >= 3:
+        reasons.append("goals_3plus_block")
+
+    # Odds window
+    if not (1.50 <= float(odds) <= 2.20):
+        reasons.append("odds_window_1_50_2_20")
+
+    # Only OVER, match total only, line allowlist
+    if not _is_over_selection(str(c.market.selection or "")):
+        reasons.append("not_pure_over")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    fmt = FootballBetFormatterService()
+    ctx = fmt.describe_total_context(
+        market_type=c.market.market_type,
+        market_label=c.market.market_label,
+        selection=c.market.selection,
+        home_team=c.match.home_team,
+        away_team=c.match.away_team,
+        section_name=c.market.section_name,
+        subsection_name=c.market.subsection_name,
+    )
+    line_f: float | None = None
+    target_scope: str | None = None
+    if ctx and ctx.total_line:
+        try:
+            line_f = float(str(ctx.total_line).replace(",", "."))
+        except ValueError:
+            line_f = None
+        target_scope = ctx.target_scope
+    if line_f is None:
+        reasons.append("cannot_parse_total_line")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if line_f not in (1.5, 2.0, 2.5):
+        reasons.append("total_line_not_1_5_2_0_2_5")
+
+    # Block team totals / weird scopes
+    if target_scope:
+        ts = _norm(target_scope)
+        if "match" not in ts and "общ" not in ts and "total" not in ts:
+            reasons.append("not_match_total_scope")
+
+    if reasons:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    return FootballLiveStrategyDecision(
+        passed=True,
+        strategy_id="S9_LIVE_TOTALS_OVER_CONTROLLED",
+        strategy_name="Strategy 9: LIVE TOTALS OVER (controlled)",
+        reasons=[
+            "market=totals(total_goals) over",
+            "line in {1.5,2.0,2.5} (match total only)",
+            "minute 20..70",
+            "score in {0:0,1:0,0:1,1:1}",
+            "odds 1.50..2.20",
+            "block goals>=3",
+        ],
+    )
+
+
 def evaluate_s2_live_total_over_need_1_2(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
     lc = _lc_from_candidate(c)
     minute = _as_int(lc.get("minute"))
@@ -541,8 +636,12 @@ async def evaluate_football_live_strategies_async(c: ProviderSignalCandidate) ->
     d8 = await evaluate_s8_live_1x2_winline_strict(c)
     if d8.passed:
         return d8
+    d9 = await evaluate_s9_live_totals_over_controlled(c)
+    if d9.passed:
+        return d9
     rr: list[str] = []
     rr.extend(list(getattr(d8, "reasons", None) or [])[:12])
+    rr.extend(list(getattr(d9, "reasons", None) or [])[:12])
     if not rr:
         rr = ["no_strategy_match"]
     return FootballLiveStrategyDecision(passed=False, reasons=rr)
