@@ -12,7 +12,56 @@ logger = logging.getLogger(__name__)
 
 
 def _norm_team(s: str) -> str:
-    return (s or "").strip().lower().replace("ё", "е")
+    s0 = (s or "").strip().lower().replace("ё", "е")
+    if not s0:
+        return ""
+    # Cheap cyrillic -> latin transliteration (best-effort, for matching only).
+    tr = {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "ts",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "sch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+    s1 = "".join(tr.get(ch, ch) for ch in s0)
+    # Strip punctuation and stopwords.
+    buf: list[str] = []
+    for ch in s1:
+        if ch.isalnum() or ch.isspace():
+            buf.append(ch)
+        else:
+            buf.append(" ")
+    s2 = " ".join("".join(buf).split())
+    stop = {"fc", "fk", "sc", "cf", "cd", "ac", "kc", "bk", "u19", "u20", "u21", "u23", "women", "w", "reserves"}
+    tokens = [t for t in s2.split() if t and t not in stop]
+    return " ".join(tokens)
 
 
 def _safe_int(v: object) -> int | None:
@@ -31,9 +80,11 @@ class SportmonksFixtureLite:
     away_team: str
     home_team_id: int | None
     away_team_id: int | None
-    minute: int | None
-    score_home: int | None
-    score_away: int | None
+    minute: int | None = None
+    score_home: int | None = None
+    score_away: int | None = None
+    starting_at: str | None = None
+    league_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -144,7 +195,87 @@ class SportmonksService:
                     away_team=away_name,
                     home_team_id=home_id,
                     away_team_id=away_id,
+                    starting_at=row.get("starting_at"),
+                    league_id=_safe_int(row.get("league_id")),
                     minute=minute,
+                    score_home=sh,
+                    score_away=sa,
+                )
+            )
+        return out
+
+    def get_fixtures_between(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> list[SportmonksFixtureLite]:
+        """List fixtures for a date window (baseline mapping anchor)."""
+        if not self._require_token():
+            return []
+        url = f"{self.BASE_URL}/fixtures/between/{start_date}/{end_date}"
+        params = {"api_token": self._token, "include": "participants;scores"}
+        try:
+            with self._client() as c:
+                r = c.get(url, params=params)
+                r.raise_for_status()
+                payload = r.json()
+        except Exception as e:
+            logger.info("[SPORTMONKS] fixtures between fetch failed: %s", e)
+            return []
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            if isinstance(payload, dict) and payload.get("message"):
+                logger.info("[SPORTMONKS] fixtures between empty: %s", str(payload.get("message"))[:280])
+            return []
+
+        out: list[SportmonksFixtureLite] = []
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            fid = _safe_int(row.get("id"))
+            if fid is None:
+                continue
+            home_name = away_name = ""
+            home_id = away_id = None
+            parts = row.get("participants")
+            if isinstance(parts, list):
+                for p in parts:
+                    if not isinstance(p, dict):
+                        continue
+                    meta = p.get("meta") if isinstance(p.get("meta"), dict) else {}
+                    loc = str(meta.get("location") or p.get("location") or "").strip().lower()
+                    nm = str(p.get("name") or "")
+                    pid = _safe_int(p.get("id"))
+                    if loc == "home":
+                        home_name, home_id = nm, pid
+                    elif loc == "away":
+                        away_name, away_id = nm, pid
+            # scores: best-effort final/current
+            sh = sa = None
+            scores = row.get("scores")
+            if isinstance(scores, list):
+                for sc in scores:
+                    if not isinstance(sc, dict):
+                        continue
+                    scr = sc.get("score") if isinstance(sc.get("score"), dict) else {}
+                    hh = scr.get("home") if isinstance(scr, dict) else sc.get("home_score")
+                    aa = scr.get("away") if isinstance(scr, dict) else sc.get("away_score")
+                    hi = _safe_int(hh)
+                    ai = _safe_int(aa)
+                    if hi is None or ai is None:
+                        continue
+                    sh, sa = hi, ai
+            out.append(
+                SportmonksFixtureLite(
+                    fixture_id=fid,
+                    home_team=home_name,
+                    away_team=away_name,
+                    home_team_id=home_id,
+                    away_team_id=away_id,
+                    starting_at=row.get("starting_at"),
+                    league_id=_safe_int(row.get("league_id")),
+                    minute=_safe_int(row.get("minute")) or _safe_int(row.get("time")),
                     score_home=sh,
                     score_away=sa,
                 )
@@ -419,6 +550,26 @@ class SportmonksService:
                 return fx
         # fallback: contains match (kept conservative)
         for fx in live_fixtures:
+            if h in _norm_team(fx.home_team) and a in _norm_team(fx.away_team):
+                return fx
+        return None
+
+    @staticmethod
+    def map_winline_match_to_fixture_from_window(
+        *,
+        winline_home: str,
+        winline_away: str,
+        fixtures: list[SportmonksFixtureLite],
+    ) -> SportmonksFixtureLite | None:
+        """Match by normalized team names within a fixture window (date-based)."""
+        h = _norm_team(winline_home)
+        a = _norm_team(winline_away)
+        if not h or not a:
+            return None
+        for fx in fixtures:
+            if _norm_team(fx.home_team) == h and _norm_team(fx.away_team) == a:
+                return fx
+        for fx in fixtures:
             if h in _norm_team(fx.home_team) and a in _norm_team(fx.away_team):
                 return fx
         return None

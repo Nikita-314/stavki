@@ -2790,13 +2790,17 @@ class AutoSignalService:
         ]
 
         # --- Sportmonks baseline enrichment (pre-match) ---
-        # We do NOT rely on Sportmonks live fixtures (often empty on limited plans).
+        # Use fixture/date-based mapping to avoid team search dependency.
         sportmonks_baseline_enriched = 0
         sportmonks_baseline_missing = 0
+        sportmonks_fixture_mapped = 0
+        sportmonks_fixture_not_mapped = 0
         try:
             from app.services.football_sportmonks_baseline_service import FootballSportmonksBaselineService
+            from app.services.sportmonks_service import SportmonksService
 
             bsvc = FootballSportmonksBaselineService()
+            sm = SportmonksService()
             by_eid: dict[str, list[int]] = {}
             for idx, c in enumerate(candidates_to_ingest):
                 eid = str(getattr(getattr(c, "match", None), "external_event_id", "") or "").strip()
@@ -2804,12 +2808,45 @@ class AutoSignalService:
                     continue
                 by_eid.setdefault(eid, []).append(idx)
 
+            # Load Sportmonks fixtures for a small date window (UTC) once per cycle.
+            from datetime import timedelta
+
+            now = datetime.now(timezone.utc)
+            start_date = (now - timedelta(days=1)).date().isoformat()
+            end_date = (now + timedelta(days=1)).date().isoformat()
+            window_fx = sm.get_fixtures_between(start_date=start_date, end_date=end_date)
+
             for eid, idxs in by_eid.items():
                 c0 = candidates_to_ingest[idxs[0]]
                 home = str(getattr(getattr(c0, "match", None), "home_team", "") or "")
                 away = str(getattr(getattr(c0, "match", None), "away_team", "") or "")
-                bh = bsvc.build_team_baseline(home)
-                ba = bsvc.build_team_baseline(away)
+                fx = sm.map_winline_match_to_fixture_from_window(
+                    winline_home=home,
+                    winline_away=away,
+                    fixtures=window_fx,
+                )
+                if fx is None:
+                    sportmonks_fixture_not_mapped += 1
+                    logger.info("[SPORTMONKS_BASELINE] fixture_not_mapped eid=%s (%s vs %s)", eid, home[:60], away[:60])
+                    sportmonks_baseline_missing += 1
+                    continue
+                sportmonks_fixture_mapped += 1
+
+                hid = fx.home_team_id
+                aid = fx.away_team_id
+                if hid is None or aid is None:
+                    sportmonks_baseline_missing += 1
+                    logger.info(
+                        "[SPORTMONKS_BASELINE] fixture_missing_team_ids eid=%s fixture_id=%s (%s vs %s)",
+                        eid,
+                        fx.fixture_id,
+                        home[:60],
+                        away[:60],
+                    )
+                    continue
+
+                bh = bsvc.build_team_baseline_from_team_id(hid, team_name=home)
+                ba = bsvc.build_team_baseline_from_team_id(aid, team_name=away)
                 if bh.score is None or ba.score is None:
                     sportmonks_baseline_missing += 1
                     logger.info(
@@ -2835,6 +2872,9 @@ class AutoSignalService:
                     gap,
                 )
                 payload = {
+                    "sportmonks_fixture_id": fx.fixture_id,
+                    "sportmonks_starting_at": fx.starting_at,
+                    "sportmonks_league_id": fx.league_id,
                     "home": {"team": home, **(bh.factors or {}), "baseline_score": bh.score},
                     "away": {"team": away, **(ba.factors or {}), "baseline_score": ba.score},
                     "baseline_gap_home_minus_away": gap,
@@ -2845,12 +2885,17 @@ class AutoSignalService:
                     fs0["sportmonks_baseline_home"] = payload["home"]
                     fs0["sportmonks_baseline_away"] = payload["away"]
                     fs0["baseline_gap"] = payload["baseline_gap_home_minus_away"]
+                    fs0["sportmonks_fixture_id"] = payload["sportmonks_fixture_id"]
+                    fs0["sportmonks_starting_at"] = payload["sportmonks_starting_at"]
+                    fs0["sportmonks_league_id"] = payload["sportmonks_league_id"]
                     candidates_to_ingest[j] = cj.model_copy(update={"feature_snapshot_json": fs0})
         except Exception:
             logger.info("[SPORTMONKS_BASELINE] enrichment_failed", exc_info=True)
         diagnostics.update(
             football_live_sportmonks_baseline_enriched_last_cycle=int(sportmonks_baseline_enriched),
             football_live_sportmonks_baseline_missing_last_cycle=int(sportmonks_baseline_missing),
+            football_live_sportmonks_fixture_mapped_last_cycle=int(sportmonks_fixture_mapped),
+            football_live_sportmonks_fixture_not_mapped_last_cycle=int(sportmonks_fixture_not_mapped),
         )
 
         logger.info("[FOOTBALL] final before send filter: %s", len(candidates_to_ingest))

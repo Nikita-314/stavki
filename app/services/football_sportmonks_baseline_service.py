@@ -34,16 +34,17 @@ class FootballSportmonksBaselineService:
     _CACHE: dict[str, tuple[float, TeamBaseline]] = {}
     _TTL_SECONDS: float = 15 * 60.0
 
-    def build_team_baseline(self, team_name: str) -> TeamBaseline:
-        key = (team_name or "").strip().lower()
+    def build_team_baseline_from_team_id(self, team_id: int, *, team_name: str | None = None) -> TeamBaseline:
+        name_part = (team_name or str(team_id) or "").strip()
+        key = f"id:{int(team_id)}:{name_part.lower()}"
         now = time.time()
         hit = self._CACHE.get(key)
         if hit and (now - hit[0]) <= self._TTL_SECONDS:
             return hit[1]
 
         sm = SportmonksService()
-        tid = sm.find_team_id_by_name(team_name)
-        summ = sm.get_team_last_fixtures_summary(tid, lookback_days=60, limit=5) if tid else None
+        tid = int(team_id)
+        summ = sm.get_team_last_fixtures_summary(tid, lookback_days=60, limit=5)
         s = (summ or {}).get("summary") if isinstance(summ, dict) else {}
         played = int(s.get("played") or 0) if isinstance(s, dict) else 0
         ppg = _safe_float(s.get("ppg")) if isinstance(s, dict) else None
@@ -68,7 +69,7 @@ class FootballSportmonksBaselineService:
         }
         tb = TeamBaseline(
             team_id=tid,
-            team_name=team_name,
+            team_name=str(team_name or ""),
             played=played,
             ppg=ppg,
             avg_gf=avg_gf,
@@ -76,6 +77,32 @@ class FootballSportmonksBaselineService:
             score=score,
             factors=factors,
         )
+        self._CACHE[key] = (now, tb)
+        return tb
+
+    def build_team_baseline(self, team_name: str) -> TeamBaseline:
+        """Non-required legacy path (may be unavailable on some subscriptions)."""
+        key = (team_name or "").strip().lower()
+        now = time.time()
+        hit = self._CACHE.get(key)
+        if hit and (now - hit[0]) <= self._TTL_SECONDS:
+            return hit[1]
+        sm = SportmonksService()
+        tid = sm.find_team_id_by_name(team_name)
+        if tid is None:
+            tb = TeamBaseline(
+                team_id=None,
+                team_name=team_name,
+                played=0,
+                ppg=None,
+                avg_gf=None,
+                avg_ga=None,
+                score=None,
+                factors={"team_id": None, "played": 0, "ppg": None, "avg_gf": None, "avg_ga": None},
+            )
+            self._CACHE[key] = (now, tb)
+            return tb
+        tb = self.build_team_baseline_from_team_id(tid, team_name=team_name)
         self._CACHE[key] = (now, tb)
         return tb
 
