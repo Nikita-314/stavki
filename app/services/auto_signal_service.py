@@ -3078,6 +3078,7 @@ class AutoSignalService:
         flow_family: dict[str, int] = {}
         flow_market_type: dict[str, int] = {}
         flow_norm_bet: dict[str, int] = {}
+        flow_result_subtype: dict[str, int] = {}
         flow_total_scope: dict[str, int] = {}
         flow_ou: dict[str, int] = {}
         flow_line: dict[str, int] = {}
@@ -3177,6 +3178,32 @@ class AutoSignalService:
                 return f"totals:{ou}:{mt or 'other'}"
             return f"{family}:{mt or 'other'}"
 
+        def _result_subtype_local(cand: ProviderSignalCandidate) -> str:
+            mt0 = str(cand.market.market_type or "").strip().lower()
+            lbl = " ".join(
+                [
+                    str(cand.market.section_name or ""),
+                    str(cand.market.subsection_name or ""),
+                    str(cand.market.market_label or ""),
+                    str(cand.market.selection or ""),
+                ]
+            ).lower()
+            if "следующий гол" in lbl or "next goal" in lbl:
+                return "next_goal"
+            if "остат" in lbl or "remainder" in lbl or "win the rest" in lbl or "выиграет остаток" in lbl:
+                return "remainder"
+            if "европ" in lbl or "european" in lbl or "фора" in lbl or "handicap" in lbl or "hcp" in lbl:
+                return "european_handicap_or_handicap"
+            if "интервал" in lbl or "с минут" in lbl or "interval" in lbl:
+                return "interval_result"
+            if "1-й тайм" in lbl or "2-й тайм" in lbl or "тайм" in lbl or "half" in lbl:
+                return "period_result"
+            if _is_exotic_result_like(cand):
+                return "exotic_result_like"
+            if mt0 in {"1x2", "match_winner"}:
+                return "ft_1x2_candidate"
+            return "other_result_like"
+
         pre_strategy: list[ProviderSignalCandidate] = []
         for cand in candidates_to_ingest:
             try:
@@ -3191,6 +3218,8 @@ class AutoSignalService:
                 _bump(flow_family, str(family or "—"))
                 _bump(flow_market_type, str(cand.market.market_type or "—"))
                 _bump(flow_norm_bet, _norm_bet_type(cand, str(family or "")))
+                if str(family or "") == "result":
+                    _bump(flow_result_subtype, _result_subtype_local(cand))
                 minute0 = None
                 sh0 = None
                 sa0 = None
@@ -3392,6 +3421,7 @@ class AutoSignalService:
                 "market_family": dict(sorted(flow_family.items(), key=lambda kv: kv[1], reverse=True)),
                 "market_type": dict(sorted(flow_market_type.items(), key=lambda kv: kv[1], reverse=True)[:80]),
                 "normalized_bet_type": dict(sorted(flow_norm_bet.items(), key=lambda kv: kv[1], reverse=True)[:120]),
+                "result_subtype": dict(sorted(flow_result_subtype.items(), key=lambda kv: kv[1], reverse=True)),
                 "totals_over_under": dict(sorted(flow_ou.items(), key=lambda kv: kv[1], reverse=True)),
                 "totals_scope": dict(sorted(flow_total_scope.items(), key=lambda kv: kv[1], reverse=True)[:40]),
                 "totals_line": dict(sorted(flow_line.items(), key=lambda kv: kv[1], reverse=True)[:40]),

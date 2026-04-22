@@ -129,6 +129,38 @@ def _is_exotic_result_market(c: ProviderSignalCandidate) -> bool:
     return any(b in txt for b in bad)
 
 
+def _result_subtype(c: ProviderSignalCandidate) -> str:
+    """Classify result-like markets into subtypes; used to keep FT 1X2 clean."""
+    mt = _norm(str(c.market.market_type or ""))
+    txt = " ".join(
+        [
+            str(c.market.section_name or ""),
+            str(c.market.subsection_name or ""),
+            str(c.market.market_label or ""),
+            str(c.market.selection or ""),
+        ]
+    )
+    t = _norm(txt)
+
+    if "следующий гол" in t or "next goal" in t:
+        return "next_goal"
+    if "остат" in t or "remainder" in t or "win the rest" in t or "выиграет остаток" in t:
+        return "remainder"
+    if "европ" in t or "european" in t or "фора" in t or "handicap" in t or "hcp" in t:
+        return "european_handicap_or_handicap"
+    if "интервал" in t or "с минут" in t or "interval" in t:
+        return "interval_result"
+    if "1-й тайм" in t or "2-й тайм" in t or "тайм" in t or "half" in t:
+        return "period_result"
+    if _is_exotic_result_market(c):
+        return "exotic_result_like"
+
+    if mt in {"1x2", "match_winner"}:
+        # Treat as FT only if it doesn't look like a period/interval/remainder market.
+        return "ft_1x2_candidate"
+    return "other_result_like"
+
+
 def _min_goals_strict_over(line: float) -> int:
     # strict over: 2.5 => need 3 total goals
     return int(line + 0.5)
@@ -324,6 +356,10 @@ async def evaluate_s8_live_1x2_winline_strict(c: ProviderSignalCandidate) -> Foo
     mt = _norm(str(c.market.market_type or ""))
     if mt not in {"1x2", "match_winner"}:
         reasons.append("market_type_not_1x2")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    st = _result_subtype(c)
+    if st != "ft_1x2_candidate":
+        reasons.append(f"result_subtype_not_ft_1x2:{st}")
         return FootballLiveStrategyDecision(passed=False, reasons=reasons)
     if _is_exotic_result_market(c):
         reasons.append("market_exotic_result_like")
