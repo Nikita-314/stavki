@@ -890,9 +890,21 @@ async def cmd_openai_live_learning_stats(message: Message, sessionmaker: async_s
         *([f"  {k}  n={n}  profit_avg={avg:.3f}" for k, n, avg in ranked_best] or ["  (нет, выборка мала)"]),
         "",
         f"active_openai_penalties: {len(penalties)}",
-        *([f\"  {r.get('key')}: delta={r.get('delta')} n={r.get('n')} W/L={r.get('wins')}/{r.get('losses')}\" for r in penalties] or []),
+        *(
+            [
+                f"  {r.get('key')}: delta={r.get('delta')} n={r.get('n')} W/L={r.get('wins')}/{r.get('losses')}"
+                for r in penalties
+            ]
+            or []
+        ),
         f"active_openai_boosts: {len(boosts)}",
-        *([f\"  {r.get('key')}: delta={r.get('delta')} n={r.get('n')} W/L={r.get('wins')}/{r.get('losses')}\" for r in boosts] or []),
+        *(
+            [
+                f"  {r.get('key')}: delta={r.get('delta')} n={r.get('n')} W/L={r.get('wins')}/{r.get('losses')}"
+                for r in boosts
+            ]
+            or []
+        ),
     ]
     await _answer_long_message(message, "\n".join(lines))
 
