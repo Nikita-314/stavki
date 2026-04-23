@@ -108,6 +108,9 @@ class SignalRuntimeDiagnosticsState:
     football_live_rejected_at_send_gate: int = 0
     """Candidates scored but rejected by live send gate (classify: reject)."""
 
+    football_live_rejected_invalid_selection: int = 0
+    """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""
+
     # --- S8 value filter diagnostics (per-cycle) ---
     football_live_rejected_value_low_favorite: int = 0
     football_live_rejected_value_no_edge: int = 0

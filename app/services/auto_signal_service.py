@@ -2043,6 +2043,7 @@ class AutoSignalService:
                     football_live_cycle_candidates_before_filter=0,
                     football_live_cycle_after_send_filter=0,
                     football_live_cycle_after_integrity=0,
+                    football_live_rejected_invalid_selection=0,
                     football_live_cycle_after_score=0,
                     football_live_cycle_new_ideas_sendable=0,
                     football_live_cycle_duplicate_ideas_blocked=0,
@@ -2076,6 +2077,7 @@ class AutoSignalService:
             football_live_cycle_candidates_before_filter=0,
             football_live_cycle_after_send_filter=0,
             football_live_cycle_after_integrity=0,
+            football_live_rejected_invalid_selection=0,
             football_live_cycle_after_score=0,
             football_live_cycle_new_ideas_sendable=0,
             football_live_cycle_duplicate_ideas_blocked=0,
@@ -3319,6 +3321,43 @@ class AutoSignalService:
             except Exception:
                 pre_strategy.append(cand)
         candidates_to_ingest = pre_strategy
+
+        # --- Strict 1X2 selection validation (no fallbacks like "да") ---
+        # For result/1X2-like markets we ONLY accept selection tokens 1/2/X.
+        def _strict_1x2_token(raw_sel: str) -> str | None:
+            tok = (raw_sel or "").strip()
+            if not tok:
+                return None
+            t = tok.upper().replace("Х", "X").replace(" ", "")
+            if t in {"1", "2", "X"}:
+                return t
+            return None
+
+        validated_ingest: list[ProviderSignalCandidate] = []
+        rejected_invalid_selection = 0
+        for cand in candidates_to_ingest:
+            try:
+                fam = family_svc.get_market_family(cand)
+                mt = _norm_side(str(cand.market.market_type or ""))
+                if fam == "result" and mt in {"1x2", "match_winner"}:
+                    tok = _strict_1x2_token(str(cand.market.selection or ""))
+                    if tok is None:
+                        rejected_invalid_selection += 1
+                        continue
+                    try:
+                        m2 = cand.market.model_copy(update={"selection": tok})
+                        cand = cand.model_copy(update={"market": m2})
+                    except Exception:
+                        pass
+                validated_ingest.append(cand)
+            except Exception:
+                validated_ingest.append(cand)
+
+        if rejected_invalid_selection:
+            prev_bad = int(diagnostics.get_state().get("football_live_rejected_invalid_selection") or 0)
+            diagnostics.update(football_live_rejected_invalid_selection=prev_bad + int(rejected_invalid_selection))
+
+        candidates_to_ingest = validated_ingest
         side_after_integrity = _side_breakdown(list(candidates_to_ingest))
 
         # --- Explicit strategy gate (primary signal definition) ---

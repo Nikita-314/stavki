@@ -95,61 +95,8 @@ class NotificationService:
         return None
 
     def _football_analysis_lines(self, report: SignalAnalyticsReport) -> list[str]:
-        prediction_logs = report.prediction_logs or []
-        if not prediction_logs:
-            return []
-        pl0 = prediction_logs[0]
-        snap = pl0.feature_snapshot_json or {}
-        expl = pl0.explanation_json or {}
-
-        strat_id = str(expl.get("football_live_strategy_id") or "").strip()
-        strat_name = str(expl.get("football_live_strategy_name") or "").strip()
-        strat_reasons = expl.get("football_live_strategy_reasons")
-        strat_reason_lines = (
-            [str(x) for x in strat_reasons if str(x).strip()] if isinstance(strat_reasons, list) else []
-        )
-        if strat_id or strat_name:
-            title = strat_name or strat_id
-            reason_lines: list[str] = [f"- Стратегия: {title}"]
-            if strat_reason_lines:
-                reason_lines.append("- Условия:")
-                reason_lines.extend([f"  • {x}" for x in strat_reason_lines[:8]])
-            return ["", "🧠 Анализ:", "- Причины:", *reason_lines]
-
-        codes = list(expl.get("football_scoring_reason_codes") or [])
-        fs = snap.get("football_scoring") or {}
-        if not codes and fs.get("reason_codes"):
-            codes = list(fs.get("reason_codes") or [])
-        if not codes and not fs:
-            return []
-        try:
-            final = float(fs.get("final_score")) if fs.get("final_score") is not None else None
-        except (TypeError, ValueError):
-            final = None
-        if final is not None:
-            if final >= 75:
-                prio = "высокий"
-            elif final >= 60:
-                prio = "средний"
-            else:
-                prio = "низкий"
-        else:
-            prio = "—"
-        analytics = snap.get("football_analytics") or {}
-        is_live = bool(analytics.get("is_live")) or bool(getattr(report.signal, "is_live", False))
-        mode = "LIVE" if is_live else "PREMATCH"
-        human = FootballSignalScoringService.humanize_reason_codes(codes)
-        if not human:
-            return []
-        lines = [
-            "",
-            "🧠 Анализ:",
-            f"- Тип: {mode}",
-            f"- Приоритет: {prio}",
-            "- Причины:",
-            *human,
-        ]
-        return lines
+        # Explicitly disabled: analysis block is noisy and not needed in signal messages.
+        return []
 
     def _football_live_minute_line(self, report: SignalAnalyticsReport) -> str | None:
         prediction_logs = report.prediction_logs or []
@@ -190,21 +137,6 @@ class NotificationService:
         idea_kind = "main market"
         if bet_presentation.detected_special_scope == "corners":
             idea_kind = "corners"
-        snap = prediction_logs[0].feature_snapshot_json if prediction_logs else {}
-        fs = (snap or {}).get("football_scoring") or {}
-        try:
-            final = float(fs.get("final_score")) if fs.get("final_score") is not None else None
-        except (TypeError, ValueError):
-            final = None
-        if final is not None:
-            if final >= 75:
-                prio = "высокий"
-            elif final >= 60:
-                prio = "средний"
-            else:
-                prio = "низкий"
-        else:
-            prio = "—"
         live_line = self._football_live_minute_line(report)
         title = "🚨 Live-сигнал" if bool(getattr(s, "is_live", False)) else "🚨 Футбольный сигнал"
         lines = [
@@ -227,20 +159,6 @@ class NotificationService:
         )
         if bet_presentation.detail_label:
             lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
-        lines.extend(
-            [
-                "",
-                "🧠 Анализ:",
-                f"- Тип: {'LIVE' if bool(getattr(s, 'is_live', False)) else 'PREMATCH'}",
-                f"- Идея: {idea_kind}",
-                f"- Приоритет: {prio}",
-            ]
-        )
-        extra = self._football_analysis_lines(report)
-        if extra:
-            if "- Причины:" in extra:
-                idx = extra.index("- Причины:")
-                lines.extend(["- Причины:", *extra[idx + 1 :]])
         return "\n".join(lines)
 
     def format_result_message(self, signal_report: SignalAnalyticsReport, quality_report: SignalQualityReport) -> str:

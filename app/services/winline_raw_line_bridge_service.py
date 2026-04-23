@@ -362,21 +362,15 @@ class WinlineRawLineBridgeService:
 
         if market_type in {"1x2", "match_winner"}:
             if rl in {"1", "home", "п1"}:
-                return home, "fallback:winner_home"
+                return "1", "selection:1x2_token_home"
             if rl in {"2", "away", "п2"}:
-                return away, "fallback:winner_away"
+                return "2", "selection:1x2_token_away"
             if rl in {"x", "draw", "ничья"}:
-                return "Draw", "fallback:winner_draw"
+                return "X", "selection:1x2_token_draw"
+            # No guessing by index for 1X2. If selection is unknown/missing — keep raw (will be rejected upstream).
             if raw:
-                return raw, "fallback:raw"
-            if idx == 0:
-                return home, "fallback:index0"
-            if idx == 1:
-                if market_type == "1x2" and len(self._as_list(line.get("R"))) >= 3:
-                    return "Draw", "fallback:index1_draw"
-                return away, "fallback:index1_away"
-            if idx == 2:
-                return away, "fallback:index2_away"
+                return raw, "selection:1x2_raw_unrecognized"
+            return "", "selection:1x2_missing"
 
         if market_type == "both_teams_to_score":
             if rl in {"yes", "да", "оба забьют: да"}:

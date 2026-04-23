@@ -224,10 +224,17 @@ class FootballBetFormatterService:
         if self._is_outcome(market_type_l, market_label_s):
             outcome = self._normalize_outcome_token(selection_s)
             if outcome:
-                return FootballBetPresentation(
-                    main_label=self._with_period("Исход", period),
-                    detail_label=outcome,
-                )
+                home_h = self._humanize_team(home_team)
+                away_h = self._humanize_team(away_team)
+                if outcome == "П1":
+                    label = f"П1: {home_h}" if home_h else "П1"
+                    return FootballBetPresentation(main_label=self._with_period(label, period))
+                if outcome == "П2":
+                    label = f"П2: {away_h}" if away_h else "П2"
+                    return FootballBetPresentation(main_label=self._with_period(label, period))
+                if outcome == "Х":
+                    return FootballBetPresentation(main_label=self._with_period("Ничья", period))
+                return FootballBetPresentation(main_label=self._with_period(outcome, period))
 
         fallback = self._format_fallback(
             market_label=market_label_s,
