@@ -771,6 +771,27 @@ async def cmd_ping(message: Message) -> None:
     await message.answer("🏓 Бот на связи: pong")
 
 
+@router.message(Command("openai_test"))
+async def cmd_openai_test(message: Message) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from app.core.config import get_settings
+    from app.services.openai_service import OpenAIService
+
+    s = get_settings()
+    if not getattr(s, "openai_enabled", False):
+        await message.answer("⚠️ OpenAI отключён (OPENAI_API_KEY пустой)")
+        return
+    res = await OpenAIService().test_simple_request(s)
+    if res.success:
+        txt = (res.text_response or "OK").strip()
+        await message.answer(f"✅ OpenAI работает\nОтвет: {txt}")
+        return
+    err = (res.error_text or "unknown_error").strip()
+    await message.answer(f"⚠️ OpenAI ошибка\n{err}")
+
+
 @router.message(_text_is("Кто я"))
 @router.message(Command("whoami"))
 async def cmd_whoami(message: Message) -> None:
