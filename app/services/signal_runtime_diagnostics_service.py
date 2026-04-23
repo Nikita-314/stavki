@@ -177,6 +177,13 @@ class SignalRuntimeDiagnosticsState:
     """WIN/LOSE aggregates for football_live_signal_rationale codes (last refresh)."""
     football_live_adaptive_learning_json: str | None = None
     """Active LIVE adaptive penalties/boosts and per-key deltas (last cycle or postmatch refresh)."""
+    # --- OpenAI post-settlement analysis diagnostics ---
+    openai_analysis_total: int = 0
+    openai_analysis_success: int = 0
+    openai_analysis_failed: int = 0
+    openai_penalty_patterns_count: int = 0
+    openai_boost_patterns_count: int = 0
+    openai_learning_active_patterns: int = 0
     football_live_combat_signals_total: int = 0
     """Exact COUNT: football + is_live + notes=live_auto."""
     football_live_with_any_rationale_count: int = 0

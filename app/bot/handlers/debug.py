@@ -792,6 +792,111 @@ async def cmd_openai_test(message: Message) -> None:
     await message.answer(f"⚠️ OpenAI ошибка\n{err}")
 
 
+@router.message(Command("openai_live_learning_stats"))
+async def cmd_openai_live_learning_stats(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.core.enums import SportType
+    from app.db.models.signal import Signal
+    from app.db.models.settlement import Settlement
+    from app.services.football_live_adaptive_learning_service import build_live_adaptive_snapshot
+
+    async with sessionmaker() as session:
+        # Last settled live football signals, best-effort scan
+        q = (
+            select(Signal, Settlement)
+            .join(Settlement, Settlement.signal_id == Signal.id)
+            .where(Signal.sport == SportType.FOOTBALL)
+            .where(Signal.is_live.is_(True))
+            .options(selectinload(Signal.prediction_logs))
+            .order_by(Settlement.id.desc())
+            .limit(500)
+        )
+        rows = list((await session.execute(q)).all())
+
+        verdict_cnt = {"good_signal": 0, "bad_signal": 0, "neutral_signal": 0, "missing": 0}
+        analyzed = 0
+        total_settled = 0
+        tag_stats: dict[str, dict[str, float]] = {}
+
+        for sig, st in rows:
+            total_settled += 1
+            pl0 = min(sig.prediction_logs, key=lambda p: p.id) if sig.prediction_logs else None
+            fs0 = dict(pl0.feature_snapshot_json or {}) if pl0 else {}
+            oa = fs0.get("openai_analysis") if isinstance(fs0.get("openai_analysis"), dict) else None
+            if not oa:
+                verdict_cnt["missing"] += 1
+                continue
+            analyzed += 1
+            v = str(oa.get("verdict") or "").strip()
+            if v in verdict_cnt:
+                verdict_cnt[v] += 1
+            else:
+                verdict_cnt["neutral_signal"] += 1
+
+            try:
+                conf = float(oa.get("confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            if conf < 0.75:
+                continue
+            tags = oa.get("pattern_tags") if isinstance(oa.get("pattern_tags"), list) else []
+            if not tags:
+                continue
+            try:
+                pl = float(st.profit_loss) if st.profit_loss is not None else 0.0
+            except Exception:
+                pl = 0.0
+            for t in tags[:30]:
+                if not t:
+                    continue
+                k = str(t)[:60]
+                s = tag_stats.get(k) or {"n": 0.0, "profit_sum": 0.0}
+                s["n"] += 1.0
+                s["profit_sum"] += float(pl)
+                tag_stats[k] = s
+
+        # rank tags by avg profit, require n>=10 per spec
+        ranked = []
+        for k, v in tag_stats.items():
+            n = int(v.get("n") or 0)
+            if n < 10:
+                continue
+            ps = float(v.get("profit_sum") or 0.0)
+            ranked.append((k, n, ps / n))
+        ranked_best = sorted(ranked, key=lambda x: x[2], reverse=True)[:5]
+        ranked_worst = sorted(ranked, key=lambda x: x[2])[:5]
+
+        snap = await build_live_adaptive_snapshot(session, lookback=400)
+        pub = snap.to_public_dict()
+        # only OpenAI keys are relevant here
+        penalties = [r for r in (pub.get("penalties_active") or []) if str(r.get("key") or "").startswith("oa_")][:10]
+        boosts = [r for r in (pub.get("boosts_active") or []) if str(r.get("key") or "").startswith("oa_")][:10]
+
+    lines = [
+        "🧠 OpenAI LIVE learning stats",
+        f"- settled_live_scanned: {total_settled}",
+        f"- openai_analyzed: {analyzed}",
+        f"- verdicts: good={verdict_cnt['good_signal']} bad={verdict_cnt['bad_signal']} neutral={verdict_cnt['neutral_signal']} missing={verdict_cnt['missing']}",
+        "",
+        "— top 5 worst tags (n>=10) —",
+        *([f"  {k}  n={n}  profit_avg={avg:.3f}" for k, n, avg in ranked_worst] or ["  (нет, выборка мала)"]),
+        "",
+        "— top 5 best tags (n>=10) —",
+        *([f"  {k}  n={n}  profit_avg={avg:.3f}" for k, n, avg in ranked_best] or ["  (нет, выборка мала)"]),
+        "",
+        f"active_openai_penalties: {len(penalties)}",
+        *([f\"  {r.get('key')}: delta={r.get('delta')} n={r.get('n')} W/L={r.get('wins')}/{r.get('losses')}\" for r in penalties] or []),
+        f"active_openai_boosts: {len(boosts)}",
+        *([f\"  {r.get('key')}: delta={r.get('delta')} n={r.get('n')} W/L={r.get('wins')}/{r.get('losses')}\" for r in boosts] or []),
+    ]
+    await _answer_long_message(message, "\n".join(lines))
+
+
 @router.message(_text_is("Кто я"))
 @router.message(Command("whoami"))
 async def cmd_whoami(message: Message) -> None:

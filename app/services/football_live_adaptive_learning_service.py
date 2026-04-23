@@ -359,6 +359,22 @@ async def build_live_adaptive_snapshot(
                 stored_keys = [str(x) for x in sk if x]
         except Exception:
             stored_keys = []
+        # OpenAI post-settlement pattern feedback (optional)
+        openai_keys: list[str] = []
+        try:
+            oa = fs0.get("openai_analysis") if isinstance(fs0.get("openai_analysis"), dict) else {}
+            if oa:
+                conf = float(oa.get("confidence") or 0.0)
+                tags = oa.get("pattern_tags") if isinstance(oa.get("pattern_tags"), list) else []
+                pen = bool(oa.get("should_penalize"))
+                boo = bool(oa.get("should_boost"))
+                if conf >= 0.75 and tags:
+                    if pen:
+                        openai_keys.extend([f"oa_pen:{str(t)[:60]}" for t in tags if t])
+                    if boo:
+                        openai_keys.extend([f"oa_boost:{str(t)[:60]}" for t in tags if t])
+        except Exception:
+            openai_keys = []
         # Fall back to live-computed pattern tags if audit absent.
         fa = fs0.get("football_analytics") if isinstance(fs0.get("football_analytics"), dict) else {}
         if not stored_keys:
@@ -378,6 +394,8 @@ async def build_live_adaptive_snapshot(
 
         bump(f"fam:{fam}")
         for k in stored_keys:
+            bump(str(k))
+        for k in openai_keys:
             bump(str(k))
         for code in codes:
             bump(f"why:{code}")
@@ -425,6 +443,9 @@ async def build_live_adaptive_snapshot(
 
     best = sorted(stats.items(), key=_roi_sort_key, reverse=True)[:10]
     worst = sorted(stats.items(), key=_roi_sort_key)[:10]
+    openai_active = sum(
+        1 for k, d in deltas.items() if k.startswith("oa_") and abs(float(d or 0.0)) > 1e-9
+    )
 
     return FootballLiveAdaptiveSnapshot(
         deltas=deltas,
@@ -441,6 +462,7 @@ async def build_live_adaptive_snapshot(
             "unprofitable_pattern_count": sum(1 for _k, v in stats.items() if int(v.get("n") or 0) >= _MIN_SAMPLES_TAG and float(v.get("profit_avg") or 0.0) < 0.0),
             "top_best_patterns": [{"key": k, **v} for k, v in best if isinstance(v, dict)],
             "top_worst_patterns": [{"key": k, **v} for k, v in worst if isinstance(v, dict)],
+            "openai_learning_active_patterns": int(openai_active),
         },
     )
 

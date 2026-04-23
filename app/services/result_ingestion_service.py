@@ -11,6 +11,7 @@ from app.schemas.event_result import EventResultInput, EventResultProcessingResu
 from app.schemas.settlement import SettlementCreate
 from app.services.failure_review_service import FailureReviewService
 from app.services.football_signal_outcome_reason_service import FootballSignalOutcomeReasonService
+from app.services.openai_signal_analysis_service import OpenAISignalAnalysisService
 from app.services.settlement_service import SettlementService
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,14 @@ class ResultIngestionService:
                     await FootballSignalOutcomeReasonService().apply_to_signal(session, s, result, data)
                 except Exception:
                     logger.exception("football outcome reason apply failed (signal_id=%s)", s.id)
+                # OpenAI analysis is strictly post-settlement and best-effort (must never break settlement pipeline).
+                if bool(s.is_live):
+                    try:
+                        await OpenAISignalAnalysisService().analyze_settled_live_football_signal(
+                            session, signal_id=int(s.id)
+                        )
+                    except Exception:
+                        logger.exception("openai post-settlement analysis failed (signal_id=%s)", s.id)
             settled_count += 1
             processed_ids.append(int(s.id))
 
