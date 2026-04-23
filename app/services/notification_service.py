@@ -10,7 +10,6 @@ from app.core.constants import MAX_TELEGRAM_MESSAGE_LENGTH
 from app.schemas.analytics import SignalAnalyticsReport
 from app.schemas.signal_quality import SignalQualityReport
 from app.services.football_bet_formatter_service import FootballBetFormatterService
-from app.services.football_signal_scoring_service import FootballSignalScoringService
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +37,11 @@ class NotificationService:
             left, right = text.split(" vs ", 1)
             return f"{self._humanize_team(left)} — {self._humanize_team(right)}"
         return text.replace(" vs ", " — ")
+
+    def _match_line_for_telegram(self, match_name: str) -> str:
+        """Only team names in inline backticks (plain text; easy tap-to-copy in Telegram)."""
+        safe = (match_name or "").strip().replace("`", "'")
+        return f"⚽ Матч: `{safe}`"
 
     def _fmt_decimal(self, value: Decimal | None, places: int = 2) -> str:
         if value is None:
@@ -70,28 +74,6 @@ class NotificationService:
             kind = str(snapshot.get("runtime_source_kind") or "").strip().lower()
             if kind == "fallback_json":
                 return "🧪 Режим: fallback JSON"
-        return None
-
-    def _source_line(self, report: SignalAnalyticsReport) -> str:
-        notes = (report.signal.notes or "").strip().lower()
-        if notes == "football_manual_auto":
-            return "📡 Источник: Winline JSON"
-        prediction_logs = report.prediction_logs or []
-        if prediction_logs:
-            snapshot = prediction_logs[0].feature_snapshot_json or {}
-            kind = str(snapshot.get("runtime_source_kind") or "").strip().lower()
-            if kind == "semi_live_manual":
-                return "📡 Источник: Winline JSON"
-        return "📡 Источник: live"
-
-    def _reason_line(self, report: SignalAnalyticsReport) -> str | None:
-        prediction_logs = report.prediction_logs or []
-        if not prediction_logs:
-            return None
-        payload = prediction_logs[0].feature_snapshot_json or {}
-        raw_market_type = payload.get("raw_market_type")
-        if raw_market_type:
-            return None
         return None
 
     def _football_analysis_lines(self, report: SignalAnalyticsReport) -> list[str]:
@@ -130,13 +112,7 @@ class NotificationService:
             subsection_name=s.subsection_name,
         )
         odds = self._fmt_decimal(s.odds_at_signal, 2)
-        bookmaker_raw = str(getattr(s.bookmaker, "value", s.bookmaker) or "").strip()
-        bookmaker = "Winline" if bookmaker_raw.lower() == "winline" else bookmaker_raw
         source_badge = self._source_badge(report)
-        prediction_logs = report.prediction_logs or []
-        idea_kind = "main market"
-        if bet_presentation.detected_special_scope == "corners":
-            idea_kind = "corners"
         live_line = self._football_live_minute_line(report)
         title = "🚨 Live-сигнал" if bool(getattr(s, "is_live", False)) else "🚨 Футбольный сигнал"
         lines = [
@@ -148,16 +124,14 @@ class NotificationService:
             [
                 "",
                 f"🏆 Турнир: {tournament}",
-                f"⚽ Матч: {match_name}",
+                self._match_line_for_telegram(match_name),
                 *( [live_line] if live_line else [] ),
                 f"🗓 Начало матча: {match_start}",
                 f"🎯 Ставка: {bet_presentation.main_label}",
                 f"💰 Коэффициент: {odds}",
-                f"🏢 Букмекер: {bookmaker}",
-                self._source_line(report),
             ]
         )
-        if bet_presentation.detail_label:
+        if bet_presentation.detail_label and not bool(getattr(s, "is_live", False)):
             lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
         return "\n".join(lines)
 
