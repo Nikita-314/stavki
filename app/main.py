@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
@@ -12,7 +11,7 @@ from app.core.config import get_settings
 from app.bot.handlers import debug_router
 from app.db.session import create_engine, create_sessionmaker
 from app.services.auto_signal_service import AutoSignalService
-from app.services.openai_service import OpenAIService
+from app.services.external_api_monitor_service import ExternalApiMonitorService
 from app.services.winline_result_autosettlement_service import WinlineResultAutoSettlementService
 
 
@@ -90,50 +89,9 @@ async def main() -> None:
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("[OPENAI] failed to send admin notification")
 
-    async def _openai_monitor_loop() -> None:
-        """
-        Infra-only monitor:
-        - one check on startup
-        - periodic checks every ~15 minutes
-        - rate-limited notifications (>=15 minutes between sends)
-        """
-        log = logging.getLogger(__name__)
-        if not settings.openai_enabled:
-            log.info("[OPENAI] disabled (no api key)")
-            return
-        svc = OpenAIService()
-
-        last_notified_at: datetime | None = None
-        last_state_ok: bool | None = None
-        interval_seconds = 15 * 60
-
-        while True:
-            res = await svc.health_check(settings)
-            if res.ok:
-                if last_state_ok is False:
-                    # recovered
-                    now = datetime.now(timezone.utc)
-                    if last_notified_at is None or (now - last_notified_at).total_seconds() >= interval_seconds:
-                        await _notify_admin_once("✅ OpenAI API снова доступен")
-                        last_notified_at = now
-                log.info("[OPENAI] ok")
-                last_state_ok = True
-            else:
-                # error path
-                err = (res.error_text or "unknown_error")[:900]
-                log.warning("[OPENAI] error: %s", err)
-                if last_state_ok is not False:
-                    now = datetime.now(timezone.utc)
-                    if last_notified_at is None or (now - last_notified_at).total_seconds() >= interval_seconds:
-                        await _notify_admin_once(
-                            "⚠️ OpenAI API недоступен\n\n"
-                            f"- ошибка: {err}\n"
-                            "- бот продолжает работать без OpenAI"
-                        )
-                        last_notified_at = now
-                last_state_ok = False
-
-            await asyncio.sleep(interval_seconds)
+    async def _external_api_monitor_loop() -> None:
+        """Extends the former OpenAI-only monitor to all external APIs."""
+        await ExternalApiMonitorService().run_forever(settings, notify_admin=_notify_admin_once, interval_seconds=15 * 60)
 
     async def _football_live_loop_runner() -> None:
         # IMPORTANT: asyncio.create_task must receive a coroutine *function call* that returns a coroutine,
@@ -145,19 +103,19 @@ async def main() -> None:
 
     football_live_task = asyncio.create_task(_football_live_loop_runner())
     settlement_task = asyncio.create_task(_winline_settlement_loop_runner())
-    openai_task = asyncio.create_task(_openai_monitor_loop())
+    external_api_task = asyncio.create_task(_external_api_monitor_loop())
     try:
         await dp.start_polling(bot, sessionmaker=sessionmaker)
     finally:
         football_live_task.cancel()
         settlement_task.cancel()
-        openai_task.cancel()
+        external_api_task.cancel()
         with suppress(asyncio.CancelledError):
             await football_live_task
         with suppress(asyncio.CancelledError):
             await settlement_task
         with suppress(asyncio.CancelledError):
-            await openai_task
+            await external_api_task
         await engine.dispose()
 
 

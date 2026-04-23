@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.enums import BetResult, SportType
 from app.db.models.settlement import Settlement
 from app.db.models.signal import Signal
+from app.services.external_api_monitor_service import ExternalApiMonitorService
 from app.services.signal_runtime_diagnostics_service import SignalRuntimeDiagnosticsService
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,8 @@ class OpenAISignalAnalysisService:
         settings = get_settings()
         if not getattr(settings, "openai_enabled", False):
             return OpenAISignalAnalysisRunResult(ok=False, error_text="openai_disabled")
+        if not ExternalApiMonitorService().is_runtime_enabled("openai", configured_enabled=True):
+            return OpenAISignalAnalysisRunResult(ok=False, error_text="openai_runtime_disabled")
 
         stmt = (
             select(Signal)

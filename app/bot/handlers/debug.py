@@ -261,6 +261,28 @@ def _sport_toggle_label(key: str, enabled: bool) -> str:
     return f"🎮 Dota: {'включена' if enabled else 'выключена'}"
 
 
+def _format_external_api_status_lines(diag: dict[str, object] | None = None) -> list[str]:
+    d = diag or SignalRuntimeDiagnosticsService().get_state()
+
+    def _line(label: str, prefix: str) -> list[str]:
+        st = str(d.get(f"external_api_{prefix}_status") or "unknown")
+        err = str(d.get(f"external_api_{prefix}_last_error") or "—")
+        ok = str(d.get(f"external_api_{prefix}_last_success") or "—")
+        return [
+            f"• {label}: {st}",
+            f"  last_success: {ok}",
+            f"  last_error: {err[:220]}",
+        ]
+
+    return [
+        "",
+        "— External API status —",
+        *_line("OpenAI", "openai"),
+        *_line("API-Football", "api_football"),
+        *_line("Sportmonks", "sportmonks"),
+    ]
+
+
 def _format_signal_runtime_status_lines() -> list[str]:
     from app.services.football_live_session_service import FootballLiveSessionService
 
@@ -503,6 +525,7 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"🚨 Финальных сигналов: {diag.get('final_signals_count') or 0}",
         f"📨 Отправлено (цикл→канал): {diag.get('messages_sent_count') or 0}",
         f"🛑 Причина без отправки: {bn_ru} ({bn})",
+        *_format_external_api_status_lines(diag),
         *postmatch_block,
         *training_block,
         *adaptive_block,
@@ -4036,6 +4059,7 @@ async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[A
     k = summary.kpis
     latest_snapshot_label = history[0].label if history else None
     latest_ids_str = ", ".join(str(x) for x in latest_ids) if latest_ids else "-"
+    diag = SignalRuntimeDiagnosticsService().get_state()
 
     lines = [
         "📊 Состояние системы",
@@ -4074,6 +4098,7 @@ async def cmd_system_status(message: Message, sessionmaker: async_sessionmaker[A
         "",
         "Последние сигналы:",
         f"- {latest_ids_str}",
+        *_format_external_api_status_lines(diag),
     ]
     await message.answer("\n".join(lines))
 

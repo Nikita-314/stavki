@@ -187,6 +187,15 @@ class SignalRuntimeDiagnosticsState:
     openai_penalty_patterns_count: int = 0
     openai_boost_patterns_count: int = 0
     openai_learning_active_patterns: int = 0
+    external_api_openai_status: str | None = None
+    external_api_openai_last_error: str | None = None
+    external_api_openai_last_success: str | None = None
+    external_api_api_football_status: str | None = None
+    external_api_api_football_last_error: str | None = None
+    external_api_api_football_last_success: str | None = None
+    external_api_sportmonks_status: str | None = None
+    external_api_sportmonks_last_error: str | None = None
+    external_api_sportmonks_last_success: str | None = None
     football_live_combat_signals_total: int = 0
     """Exact COUNT: football + is_live + notes=live_auto."""
     football_live_with_any_rationale_count: int = 0

@@ -53,9 +53,11 @@ class Settings(BaseSettings):
     api_football_api_key: str | None = None
     """API-Football (API-SPORTS) key (set via API_FOOTBALL_API_KEY in .env)."""
     api_football_base_url: str = "https://v3.football.api-sports.io"
+    api_football_enabled: bool = False
     openai_api_key: Annotated[str | None, BeforeValidator(_empty_str_to_none)] = None
     """OpenAI API key (set via OPENAI_API_KEY in .env). Infrastructure only; not used in signal decisions."""
     openai_enabled: bool = False
+    sportmonks_enabled: bool = False
     auto_signal_polling_enabled: bool = False
     auto_signal_polling_interval_seconds: int = 60
     auto_signal_preview_only: bool = False
@@ -129,5 +131,7 @@ def get_settings() -> Settings:
     s = Settings()
     # Derived flags
     s.openai_enabled = bool((s.openai_api_key or "").strip())
+    s.api_football_enabled = bool((s.api_football_api_key or "").strip())
+    s.sportmonks_enabled = bool((s.sportmonks_api_key or "").strip())
     return s
 

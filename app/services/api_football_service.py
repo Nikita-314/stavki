@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.services.external_api_monitor_service import ExternalApiHealthCheckResult, ExternalApiMonitorService
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,37 @@ class ApiFootballService:
         if not self._key:
             logger.info("[API_FOOTBALL] api key missing (API_FOOTBALL_API_KEY not set)")
             return False
+        if not ExternalApiMonitorService().is_runtime_enabled("api_football", configured_enabled=bool(self._key)):
+            logger.info("[API_FOOTBALL] runtime disabled by external API monitor")
+            return False
         return True
+
+    async def health_check(self) -> ExternalApiHealthCheckResult:
+        if not self._key:
+            return ExternalApiHealthCheckResult(ok=False, error_text="disabled_no_api_key", http_status=None)
+        timeout = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base,
+                timeout=timeout,
+                headers={
+                    "User-Agent": "stavki-bot/football-live",
+                    "x-apisports-key": self._key,
+                },
+            ) as c:
+                r = await c.get("/status")
+            if r.status_code == 200:
+                return ExternalApiHealthCheckResult(ok=True, error_text=None, http_status=200)
+            body = (r.text or "").strip()
+            if len(body) > 400:
+                body = body[:400] + "..."
+            return ExternalApiHealthCheckResult(
+                ok=False,
+                error_text=f"http_{r.status_code}: {body or 'empty_body'}",
+                http_status=int(r.status_code),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ExternalApiHealthCheckResult(ok=False, error_text=f"request_error: {exc!s}", http_status=None)
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
