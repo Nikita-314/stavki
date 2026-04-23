@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -14,6 +17,60 @@ logger = logging.getLogger(__name__)
 
 def _norm(s: str) -> str:
     return (s or "").strip().lower().replace("ё", "е")
+
+
+def _strip_accents(s: str) -> str:
+    if not s:
+        return ""
+    return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+
+
+def _translit_cyrillic(s: str) -> str:
+    tr = {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "ts",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "sch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+    return "".join(tr.get(ch, ch) for ch in (s or ""))
+
+
+@dataclass(frozen=True)
+class _TeamNorm:
+    raw: str
+    normalized: str
+    tokens: tuple[str, ...]
+    women: bool = False
+    youth_level: str | None = None
+    reserve: bool = False
 
 
 def _safe_int(v: object) -> int | None:
@@ -35,6 +92,134 @@ def _safe_percent(v: object) -> int | None:
         return int(round(float(s)))
     except (TypeError, ValueError):
         return None
+
+
+def _extract_team_markers(raw: str) -> tuple[bool, str | None, bool]:
+    s = _norm(raw)
+    women = bool(
+        re.search(r"(\(ж\)|\bwomen\b|\bw\b|\bfemenina\b|\bfeminino\b|\bf\b)", s)
+    )
+    youth_match = re.search(r"(до\s*([0-9]{2})|u\s*([0-9]{2}))", s)
+    youth = None
+    if youth_match:
+        youth_no = youth_match.group(2) or youth_match.group(3)
+        if youth_no:
+            youth = f"u{int(youth_no)}"
+    reserve = bool(re.search(r"(\(рез\)|\brez\b|\bres\b|\breserve\b|\breserves\b)", s))
+    return women, youth, reserve
+
+
+def _normalize_team_name(raw: str) -> _TeamNorm:
+    s = _norm(raw)
+    women, youth, reserve = _extract_team_markers(s)
+    s = re.sub(r"\(ж\)|\bwomen\b|\bfemenina\b|\bfeminino\b|\bw\b", " women ", s)
+    s = re.sub(r"до\s*([0-9]{2})", r" u\1 ", s)
+    s = re.sub(r"\bu\s*([0-9]{2})\b", r" u\1 ", s)
+    s = re.sub(r"\(люб\.\)|\(любители\)|\blyub\b|\blyubiteli\b|\bamateurs?\b", " amateurs ", s)
+    s = _translit_cyrillic(s)
+    s = _strip_accents(s).lower()
+    s = re.sub(r"\bu\s*([0-9]{2})\b", r"u\1", s)
+    s = re.sub(r"[\(\)\[\]\{\}/,.;:+_\\-]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    stop = {
+        "fc",
+        "fk",
+        "sc",
+        "cf",
+        "cd",
+        "ac",
+        "kc",
+        "bk",
+        "club",
+        "deportivo",
+        "clubdeportivo",
+        "de",
+        "da",
+        "do",
+        "del",
+        "the",
+        "team",
+        "city",
+        "town",
+        "united",
+        "real",
+        "st",
+        "saint",
+        "sent",
+        "women",
+        "femenina",
+        "feminino",
+        "w",
+        "zh",
+        "reserve",
+        "reserves",
+        "rez",
+        "res",
+        "amateurs",
+        "amateur",
+        "lyub",
+        "lyubiteli",
+        "ap",
+        "ba",
+        "sp",
+        "rj",
+        "mg",
+        "pr",
+        "rs",
+        "fcv",
+    }
+    tokens = []
+    for tok in s.split():
+        if tok in stop:
+            continue
+        if re.fullmatch(r"u[0-9]{2}", tok):
+            continue
+        if len(tok) <= 1:
+            continue
+        tokens.append(tok)
+
+    normalized = " ".join(tokens)
+    return _TeamNorm(
+        raw=raw,
+        normalized=normalized,
+        tokens=tuple(tokens),
+        women=women,
+        youth_level=youth,
+        reserve=reserve,
+    )
+
+
+def _token_match(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if len(a) >= 4 and len(b) >= 4 and (a in b or b in a):
+        return True
+    threshold = 0.78 if min(len(a), len(b)) >= 6 else 0.86
+    return SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def _team_match_confidence(a: _TeamNorm, b: _TeamNorm) -> float:
+    if not a.tokens or not b.tokens:
+        return 0.0
+    if a.women != b.women:
+        return 0.0
+    if (a.youth_level or None) != (b.youth_level or None):
+        return 0.0
+    if a.reserve != b.reserve:
+        return 0.0
+
+    small = a.tokens if len(a.tokens) <= len(b.tokens) else b.tokens
+    large = b.tokens if len(a.tokens) <= len(b.tokens) else a.tokens
+    matched = 0
+    for tok in small:
+        if any(_token_match(tok, other) for other in large):
+            matched += 1
+    if matched == 0:
+        return 0.0
+    coverage_small = matched / max(1, len(small))
+    coverage_large = matched / max(1, len(large))
+    return min(1.0, 0.75 * coverage_small + 0.25 * coverage_large)
 
 
 @dataclass(frozen=True)
@@ -326,15 +511,20 @@ class ApiFootballService:
         winline_away: str,
         fixtures: list[ApiFootballFixtureLite],
     ) -> ApiFootballFixtureLite | None:
-        h = _norm(winline_home)
-        a = _norm(winline_away)
-        if not h or not a:
+        h = _normalize_team_name(winline_home)
+        a = _normalize_team_name(winline_away)
+        if not h.normalized or not a.normalized:
             return None
+        best: tuple[float, ApiFootballFixtureLite] | None = None
         for fx in fixtures:
-            if _norm(fx.home_team) == h and _norm(fx.away_team) == a:
-                return fx
-        for fx in fixtures:
-            if h in _norm(fx.home_team) and a in _norm(fx.away_team):
-                return fx
-        return None
+            fh = _normalize_team_name(fx.home_team)
+            fa = _normalize_team_name(fx.away_team)
+            conf_home = _team_match_confidence(h, fh)
+            conf_away = _team_match_confidence(a, fa)
+            if conf_home < 0.86 or conf_away < 0.86:
+                continue
+            pair_conf = min(conf_home, conf_away)
+            if best is None or pair_conf > best[0]:
+                best = (pair_conf, fx)
+        return best[1] if best is not None else None
 
