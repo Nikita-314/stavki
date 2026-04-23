@@ -102,6 +102,20 @@ class NotificationService:
             return "🕒 Идёт: live"
         return f"🕒 Идёт: {m} мин (live)"
 
+    def _football_live_context_line(self, report: SignalAnalyticsReport) -> str:
+        prediction_logs = report.prediction_logs or []
+        if prediction_logs:
+            snap = prediction_logs[0].feature_snapshot_json or {}
+            ctx = (
+                snap.get("football_live_context_participation")
+                if isinstance(snap.get("football_live_context_participation"), dict)
+                else {}
+            )
+            label = str(ctx.get("context_label") or "").strip()
+            if label:
+                return f"🧩 Контекст: {self._html_text(label)}"
+        return "🧩 Контекст: Winline"
+
     def format_signal_message(self, report: SignalAnalyticsReport) -> str:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
@@ -131,6 +145,7 @@ class NotificationService:
                 f"🏆 Турнир: {self._html_text(tournament)}",
                 self._match_line_for_telegram(match_name),
                 *( [live_line] if live_line else [] ),
+                self._football_live_context_line(report),
                 f"🗓 Начало матча: {self._html_text(match_start)}",
                 f"🎯 Ставка: {self._html_text(bet_presentation.main_label)}",
                 f"💰 Коэффициент: {self._html_text(odds)}",

@@ -520,10 +520,17 @@ def snapshot_json_for_diagnostics(snapshot: FootballLiveAdaptiveSnapshot | None)
 def base_signal_score_for_threshold(candidate: ProviderSignalCandidate) -> float:
     """Soft/normal gate compares base score, not effective (post-adaptive)."""
     fs = candidate.feature_snapshot_json or {}
+    ext_bonus = 0.0
+    ext = fs.get("football_external_context_bonus")
+    if isinstance(ext, dict) and ext.get("total_bonus") is not None:
+        try:
+            ext_bonus = float(ext.get("total_bonus") or 0.0)
+        except (TypeError, ValueError):
+            ext_bonus = 0.0
     adj = fs.get("football_live_adaptive_learning")
     if isinstance(adj, dict) and adj.get("base_signal_score") is not None:
         try:
-            return float(adj["base_signal_score"])
+            return float(adj["base_signal_score"]) + ext_bonus
         except (TypeError, ValueError):
             pass
     return float(candidate.signal_score or 0.0)

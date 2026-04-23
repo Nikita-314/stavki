@@ -200,6 +200,10 @@ class SignalRuntimeDiagnosticsState:
     external_api_sportmonks_status: str | None = None
     external_api_sportmonks_last_error: str | None = None
     external_api_sportmonks_last_success: str | None = None
+    signals_with_api_football: int = 0
+    signals_without_api_football: int = 0
+    signals_with_sportmonks: int = 0
+    signals_with_external_context: int = 0
     football_live_combat_signals_total: int = 0
     """Exact COUNT: football + is_live + notes=live_auto."""
     football_live_with_any_rationale_count: int = 0

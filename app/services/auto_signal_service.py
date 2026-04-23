@@ -77,6 +77,93 @@ def _football_only(candidates: list[ProviderSignalCandidate]) -> list[ProviderSi
     return [c for c in candidates if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL]
 
 
+def _default_live_context_participation() -> dict[str, object]:
+    return {
+        "used_api_football": False,
+        "used_sportmonks": False,
+        "used_openai_analysis": False,
+        "api_football_mapping_ok": False,
+        "api_football_stats_ok": False,
+        "api_football_pressure_used": False,
+        "external_context_sources": [],
+        "context_sources": ["Winline"],
+        "context_label": "Winline",
+    }
+
+
+def _build_live_context_participation(candidate: ProviderSignalCandidate) -> dict[str, object]:
+    fs = getattr(candidate, "feature_snapshot_json", None) or {}
+    if not isinstance(fs, dict):
+        fs = {}
+    ex = getattr(candidate, "explanation_json", None) or {}
+    if not isinstance(ex, dict):
+        ex = {}
+
+    out = _default_live_context_participation()
+
+    ctx = fs.get("football_live_context_filter") if isinstance(fs.get("football_live_context_filter"), dict) else {}
+    stats = ctx.get("stats") if isinstance(ctx.get("stats"), dict) else {}
+    stats_ok = any(v is not None for v in stats.values())
+    mapping_ok = bool(ctx.get("fixture_id"))
+    pressure_used = bool(mapping_ok and stats_ok and ctx.get("selected_pressure_score") is not None)
+    used_api_football = bool(mapping_ok and stats_ok)
+
+    sportmonks_used = bool(
+        ex.get("sportmonks_baseline_home") is not None
+        or ex.get("sportmonks_baseline_away") is not None
+        or ex.get("sportmonks_baseline_gap_home_minus_away") is not None
+        or fs.get("sportmonks_baseline") is not None
+    )
+
+    live_adaptive = (
+        fs.get("football_live_adaptive_learning")
+        if isinstance(fs.get("football_live_adaptive_learning"), dict)
+        else {}
+    )
+    preview_tag_keys = (
+        live_adaptive.get("preview_tag_keys") if isinstance(live_adaptive.get("preview_tag_keys"), list) else []
+    )
+    detail = live_adaptive.get("detail") if isinstance(live_adaptive.get("detail"), dict) else {}
+    per_tag_applied = detail.get("per_tag_applied") if isinstance(detail.get("per_tag_applied"), list) else []
+    used_openai_analysis = any(str(k).startswith(("oa_pen:", "oa_boost:")) for k in preview_tag_keys)
+    if not used_openai_analysis:
+        used_openai_analysis = any(
+            str((row or {}).get("key") or "").startswith(("oa_pen:", "oa_boost:"))
+            for row in per_tag_applied
+            if isinstance(row, dict)
+        )
+
+    out["used_api_football"] = used_api_football
+    out["used_sportmonks"] = sportmonks_used
+    out["used_openai_analysis"] = used_openai_analysis
+    out["api_football_mapping_ok"] = mapping_ok
+    out["api_football_stats_ok"] = stats_ok
+    out["api_football_pressure_used"] = pressure_used
+
+    external_sources: list[str] = []
+    if used_api_football:
+        external_sources.append("API-Football")
+    if sportmonks_used:
+        external_sources.append("Sportmonks")
+    if used_openai_analysis:
+        external_sources.append("OpenAI")
+
+    context_sources = ["Winline", *external_sources]
+    out["external_context_sources"] = external_sources
+    out["context_sources"] = context_sources
+    out["context_label"] = " + ".join(context_sources)
+    return out
+
+
+def _attach_live_context_participation(candidate: ProviderSignalCandidate) -> ProviderSignalCandidate:
+    fs = dict(candidate.feature_snapshot_json or {})
+    ex = dict(candidate.explanation_json or {})
+    participation = _build_live_context_participation(candidate)
+    fs["football_live_context_participation"] = participation
+    ex["football_live_context_participation"] = participation
+    return candidate.model_copy(update={"feature_snapshot_json": fs, "explanation_json": ex})
+
+
 _LIVE_MAIN_SINGLE_RELIEF = frozenset({"result", "totals", "btts", "handicap"})
 _LIVE_MAIN_SOFT = frozenset({"result", "double_chance", "totals", "btts", "handicap"})
 _LIVE_ABS_SCORE_FLOOR = 48.0
@@ -3755,7 +3842,7 @@ class AutoSignalService:
             )
 
         # --- CONTEXT FILTER (post S8, pre value filter) ---
-        # API-Football is used only as a fail-open context gate for classic 1X2 picks.
+        # API-Football is a soft, fail-open context layer for classic 1X2 picks.
         context_rejected = 0
         context_passed = 0
         context_rejected_samples: list[dict[str, object]] = []
@@ -3817,19 +3904,26 @@ class AutoSignalService:
             sel_side = _side_from_selection_1x2(cand)
             minute_i, sh_i, sa_i = _live_ctx_from_candidate(cand)
 
-            # Only classic result 1X2 picks are context-gated. All other markets pass through unchanged.
+            # Only classic result 1X2 picks are context-enriched. All other markets pass through unchanged.
             if not (fam_ctx == "result" and mt_ctx in {"1x2", "match_winner"} and sel_side in {"home", "away"}):
                 after_context.append(cand)
                 continue
 
             if not api_ctx_svc or not live_fixtures_af:
+                prev_fs_ctx = dict(cand.feature_snapshot_json or {})
+                prev_fs_ctx["football_live_context_filter"] = {
+                    "source": "api_football",
+                    "enabled": False,
+                    "decision": "skip",
+                    "skip_reason": "api_football_unavailable",
+                }
                 logger.info(
                     "[CONTEXT] match=%s selection=%s side=%s -> skip(api_football_unavailable)",
                     str(cand.match.match_name or "")[:140],
                     str(cand.market.selection or ""),
                     sel_side,
                 )
-                after_context.append(cand)
+                after_context.append(cand.model_copy(update={"feature_snapshot_json": prev_fs_ctx}))
                 continue
 
             fx = api_ctx_svc.map_winline_match_to_fixture(
@@ -3838,13 +3932,20 @@ class AutoSignalService:
                 fixtures=live_fixtures_af,
             )
             if fx is None:
+                prev_fs_ctx = dict(cand.feature_snapshot_json or {})
+                prev_fs_ctx["football_live_context_filter"] = {
+                    "source": "api_football",
+                    "enabled": True,
+                    "decision": "skip",
+                    "skip_reason": "api_football_fixture_not_mapped",
+                }
                 logger.info(
                     "[CONTEXT] match=%s selection=%s side=%s -> skip(api_football_fixture_not_mapped)",
                     str(cand.match.match_name or "")[:140],
                     str(cand.market.selection or ""),
                     sel_side,
                 )
-                after_context.append(cand)
+                after_context.append(cand.model_copy(update={"feature_snapshot_json": prev_fs_ctx}))
                 continue
 
             stats = stats_by_fixture.get(int(fx.fixture_id))
@@ -3855,6 +3956,14 @@ class AutoSignalService:
                     stats = None
                 stats_by_fixture[int(fx.fixture_id)] = stats
             if stats is None:
+                prev_fs_ctx = dict(cand.feature_snapshot_json or {})
+                prev_fs_ctx["football_live_context_filter"] = {
+                    "source": "api_football",
+                    "enabled": True,
+                    "fixture_id": int(fx.fixture_id),
+                    "decision": "skip",
+                    "skip_reason": "api_football_stats_missing",
+                }
                 logger.info(
                     "[CONTEXT] match=%s selection=%s side=%s fixture=%s -> skip(api_football_stats_missing)",
                     str(cand.match.match_name or "")[:140],
@@ -3862,7 +3971,7 @@ class AutoSignalService:
                     sel_side,
                     int(fx.fixture_id),
                 )
-                after_context.append(cand)
+                after_context.append(cand.model_copy(update={"feature_snapshot_json": prev_fs_ctx}))
                 continue
 
             home_pressure = _pressure_score(
@@ -3882,11 +3991,11 @@ class AutoSignalService:
             selected_pressure = home_pressure if sel_side == "home" else away_pressure
             winner_side = _winner_side_from_score(sh_i, sa_i)
             trailing = bool(winner_side in {"home", "away"} and winner_side != sel_side)
-            decision = "pass"
+            pressure_supportive = bool(selected_pressure >= 2)
+            decision = "pass_soft_positive" if pressure_supportive else "pass_soft_neutral"
             reject_reason: str | None = None
-            if selected_pressure < 2:
-                reject_reason = "reject_context_trailing_no_pressure" if trailing else "reject_context_no_pressure"
-                decision = "reject"
+            if not pressure_supportive:
+                reject_reason = "soft_context_trailing_no_pressure" if trailing else "soft_context_no_pressure"
 
             ctx_payload = {
                 "source": "api_football",
@@ -3896,6 +4005,7 @@ class AutoSignalService:
                 "selected_pressure_score": int(selected_pressure),
                 "home_pressure_score": int(home_pressure),
                 "away_pressure_score": int(away_pressure),
+                "pressure_supportive": pressure_supportive,
                 "decision": decision,
                 "reject_reason": reject_reason,
                 "minute": minute_i,
@@ -3935,31 +4045,30 @@ class AutoSignalService:
                 "reject_reason": reject_reason,
                 "stats": _context_payload_from_stats(stats),
             }
-            if decision == "reject":
+            if pressure_supportive:
+                context_passed += 1
+                if len(context_passed_samples) < context_sample_limit:
+                    context_passed_samples.append(sample)
+            else:
                 context_rejected += 1
                 if len(context_rejected_samples) < context_sample_limit:
                     context_rejected_samples.append(sample)
-                continue
-
-            context_passed += 1
-            if len(context_passed_samples) < context_sample_limit:
-                context_passed_samples.append(sample)
             after_context.append(cand_ctx)
 
         side_after_context_filter = _side_breakdown(list(after_context))
         candidates_to_ingest = after_context
         diagnostics.update(
-            football_live_rejected_no_pressure=int(context_rejected),
+            football_live_rejected_no_pressure=0,
             football_live_passed_pressure=int(context_passed),
             football_live_cycle_after_context_filter=int(len(after_context)),
             football_live_context_filter_last_cycle_json=json.dumps(
                 {
                     "api_football_runtime_ok": bool(api_football_runtime_ok),
                     "mapped_live_fixtures": len(live_fixtures_af or []),
-                    "rejected_no_pressure": int(context_rejected),
-                    "passed_pressure": int(context_passed),
-                    "rejected_samples": context_rejected_samples,
-                    "passed_samples": context_passed_samples,
+                    "soft_positive_count": int(context_passed),
+                    "soft_neutral_count": int(context_rejected),
+                    "soft_neutral_samples": context_rejected_samples,
+                    "soft_positive_samples": context_passed_samples,
                 },
                 ensure_ascii=False,
             )[:12000],
@@ -4378,16 +4487,42 @@ class AutoSignalService:
             else:
                 fs_out["football_live_adaptive_learning"] = {"enabled": False}
 
+            context_bonus = 0.0
+            context_bonus_sources: list[dict[str, object]] = []
+            ctx_eval = (
+                fs_out.get("football_live_context_filter")
+                if isinstance(fs_out.get("football_live_context_filter"), dict)
+                else {}
+            )
+            if bool(ctx_eval.get("pressure_supportive")) and ctx_eval.get("source") == "api_football":
+                context_bonus = 1.5
+                context_bonus_sources.append(
+                    {
+                        "source": "api_football",
+                        "bonus": context_bonus,
+                        "reason": "pressure_supportive",
+                        "fixture_id": ctx_eval.get("fixture_id"),
+                    }
+                )
+            fs_out["football_external_context_bonus"] = {
+                "total_bonus": round(context_bonus, 4),
+                "sources": context_bonus_sources,
+            }
+            if context_bonus > 0:
+                eff_decimal = Decimal(str(round(float(eff_decimal) + context_bonus, 4))).quantize(Decimal("0.0001"))
+
+            expl_out = {
+                **prev_expl,
+                "football_scoring_reason_codes": breakdown.reason_codes,
+            }
             new_cand = cand.model_copy(
                 update={
                     "signal_score": eff_decimal,
                     "feature_snapshot_json": fs_out,
-                    "explanation_json": {
-                        **prev_expl,
-                        "football_scoring_reason_codes": breakdown.reason_codes,
-                    },
+                    "explanation_json": expl_out,
                 }
             )
+            new_cand = _attach_live_context_participation(new_cand)
             enriched_scored.append(new_cand)
         candidates_to_ingest = enriched_scored
         enriched = enriched_scored
@@ -5017,6 +5152,27 @@ class AutoSignalService:
             except Exception:
                 ls_ing.register_idea_sent(build_live_idea_key(cr))
         ls_ing.record_signals_created(len(ingest_res.created_signal_ids))
+
+        created_context_flags = [_build_live_context_participation(cr) for cr in ingest_res.created_from_candidates]
+        created_with_api_football = sum(1 for row in created_context_flags if bool(row.get("used_api_football")))
+        created_without_api_football = max(0, len(created_context_flags) - created_with_api_football)
+        created_with_sportmonks = sum(1 for row in created_context_flags if bool(row.get("used_sportmonks")))
+        created_with_external_context = sum(
+            1
+            for row in created_context_flags
+            if bool(row.get("used_api_football"))
+            or bool(row.get("used_sportmonks"))
+            or bool(row.get("used_openai_analysis"))
+        )
+        diag_prev = diagnostics.get_state()
+        diagnostics.update(
+            signals_with_api_football=int(diag_prev.get("signals_with_api_football") or 0) + created_with_api_football,
+            signals_without_api_football=int(diag_prev.get("signals_without_api_football") or 0)
+            + created_without_api_football,
+            signals_with_sportmonks=int(diag_prev.get("signals_with_sportmonks") or 0) + created_with_sportmonks,
+            signals_with_external_context=int(diag_prev.get("signals_with_external_context") or 0)
+            + created_with_external_context,
+        )
 
         notifications_sent_count = 0
         per_signal_notified: dict[int, bool] = {}
