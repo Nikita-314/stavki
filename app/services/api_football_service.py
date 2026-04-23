@@ -25,6 +25,18 @@ def _safe_int(v: object) -> int | None:
         return None
 
 
+def _safe_percent(v: object) -> int | None:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        s = str(v).strip().replace("%", "").replace(",", ".")
+        if not s:
+            return None
+        return int(round(float(s)))
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class ApiFootballFixtureLite:
     fixture_id: int
@@ -46,6 +58,16 @@ class ApiFootballFixtureStats:
     corners: int | None
     cards_yellow: int | None
     cards_red: int | None
+    home_shots_total: int | None = None
+    away_shots_total: int | None = None
+    home_shots_on_target: int | None = None
+    away_shots_on_target: int | None = None
+    home_possession: int | None = None
+    away_possession: int | None = None
+    home_attacks: int | None = None
+    away_attacks: int | None = None
+    home_dangerous_attacks: int | None = None
+    away_dangerous_attacks: int | None = None
     raw: dict[str, Any] | None = None
 
 
@@ -168,33 +190,72 @@ class ApiFootballService:
             return ApiFootballFixtureStats(fid, None, None, None, None, None, raw=None)
 
         # response: list per team with statistics list
-        def _get_val(name: str) -> int | None:
-            total = 0
-            seen = False
-            for team_row in resp:
-                if not isinstance(team_row, dict):
+        team_maps: list[dict[str, int | None]] = []
+        for team_row in resp:
+            if not isinstance(team_row, dict):
+                continue
+            stats = team_row.get("statistics")
+            if not isinstance(stats, list):
+                continue
+            stat_map: dict[str, int | None] = {}
+            for it in stats:
+                if not isinstance(it, dict):
                     continue
-                stats = team_row.get("statistics")
-                if not isinstance(stats, list):
-                    continue
-                for it in stats:
-                    if not isinstance(it, dict):
-                        continue
-                    if _norm(str(it.get("type") or "")) != _norm(name):
-                        continue
-                    v = it.get("value")
-                    vi = _safe_int(v)
-                    if vi is None:
-                        continue
-                    total += vi
-                    seen = True
-            return total if seen else None
+                key = _norm(str(it.get("type") or ""))
+                value = it.get("value")
+                if key == _norm("Ball Possession"):
+                    stat_map[key] = _safe_percent(value)
+                else:
+                    stat_map[key] = _safe_int(value)
+            team_maps.append(stat_map)
 
-        shots_total = _get_val("Total Shots")
-        shots_on = _get_val("Shots on Goal")
-        corners = _get_val("Corner Kicks")
-        yellow = _get_val("Yellow Cards")
-        red = _get_val("Red Cards")
+        def _team_val(idx: int, name: str) -> int | None:
+            if idx >= len(team_maps):
+                return None
+            return team_maps[idx].get(_norm(name))
+
+        home_shots_total = _team_val(0, "Total Shots")
+        away_shots_total = _team_val(1, "Total Shots")
+        home_shots_on = _team_val(0, "Shots on Goal")
+        away_shots_on = _team_val(1, "Shots on Goal")
+        home_possession = _team_val(0, "Ball Possession")
+        away_possession = _team_val(1, "Ball Possession")
+        home_attacks = _team_val(0, "Attacks")
+        away_attacks = _team_val(1, "Attacks")
+        home_dangerous_attacks = _team_val(0, "Dangerous Attacks")
+        away_dangerous_attacks = _team_val(1, "Dangerous Attacks")
+        home_corners = _team_val(0, "Corner Kicks")
+        away_corners = _team_val(1, "Corner Kicks")
+        home_yellow = _team_val(0, "Yellow Cards")
+        away_yellow = _team_val(1, "Yellow Cards")
+        home_red = _team_val(0, "Red Cards")
+        away_red = _team_val(1, "Red Cards")
+
+        shots_total = (
+            (home_shots_total or 0) + (away_shots_total or 0)
+            if (home_shots_total is not None or away_shots_total is not None)
+            else None
+        )
+        shots_on = (
+            (home_shots_on or 0) + (away_shots_on or 0)
+            if (home_shots_on is not None or away_shots_on is not None)
+            else None
+        )
+        corners = (
+            (home_corners or 0) + (away_corners or 0)
+            if (home_corners is not None or away_corners is not None)
+            else None
+        )
+        yellow = (
+            (home_yellow or 0) + (away_yellow or 0)
+            if (home_yellow is not None or away_yellow is not None)
+            else None
+        )
+        red = (
+            (home_red or 0) + (away_red or 0)
+            if (home_red is not None or away_red is not None)
+            else None
+        )
         return ApiFootballFixtureStats(
             fixture_id=fid,
             shots_total=shots_total,
@@ -202,7 +263,17 @@ class ApiFootballService:
             corners=corners,
             cards_yellow=yellow,
             cards_red=red,
-            raw=None,
+            home_shots_total=home_shots_total,
+            away_shots_total=away_shots_total,
+            home_shots_on_target=home_shots_on,
+            away_shots_on_target=away_shots_on,
+            home_possession=home_possession,
+            away_possession=away_possession,
+            home_attacks=home_attacks,
+            away_attacks=away_attacks,
+            home_dangerous_attacks=home_dangerous_attacks,
+            away_dangerous_attacks=away_dangerous_attacks,
+            raw={"teams": team_maps},
         )
 
     def get_fixture_events(self, fixture_id: int) -> dict[str, Any] | None:

@@ -2043,7 +2043,11 @@ class AutoSignalService:
                     football_live_cycle_candidates_before_filter=0,
                     football_live_cycle_after_send_filter=0,
                     football_live_cycle_after_integrity=0,
+                    football_live_cycle_after_context_filter=0,
                     football_live_rejected_invalid_selection=0,
+                    football_live_rejected_no_pressure=0,
+                    football_live_passed_pressure=0,
+                    football_live_context_filter_last_cycle_json=None,
                     football_live_cycle_after_score=0,
                     football_live_cycle_new_ideas_sendable=0,
                     football_live_cycle_duplicate_ideas_blocked=0,
@@ -2077,7 +2081,11 @@ class AutoSignalService:
             football_live_cycle_candidates_before_filter=0,
             football_live_cycle_after_send_filter=0,
             football_live_cycle_after_integrity=0,
+            football_live_cycle_after_context_filter=0,
             football_live_rejected_invalid_selection=0,
+            football_live_rejected_no_pressure=0,
+            football_live_passed_pressure=0,
+            football_live_context_filter_last_cycle_json=None,
             football_live_cycle_after_score=0,
             football_live_cycle_new_ideas_sendable=0,
             football_live_cycle_duplicate_ideas_blocked=0,
@@ -3663,6 +3671,10 @@ class AutoSignalService:
             football_live_cycle_after_s8=int(len(s8_passed)),
             football_live_cycle_after_s9=int(len(strategy_passed)),
             football_live_cycle_after_strategy=int(len(strategy_passed)),
+            football_live_cycle_after_context_filter=0,
+            football_live_rejected_no_pressure=0,
+            football_live_passed_pressure=0,
+            football_live_context_filter_last_cycle_json=None,
             football_live_cycle_after_value_filter=0,
             football_live_rejected_value_low_favorite=0,
             football_live_rejected_value_no_edge=0,
@@ -3742,7 +3754,302 @@ class AutoSignalService:
                 football_cycle_debug=_dbg_strat,
             )
 
-        # --- VALUE FILTER (post S8, pre scoring) ---
+        # --- CONTEXT FILTER (post S8, pre value filter) ---
+        # API-Football is used only as a fail-open context gate for classic 1X2 picks.
+        context_rejected = 0
+        context_passed = 0
+        context_rejected_samples: list[dict[str, object]] = []
+        context_passed_samples: list[dict[str, object]] = []
+        context_sample_limit = 6
+        after_context: list[ProviderSignalCandidate] = []
+        from app.services.api_football_service import ApiFootballService
+
+        api_football_runtime_ok = bool(getattr(settings, "api_football_enabled", False))
+        api_ctx_svc: ApiFootballService | None = None
+        live_fixtures_af: list | None = None
+        stats_by_fixture: dict[int, object] = {}
+
+        def _winner_side_from_score(sh: int | None, sa: int | None) -> str | None:
+            if sh is None or sa is None:
+                return None
+            if sh > sa:
+                return "home"
+            if sa > sh:
+                return "away"
+            return "draw"
+
+        def _pressure_score(*, shots_total_for: int | None, shots_total_against: int | None, shots_on_for: int | None, shots_on_against: int | None, possession_for: int | None) -> int:
+            score = 0
+            if shots_total_for is not None and shots_total_against is not None and (shots_total_for - shots_total_against) >= 3:
+                score += 1
+            if shots_on_for is not None and shots_on_against is not None and (shots_on_for - shots_on_against) >= 2:
+                score += 1
+            if possession_for is not None and possession_for >= 55:
+                score += 1
+            return score
+
+        def _context_payload_from_stats(stats: object) -> dict[str, object]:
+            if stats is None:
+                return {}
+            return {
+                "home_shots_total": getattr(stats, "home_shots_total", None),
+                "away_shots_total": getattr(stats, "away_shots_total", None),
+                "home_shots_on_target": getattr(stats, "home_shots_on_target", None),
+                "away_shots_on_target": getattr(stats, "away_shots_on_target", None),
+                "home_possession": getattr(stats, "home_possession", None),
+                "away_possession": getattr(stats, "away_possession", None),
+                "home_attacks": getattr(stats, "home_attacks", None),
+                "away_attacks": getattr(stats, "away_attacks", None),
+                "home_dangerous_attacks": getattr(stats, "home_dangerous_attacks", None),
+                "away_dangerous_attacks": getattr(stats, "away_dangerous_attacks", None),
+            }
+
+        if api_football_runtime_ok:
+            try:
+                api_ctx_svc = ApiFootballService()
+                live_fixtures_af = api_ctx_svc.get_live_fixtures()
+            except Exception:
+                live_fixtures_af = None
+
+        for cand in candidates_to_ingest:
+            fam_ctx = family_svc.get_market_family(cand)
+            mt_ctx = _norm_side(str(cand.market.market_type or ""))
+            sel_side = _side_from_selection_1x2(cand)
+            minute_i, sh_i, sa_i = _live_ctx_from_candidate(cand)
+
+            # Only classic result 1X2 picks are context-gated. All other markets pass through unchanged.
+            if not (fam_ctx == "result" and mt_ctx in {"1x2", "match_winner"} and sel_side in {"home", "away"}):
+                after_context.append(cand)
+                continue
+
+            if not api_ctx_svc or not live_fixtures_af:
+                logger.info(
+                    "[CONTEXT] match=%s selection=%s side=%s -> skip(api_football_unavailable)",
+                    str(cand.match.match_name or "")[:140],
+                    str(cand.market.selection or ""),
+                    sel_side,
+                )
+                after_context.append(cand)
+                continue
+
+            fx = api_ctx_svc.map_winline_match_to_fixture(
+                winline_home=str(cand.match.home_team or ""),
+                winline_away=str(cand.match.away_team or ""),
+                fixtures=live_fixtures_af,
+            )
+            if fx is None:
+                logger.info(
+                    "[CONTEXT] match=%s selection=%s side=%s -> skip(api_football_fixture_not_mapped)",
+                    str(cand.match.match_name or "")[:140],
+                    str(cand.market.selection or ""),
+                    sel_side,
+                )
+                after_context.append(cand)
+                continue
+
+            stats = stats_by_fixture.get(int(fx.fixture_id))
+            if stats is None:
+                try:
+                    stats = api_ctx_svc.get_fixture_statistics(int(fx.fixture_id))
+                except Exception:
+                    stats = None
+                stats_by_fixture[int(fx.fixture_id)] = stats
+            if stats is None:
+                logger.info(
+                    "[CONTEXT] match=%s selection=%s side=%s fixture=%s -> skip(api_football_stats_missing)",
+                    str(cand.match.match_name or "")[:140],
+                    str(cand.market.selection or ""),
+                    sel_side,
+                    int(fx.fixture_id),
+                )
+                after_context.append(cand)
+                continue
+
+            home_pressure = _pressure_score(
+                shots_total_for=getattr(stats, "home_shots_total", None),
+                shots_total_against=getattr(stats, "away_shots_total", None),
+                shots_on_for=getattr(stats, "home_shots_on_target", None),
+                shots_on_against=getattr(stats, "away_shots_on_target", None),
+                possession_for=getattr(stats, "home_possession", None),
+            )
+            away_pressure = _pressure_score(
+                shots_total_for=getattr(stats, "away_shots_total", None),
+                shots_total_against=getattr(stats, "home_shots_total", None),
+                shots_on_for=getattr(stats, "away_shots_on_target", None),
+                shots_on_against=getattr(stats, "home_shots_on_target", None),
+                possession_for=getattr(stats, "away_possession", None),
+            )
+            selected_pressure = home_pressure if sel_side == "home" else away_pressure
+            winner_side = _winner_side_from_score(sh_i, sa_i)
+            trailing = bool(winner_side in {"home", "away"} and winner_side != sel_side)
+            decision = "pass"
+            reject_reason: str | None = None
+            if selected_pressure < 2:
+                reject_reason = "reject_context_trailing_no_pressure" if trailing else "reject_context_no_pressure"
+                decision = "reject"
+
+            ctx_payload = {
+                "source": "api_football",
+                "enabled": True,
+                "fixture_id": int(fx.fixture_id),
+                "selected_side": sel_side,
+                "selected_pressure_score": int(selected_pressure),
+                "home_pressure_score": int(home_pressure),
+                "away_pressure_score": int(away_pressure),
+                "decision": decision,
+                "reject_reason": reject_reason,
+                "minute": minute_i,
+                "score_home": sh_i,
+                "score_away": sa_i,
+                "stats": _context_payload_from_stats(stats),
+            }
+            logger.info(
+                "[CONTEXT] match=%s fixture=%s side=%s pressure home=%s away=%s selected=%s minute=%s score=%s:%s -> %s%s",
+                str(cand.match.match_name or "")[:140],
+                int(fx.fixture_id),
+                sel_side,
+                int(home_pressure),
+                int(away_pressure),
+                int(selected_pressure),
+                minute_i,
+                sh_i,
+                sa_i,
+                decision,
+                f" ({reject_reason})" if reject_reason else "",
+            )
+
+            prev_fs_ctx = dict(cand.feature_snapshot_json or {})
+            cand_ctx = cand.model_copy(update={"feature_snapshot_json": {**prev_fs_ctx, "football_live_context_filter": ctx_payload}})
+            sample = {
+                "event_id": str(_football_event_id(cand_ctx) or ""),
+                "match": str(cand_ctx.match.match_name or ""),
+                "fixture_id": int(fx.fixture_id),
+                "minute": minute_i,
+                "score": f"{sh_i}:{sa_i}" if sh_i is not None and sa_i is not None else None,
+                "selection": str(cand_ctx.market.selection or ""),
+                "selected_side": sel_side,
+                "home_pressure": int(home_pressure),
+                "away_pressure": int(away_pressure),
+                "selected_pressure": int(selected_pressure),
+                "decision": decision,
+                "reject_reason": reject_reason,
+                "stats": _context_payload_from_stats(stats),
+            }
+            if decision == "reject":
+                context_rejected += 1
+                if len(context_rejected_samples) < context_sample_limit:
+                    context_rejected_samples.append(sample)
+                continue
+
+            context_passed += 1
+            if len(context_passed_samples) < context_sample_limit:
+                context_passed_samples.append(sample)
+            after_context.append(cand_ctx)
+
+        side_after_context_filter = _side_breakdown(list(after_context))
+        candidates_to_ingest = after_context
+        diagnostics.update(
+            football_live_rejected_no_pressure=int(context_rejected),
+            football_live_passed_pressure=int(context_passed),
+            football_live_cycle_after_context_filter=int(len(after_context)),
+            football_live_context_filter_last_cycle_json=json.dumps(
+                {
+                    "api_football_runtime_ok": bool(api_football_runtime_ok),
+                    "mapped_live_fixtures": len(live_fixtures_af or []),
+                    "rejected_no_pressure": int(context_rejected),
+                    "passed_pressure": int(context_passed),
+                    "rejected_samples": context_rejected_samples,
+                    "passed_samples": context_passed_samples,
+                },
+                ensure_ascii=False,
+            )[:12000],
+        )
+        try:
+            strategy_gate_debug["context_filter_rejected_samples"] = context_rejected_samples
+            strategy_gate_debug["context_filter_passed_samples"] = context_passed_samples
+        except Exception:
+            pass
+
+        if not candidates_to_ingest:
+            _persist_side_funnel_once(
+                stages={
+                    "after_integrity": side_after_integrity,
+                    "after_s8": side_after_s8,
+                    "after_context_filter": side_after_context_filter,
+                    "after_value_filter": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "after_scoring_all": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "after_scoring": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                    "final_selected": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
+                },
+                samples=away_draw_samples,
+            )
+            try:
+                strategy_gate_debug["context_filter_rejected_samples"] = context_rejected_samples
+                strategy_gate_debug["context_filter_passed_samples"] = context_passed_samples
+            except Exception:
+                pass
+            diagnostics.update(
+                final_signals_count=0,
+                messages_sent_count=0,
+                football_sent_count=0,
+                last_delivery_reason="blocked_context_filter",
+                note="all strategy-approved candidates rejected by context filter",
+            )
+            _dbg_c = compile_football_cycle_debug(
+                fb_preview=fb_preview,
+                fb_cvf=fb_cvf,
+                fb_post_send=fb_post_send_saved,
+                fb_post_integrity=fb_post_integrity_saved,
+                enriched_scored=enriched,
+                finalists=[],
+                finalists_pre_session=[],
+                min_score=float(settings.football_min_signal_score or 60.0),
+                family_svc=FootballSignalSendFilterService(),
+                send_filter_stats=send_filter_result.stats if send_filter_result else None,
+                integrity_dropped_checks=list(integrity_result.dropped_checks),
+                dry_run=dry_run,
+                global_block="blocked_context_filter",
+                min_score_base=float(settings.football_min_signal_score or 60.0),
+                score_relief_note="context_filter",
+                live_send_stats=strategy_gate_debug,
+                finalist_send_meta={},
+                single_relief_max_gap=float(single_gap_max),
+            )
+            return AutoSignalCycleResult(
+                endpoint=fetch_res.endpoint,
+                fetch_ok=True,
+                preview_candidates=preview_candidates,
+                preview_skipped_items=preview_skipped_items,
+                created_signal_ids=[],
+                created_signals_count=0,
+                skipped_candidates_count=int(omitted_by_limit),
+                notifications_sent_count=0,
+                preview_only=False,
+                message="blocked_context_filter",
+                raw_events_count=raw_events_count,
+                normalized_markets_count=normalized_markets_count,
+                candidates_before_filter_count=len(candidates_before_filter),
+                candidates_after_filter_count=len(filtered_candidates),
+                runtime_paused=False,
+                runtime_active_sports=active_sports,
+                source_name=source_name,
+                live_auth_status=live_auth_status,
+                last_live_http_status=fetch_res.status_code,
+                fallback_used=fallback_used,
+                fallback_source_name=fallback_source_name,
+                rejection_reason="blocked_context_filter",
+                dry_run=dry_run,
+                report_matches_found=report_matches_found,
+                report_candidates=report_candidates,
+                report_after_filter=report_after_filter,
+                report_after_integrity=report_after_integrity,
+                report_after_scoring=0,
+                report_final_signal="НЕТ",
+                report_rejection_code="blocked_context_filter",
+                football_cycle_debug=_dbg_c,
+            )
+
+        # --- VALUE FILTER (post context filter, pre scoring) ---
         # Minimal "value-only" constraints on S8 picks to avoid auto-favorites / no-edge 0:0.
         # Do NOT change scoring or architecture; this is an explicit gate.
         def _safe_float(v: object) -> float | None:
@@ -3934,6 +4241,7 @@ class AutoSignalService:
                 stages={
                     "after_integrity": side_after_integrity,
                     "after_s8": side_after_s8,
+                    "after_context_filter": side_after_context_filter,
                     "after_value_filter": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
                     "after_scoring_all": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
                     "after_scoring": {"home": 0, "away": 0, "draw": 0, "unknown": 0, "total": 0},
@@ -4385,6 +4693,7 @@ class AutoSignalService:
             stages={
                 "after_integrity": side_after_integrity,
                 "after_s8": side_after_s8,
+                "after_context_filter": side_after_context_filter,
                 "after_value_filter": _side_breakdown(list(after_value)),
                 "after_scoring_all": side_after_scoring_all,
                 "after_scoring": side_after_scoring,
