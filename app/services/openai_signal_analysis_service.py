@@ -63,6 +63,81 @@ class OpenAISignalAnalysisService:
 
     _BASE_URL = "https://api.openai.com"
     _MODEL = "gpt-4o-mini"
+    _ALLOWED_VERDICTS = {"good_signal", "bad_signal", "neutral_signal"}
+    _ALLOWED_ERROR_TYPES = {
+        "no_value_favorite",
+        "late_random_pick",
+        "wrong_side_bias",
+        "market_misread",
+        "noise_signal",
+        "correct_value_bet",
+        "insufficient_context",
+        "other",
+    }
+
+    def _normalize_and_validate(self, analysis: dict[str, Any]) -> dict[str, Any]:
+        """Hard-normalize OpenAI JSON to a safe schema; never raise."""
+        out: dict[str, Any] = {}
+        warn: list[str] = []
+
+        verdict = str(analysis.get("verdict") or "").strip()
+        if verdict not in self._ALLOWED_VERDICTS:
+            verdict = "neutral_signal"
+            warn.append("verdict_invalid_defaulted")
+        out["verdict"] = verdict
+
+        et = str(analysis.get("error_type") or "").strip()
+        if et not in self._ALLOWED_ERROR_TYPES:
+            et = "other"
+            warn.append("error_type_invalid_defaulted")
+        out["error_type"] = et
+
+        conf = 0.0
+        try:
+            conf = float(analysis.get("confidence"))
+            if conf > 1.0 and conf <= 100.0:
+                conf = conf / 100.0
+                warn.append("confidence_scaled_from_percent")
+            conf = max(0.0, min(1.0, conf))
+        except Exception:
+            conf = 0.0
+            warn.append("confidence_parse_failed_defaulted")
+        out["confidence"] = round(conf, 4)
+
+        mr = str(analysis.get("mistake_reason") or "").strip()
+        out["mistake_reason"] = mr[:220] if mr else ""
+
+        tags_in = analysis.get("pattern_tags")
+        tags: list[str] = []
+        if isinstance(tags_in, list):
+            for t in tags_in[:30]:
+                if not t:
+                    continue
+                ts = str(t).strip()
+                if ts:
+                    tags.append(ts[:60])
+        out["pattern_tags"] = tags
+
+        out["should_penalize"] = bool(analysis.get("should_penalize"))
+        out["should_boost"] = bool(analysis.get("should_boost"))
+
+        # Basic consistency: don't allow confident contradictory actions
+        if out["verdict"] == "good_signal" and out["should_penalize"] and not out["should_boost"]:
+            warn.append("inconsistent_good_but_penalize")
+            if out["confidence"] >= 0.75:
+                out["should_penalize"] = False
+        if out["verdict"] == "bad_signal" and out["should_boost"] and not out["should_penalize"]:
+            warn.append("inconsistent_bad_but_boost")
+            if out["confidence"] >= 0.75:
+                out["should_boost"] = False
+
+        sr = str(analysis.get("summary_ru") or "").strip()
+        out["summary_ru"] = sr[:260] if sr else ""
+
+        out["analysis_version"] = 1
+        if warn:
+            out["_validation_warnings"] = warn
+        return out
 
     async def analyze_settled_live_football_signal(
         self,
@@ -151,7 +226,7 @@ class OpenAISignalAnalysisService:
         sys = (
             "You are a post-match football betting signal auditor. "
             "Return STRICT JSON only, no prose. "
-            "Follow the schema exactly and keep strings short."
+            "Follow the schema exactly. Confidence must be a float in [0.0, 1.0]. Keep strings short."
         )
         schema = {
             "analysis_version": 1,
@@ -216,10 +291,10 @@ class OpenAISignalAnalysisService:
             if raw_text is None and isinstance(data, dict) and isinstance(data.get("output_text"), str):
                 raw_text = data.get("output_text")
             raw_text = (raw_text or "").strip()
-            analysis = json.loads(raw_text) if raw_text else {}
-            if not isinstance(analysis, dict):
-                analysis = {}
-            analysis["analysis_version"] = 1
+            analysis0 = json.loads(raw_text) if raw_text else {}
+            if not isinstance(analysis0, dict):
+                analysis0 = {}
+            analysis = self._normalize_and_validate(analysis0)
             analysis["_meta"] = {
                 "model": self._MODEL,
                 "analyzed_at_utc": datetime.now(timezone.utc).isoformat(),
