@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import html
 import logging
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 
 from app.core.constants import MAX_TELEGRAM_MESSAGE_LENGTH
 from app.schemas.analytics import SignalAnalyticsReport
@@ -39,9 +41,12 @@ class NotificationService:
         return text.replace(" vs ", " — ")
 
     def _match_line_for_telegram(self, match_name: str) -> str:
-        """Only team names in inline backticks (plain text; easy tap-to-copy in Telegram)."""
-        safe = (match_name or "").strip().replace("`", "'")
-        return f"⚽ Матч: `{safe}`"
+        """Render only team names as a Telegram HTML code fragment."""
+        safe = html.escape((match_name or "").strip())
+        return f"⚽ Матч: <code>{safe}</code>"
+
+    def _html_text(self, value: str | None) -> str:
+        return html.escape((value or "").strip())
 
     def _fmt_decimal(self, value: Decimal | None, places: int = 2) -> str:
         if value is None:
@@ -123,16 +128,16 @@ class NotificationService:
         lines.extend(
             [
                 "",
-                f"🏆 Турнир: {tournament}",
+                f"🏆 Турнир: {self._html_text(tournament)}",
                 self._match_line_for_telegram(match_name),
                 *( [live_line] if live_line else [] ),
-                f"🗓 Начало матча: {match_start}",
-                f"🎯 Ставка: {bet_presentation.main_label}",
-                f"💰 Коэффициент: {odds}",
+                f"🗓 Начало матча: {self._html_text(match_start)}",
+                f"🎯 Ставка: {self._html_text(bet_presentation.main_label)}",
+                f"💰 Коэффициент: {self._html_text(odds)}",
             ]
         )
         if bet_presentation.detail_label and not bool(getattr(s, "is_live", False)):
-            lines.insert(-2, f"🧾 Исход: {bet_presentation.detail_label}")
+            lines.insert(-2, f"🧾 Исход: {self._html_text(bet_presentation.detail_label)}")
         return "\n".join(lines)
 
     def format_result_message(self, signal_report: SignalAnalyticsReport, quality_report: SignalQualityReport) -> str:
@@ -182,7 +187,7 @@ class NotificationService:
             getattr(getattr(report, "signal", None), "id", None),
             chat_id,
         )
-        await bot.send_message(chat_id=chat_id, text=self._trim(text))
+        await bot.send_message(chat_id=chat_id, text=self._trim(text), parse_mode=ParseMode.HTML)
 
     async def send_result_notification(
         self,
