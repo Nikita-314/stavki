@@ -86,6 +86,8 @@ class SportmonksFixtureLite:
     score_away: int | None = None
     starting_at: str | None = None
     league_id: int | None = None
+    state_id: int | None = None
+    result_info: str | None = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +225,8 @@ class SportmonksService:
                     away_team_id=away_id,
                     starting_at=row.get("starting_at"),
                     league_id=_safe_int(row.get("league_id")),
+                    state_id=_safe_int(row.get("state_id")),
+                    result_info=str(row.get("result_info") or "") or None,
                     minute=minute,
                     score_home=sh,
                     score_away=sa,
@@ -301,6 +305,8 @@ class SportmonksService:
                     away_team_id=away_id,
                     starting_at=row.get("starting_at"),
                     league_id=_safe_int(row.get("league_id")),
+                    state_id=_safe_int(row.get("state_id")),
+                    result_info=str(row.get("result_info") or "") or None,
                     minute=_safe_int(row.get("minute")) or _safe_int(row.get("time")),
                     score_home=sh,
                     score_away=sa,

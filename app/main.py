@@ -12,6 +12,9 @@ from app.bot.handlers import debug_router
 from app.db.session import create_engine, create_sessionmaker
 from app.services.auto_signal_service import AutoSignalService
 from app.services.external_api_monitor_service import ExternalApiMonitorService
+from app.services.football_finished_result_autosettlement_service import (
+    FootballFinishedResultAutosettlementService,
+)
 from app.services.winline_result_autosettlement_service import WinlineResultAutoSettlementService
 
 
@@ -101,19 +104,32 @@ async def main() -> None:
     async def _winline_settlement_loop_runner() -> None:
         await WinlineResultAutoSettlementService().run_forever(sessionmaker, interval_seconds=120)
 
+    async def _football_finished_result_loop_runner() -> None:
+        await FootballFinishedResultAutosettlementService().run_forever(
+            sessionmaker,
+            interval_seconds=15 * 60,
+            limit=50,
+            lookback_days=3,
+            older_than_hours=4,
+        )
+
     football_live_task = asyncio.create_task(_football_live_loop_runner())
     settlement_task = asyncio.create_task(_winline_settlement_loop_runner())
+    finished_result_task = asyncio.create_task(_football_finished_result_loop_runner())
     external_api_task = asyncio.create_task(_external_api_monitor_loop())
     try:
         await dp.start_polling(bot, sessionmaker=sessionmaker)
     finally:
         football_live_task.cancel()
         settlement_task.cancel()
+        finished_result_task.cancel()
         external_api_task.cancel()
         with suppress(asyncio.CancelledError):
             await football_live_task
         with suppress(asyncio.CancelledError):
             await settlement_task
+        with suppress(asyncio.CancelledError):
+            await finished_result_task
         with suppress(asyncio.CancelledError):
             await external_api_task
         await engine.dispose()

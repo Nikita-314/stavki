@@ -233,6 +233,9 @@ class ApiFootballFixtureLite:
     score_home: int | None
     score_away: int | None
     league: str | None = None
+    starting_at: str | None = None
+    status_short: str | None = None
+    status_long: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,6 +357,61 @@ class ApiFootballService:
                     score_home=_safe_int(goals.get("home")),
                     score_away=_safe_int(goals.get("away")),
                     league=str(league.get("name") or "") or None,
+                    starting_at=str(fx.get("date") or "") or None,
+                    status_short=str(status.get("short") or "") or None,
+                    status_long=str(status.get("long") or "") or None,
+                )
+            )
+        return out
+
+    def get_fixtures_by_date(self, date: str) -> list[ApiFootballFixtureLite]:
+        if not self._require_key():
+            return []
+        try:
+            with self._client() as c:
+                r = c.get("/fixtures", params={"date": str(date)})
+                r.raise_for_status()
+                payload = r.json()
+        except Exception as e:
+            logger.info("[API_FOOTBALL] fixtures by date failed date=%s: %s", date, e)
+            return []
+        if isinstance(payload, dict):
+            errs = payload.get("errors")
+            if isinstance(errs, dict) and errs:
+                logger.info("[API_FOOTBALL] fixtures by date errors date=%s: %s", date, errs)
+        resp = payload.get("response") if isinstance(payload, dict) else None
+        if not isinstance(resp, list):
+            return []
+
+        out: list[ApiFootballFixtureLite] = []
+        for row in resp:
+            if not isinstance(row, dict):
+                continue
+            fx = row.get("fixture") if isinstance(row.get("fixture"), dict) else {}
+            teams = row.get("teams") if isinstance(row.get("teams"), dict) else {}
+            goals = row.get("goals") if isinstance(row.get("goals"), dict) else {}
+            league = row.get("league") if isinstance(row.get("league"), dict) else {}
+            fid = _safe_int(fx.get("id"))
+            if fid is None:
+                continue
+            status = fx.get("status") if isinstance(fx.get("status"), dict) else {}
+            minute = _safe_int(status.get("elapsed"))
+            home = teams.get("home") if isinstance(teams.get("home"), dict) else {}
+            away = teams.get("away") if isinstance(teams.get("away"), dict) else {}
+            out.append(
+                ApiFootballFixtureLite(
+                    fixture_id=fid,
+                    home_team=str(home.get("name") or ""),
+                    away_team=str(away.get("name") or ""),
+                    home_team_id=_safe_int(home.get("id")),
+                    away_team_id=_safe_int(away.get("id")),
+                    minute=minute,
+                    score_home=_safe_int(goals.get("home")),
+                    score_away=_safe_int(goals.get("away")),
+                    league=str(league.get("name") or "") or None,
+                    starting_at=str(fx.get("date") or "") or None,
+                    status_short=str(status.get("short") or "") or None,
+                    status_long=str(status.get("long") or "") or None,
                 )
             )
         return out
