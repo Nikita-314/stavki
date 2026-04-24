@@ -3465,6 +3465,9 @@ class AutoSignalService:
         s8_fail: dict[str, int] = {}
         s9_fail: dict[str, int] = {}
         s8_ft_fail: dict[str, int] = {}
+        s8_evaluated_count = 0
+        s8_result_1x2_candidate_count = 0
+        s8_result_1x2_pass_count = 0
         strategy_rejected_samples: list[dict[str, object]] = []
         strategy_rejected_limit = 5
         ft_1x2_rejected_samples: list[dict[str, object]] = []
@@ -3552,7 +3555,71 @@ class AutoSignalService:
                     s2_fail[str(r)] = int(s2_fail.get(str(r), 0) or 0) + 1
 
             # --- S8 first ---
+            fam_for_s8 = ""
+            mt_for_s8 = ""
+            st_for_s8 = ""
+            raw_sel_for_s8 = ""
+            sel_tok_for_s8 = None
+            fs_raw_minute = None
+            fs_raw_sh = None
+            fs_raw_sa = None
+            fa_exists = False
+            fa_minute = None
+            fa_sh = None
+            fa_sa = None
+            try:
+                fam_for_s8 = str(family_svc.get_market_family(c) or "")
+                mt_for_s8 = _norm_side(str(c.market.market_type or ""))
+                st_for_s8 = _result_subtype_local(c)
+                raw_sel_for_s8 = str(c.market.selection or "")
+                sel_tok_for_s8 = _strict_1x2_token(raw_sel_for_s8)
+                fs0 = c.feature_snapshot_json if isinstance(c.feature_snapshot_json, dict) else {}
+                fs_raw_minute = fs0.get("minute")
+                fs_raw_sh = fs0.get("score_home")
+                fs_raw_sa = fs0.get("score_away")
+                fa0 = fs0.get("football_analytics") if isinstance(fs0.get("football_analytics"), dict) else None
+                fa_exists = isinstance(fa0, dict)
+                if fa_exists:
+                    fa_minute = fa0.get("minute")
+                    fa_sh = fa0.get("score_home")
+                    fa_sa = fa0.get("score_away")
+                if fam_for_s8 == "result" and mt_for_s8 in {"1x2", "match_winner"}:
+                    s8_evaluated_count += 1
+                    if st_for_s8 == "ft_1x2_candidate":
+                        s8_result_1x2_candidate_count += 1
+            except Exception:
+                pass
             d8 = await evaluate_s8_live_1x2_winline_strict(c)
+            try:
+                if fam_for_s8 == "result" and mt_for_s8 in {"1x2", "match_winner"}:
+                    if d8.passed and st_for_s8 == "ft_1x2_candidate":
+                        s8_result_1x2_pass_count += 1
+                    logger.info(
+                        "[FOOTBALL][S8_GATE] event_id=%s target=%s match=%s market_family=%s market_type=%s "
+                        "result_subtype=%s selection=%s selection_token=%s odds=%s football_analytics_exists=%s "
+                        "feature_snapshot_minute=%s feature_snapshot_score=%s:%s football_analytics_minute=%s "
+                        "football_analytics_score=%s:%s s8_passed=%s s8_reasons=%s",
+                        str(_football_event_id(c) or ""),
+                        "yes" if str(_football_event_id(c) or "") in {"15630480", "15644954"} else "no",
+                        str(c.match.match_name or "")[:160],
+                        fam_for_s8,
+                        str(c.market.market_type or ""),
+                        st_for_s8,
+                        raw_sel_for_s8,
+                        sel_tok_for_s8 or "None",
+                        str(c.market.odds_value) if c.market.odds_value is not None else "None",
+                        "yes" if fa_exists else "no",
+                        fs_raw_minute,
+                        fs_raw_sh,
+                        fs_raw_sa,
+                        fa_minute,
+                        fa_sh,
+                        fa_sa,
+                        str(bool(d8.passed)).lower(),
+                        list(d8.reasons or [])[:12],
+                    )
+            except Exception:
+                logger.exception("[FOOTBALL][S8_GATE] candidate debug serialization failed")
             if not d8.passed:
                 for r in (d8.reasons or [])[:12]:
                     s8_fail[str(r)] = int(s8_fail.get(str(r), 0) or 0) + 1
@@ -3732,6 +3799,9 @@ class AutoSignalService:
             "strategy_matches": int(len(strategy_by_eid)),
             "post_integrity_result_like": int(post_integrity_result_like),
             "post_integrity_result_like_1x2": int(post_integrity_result_like_1x2),
+            "s8_evaluated_candidates": int(s8_evaluated_count),
+            "s8_clean_ft_1x2_candidates": int(s8_result_1x2_candidate_count),
+            "s8_clean_ft_1x2_passed": int(s8_result_1x2_pass_count),
             "post_integrity_flow": {
                 "market_family": dict(sorted(flow_family.items(), key=lambda kv: kv[1], reverse=True)),
                 "market_type": dict(sorted(flow_market_type.items(), key=lambda kv: kv[1], reverse=True)[:80]),
@@ -3840,6 +3910,28 @@ class AutoSignalService:
                 report_rejection_code="blocked_no_strategy_match",
                 football_cycle_debug=_dbg_strat,
             )
+
+        def _live_ctx_from_candidate(cand: ProviderSignalCandidate) -> tuple[int | None, int | None, int | None]:
+            fs = getattr(cand, "feature_snapshot_json", None) or {}
+            if not isinstance(fs, dict):
+                fs = {}
+            fa = fs.get("football_analytics") if isinstance(fs.get("football_analytics"), dict) else {}
+            minute = fa.get("minute")
+            sh = fa.get("score_home")
+            sa = fa.get("score_away")
+            try:
+                minute_i = int(minute) if minute is not None else None
+            except Exception:
+                minute_i = None
+            try:
+                sh_i = int(sh) if sh is not None else None
+            except Exception:
+                sh_i = None
+            try:
+                sa_i = int(sa) if sa is not None else None
+            except Exception:
+                sa_i = None
+            return minute_i, sh_i, sa_i
 
         # --- CONTEXT FILTER (post S8, pre value filter) ---
         # API-Football is a soft, fail-open context layer for classic 1X2 picks.
@@ -4168,28 +4260,6 @@ class AutoSignalService:
                 return float(v)
             except (TypeError, ValueError):
                 return None
-
-        def _live_ctx_from_candidate(cand: ProviderSignalCandidate) -> tuple[int | None, int | None, int | None]:
-            fs = getattr(cand, "feature_snapshot_json", None) or {}
-            if not isinstance(fs, dict):
-                fs = {}
-            fa = fs.get("football_analytics") if isinstance(fs.get("football_analytics"), dict) else {}
-            minute = fa.get("minute")
-            sh = fa.get("score_home")
-            sa = fa.get("score_away")
-            try:
-                minute_i = int(minute) if minute is not None else None
-            except Exception:
-                minute_i = None
-            try:
-                sh_i = int(sh) if sh is not None else None
-            except Exception:
-                sh_i = None
-            try:
-                sa_i = int(sa) if sa is not None else None
-            except Exception:
-                sa_i = None
-            return minute_i, sh_i, sa_i
 
         rej_low_fav = 0
         rej_no_edge = 0
