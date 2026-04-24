@@ -113,6 +113,7 @@ class SignalRuntimeDiagnosticsState:
     football_live_rejected_invalid_selection: int = 0
     """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""
     football_live_rejected_no_pressure: int = 0
+    football_live_rejected_s8_home_00_without_api_context: int = 0
     football_live_passed_pressure: int = 0
     football_live_context_filter_last_cycle_json: str | None = None
 
