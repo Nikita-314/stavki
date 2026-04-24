@@ -42,6 +42,8 @@ class FootballBetFormatterService:
     _ODD_TOKENS = {"ODD", "НЕЧЕТ", "НЕЧЁТ", "НЕЧЕТНЫЙ", "НЕЧЁТНЫЙ"}
     _EVEN_TOKENS = {"EVEN", "ЧЕТ", "ЧЁТ", "ЧЕТНЫЙ", "ЧЁТНЫЙ"}
     _SHORT_TOKEN_ALIASES = {"Y", "N", "O", "U"}
+    _TEAM_SIDE_HOME_EXACT_TOKENS = {"HOME", "P1", "П1", "HOME TEAM"}
+    _TEAM_SIDE_AWAY_EXACT_TOKENS = {"AWAY", "P2", "П2", "AWAY TEAM"}
 
     def format_bet(
         self,
@@ -931,13 +933,14 @@ class FootballBetFormatterService:
             return home
         if away and away.lower() in raw.lower():
             return away
-        if self._contains_exact_word_token(upper, self._HOME_TOKENS):
+        # Explicit team-total markers must win over numeric line tokens like "1.5" / "2".
+        if self._contains_market_team_marker(upper, home=True):
             return home or "хозяева"
-        if self._contains_exact_word_token(upper, self._AWAY_TOKENS):
+        if self._contains_market_team_marker(upper, home=False):
             return away or "гости"
-        if self._contains_exact_word_token(upper, self._TEAM_TOTAL_HOME_TOKENS):
+        if self._contains_exact_word_token(upper, self._TEAM_SIDE_HOME_EXACT_TOKENS):
             return home or "хозяева"
-        if self._contains_exact_word_token(upper, self._TEAM_TOTAL_AWAY_TOKENS):
+        if self._contains_exact_word_token(upper, self._TEAM_SIDE_AWAY_EXACT_TOKENS):
             return away or "гости"
         return None
 
@@ -1052,6 +1055,12 @@ class FootballBetFormatterService:
     def _contains_exact_word_token(self, text: str, aliases: set[str]) -> bool:
         words = {part for part in re.split(r"[^A-ZА-Я0-9Ё]+", text or "") if part}
         return any(alias.upper() in words for alias in aliases)
+
+    def _contains_market_team_marker(self, text: str, *, home: bool) -> bool:
+        upper = text or ""
+        if home:
+            return "@1" in upper or self._contains_exact_word_token(upper, self._TEAM_TOTAL_HOME_TOKENS)
+        return "@2" in upper or self._contains_exact_word_token(upper, self._TEAM_TOTAL_AWAY_TOKENS)
 
     def _humanize_team(self, raw: str | None) -> str:
         text = (raw or "").strip()

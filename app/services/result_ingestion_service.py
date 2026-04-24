@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 import math
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BetResult, SportType
 from app.db.repositories.signal_repository import SignalRepository
 from app.schemas.event_result import EventResultInput, EventResultProcessingResult
+from app.services.football_bet_formatter_service import FootballBetFormatterService
 from app.schemas.settlement import SettlementCreate
 from app.services.failure_review_service import FailureReviewService
 from app.services.football_signal_outcome_reason_service import FootballSignalOutcomeReasonService
@@ -31,10 +32,8 @@ class ResultIngestionService:
         skipped = 0
         created_reviews = 0
 
-        supported_market_types = {"match_winner", "map_winner", "1x2"}
-
         for s in signals:
-            if s.market_type not in supported_market_types:
+            if not self._supports_market_type(signal=s):
                 skipped += 1
                 continue
 
@@ -100,10 +99,7 @@ class ResultIngestionService:
     ) -> BetResult | None:
         if is_void:
             return BetResult.VOID
-        if signal.sport == SportType.FOOTBALL and str(signal.market_type or "").strip().lower() in {
-            "match_winner",
-            "1x2",
-        }:
+        if signal.sport == SportType.FOOTBALL:
             by_score = self._determine_football_result_from_score(signal=signal, payload=result_payload_json)
             if by_score is not None:
                 return by_score
@@ -124,13 +120,25 @@ class ResultIngestionService:
     def _determine_football_result_from_score(self, *, signal, payload: dict | None) -> BetResult | None:
         if not isinstance(payload, dict):
             return None
-        sh = self._safe_int(payload.get("score_home") or payload.get("home_score") or payload.get("goals_home"))
-        sa = self._safe_int(payload.get("score_away") or payload.get("away_score") or payload.get("goals_away"))
+        sh = self._safe_int(self._first_present(payload, "score_home", "home_score", "goals_home"))
+        sa = self._safe_int(self._first_present(payload, "score_away", "away_score", "goals_away"))
         if sh is None or sa is None:
             return None
-        if sh > sa:
+        market_type = str(signal.market_type or "").strip().lower()
+        if market_type in {"match_winner", "1x2"}:
+            return self._determine_football_1x2_result_from_score(signal=signal, score_home=sh, score_away=sa)
+        return self._determine_football_total_result_from_score(signal=signal, score_home=sh, score_away=sa)
+
+    def _determine_football_1x2_result_from_score(
+        self,
+        *,
+        signal,
+        score_home: int,
+        score_away: int,
+    ) -> BetResult | None:
+        if score_home > score_away:
             winner = "home"
-        elif sa > sh:
+        elif score_away > score_home:
             winner = "away"
         else:
             winner = "draw"
@@ -142,6 +150,62 @@ class ResultIngestionService:
         if sel_side is None:
             return None
         return BetResult.WIN if sel_side == winner else BetResult.LOSE
+
+    def _determine_football_total_result_from_score(
+        self,
+        *,
+        signal,
+        score_home: int,
+        score_away: int,
+    ) -> BetResult | None:
+        ctx = FootballBetFormatterService().describe_total_context(
+            market_type=getattr(signal, "market_type", None),
+            market_label=getattr(signal, "market_label", None),
+            selection=getattr(signal, "selection", None),
+            home_team=getattr(signal, "home_team", None),
+            away_team=getattr(signal, "away_team", None),
+            section_name=getattr(signal, "section_name", None),
+            subsection_name=getattr(signal, "subsection_name", None),
+        )
+        if ctx is None or not ctx.total_side or not ctx.total_line:
+            return None
+        line = self._safe_decimal(ctx.total_line)
+        if line is None:
+            return None
+        observed: Decimal | None
+        if ctx.target_scope == "match":
+            observed = Decimal(score_home + score_away)
+        elif ctx.target_scope == "home_team":
+            observed = Decimal(score_home)
+        elif ctx.target_scope == "away_team":
+            observed = Decimal(score_away)
+        elif ctx.target_scope == "team_total":
+            side = self._team_total_side_from_context(
+                team_name=ctx.team_name,
+                home_team=getattr(signal, "home_team", None),
+                away_team=getattr(signal, "away_team", None),
+            )
+            if side == "home":
+                observed = Decimal(score_home)
+            elif side == "away":
+                observed = Decimal(score_away)
+            else:
+                return None
+        else:
+            return None
+        if ctx.total_side == "ТБ":
+            if observed > line:
+                return BetResult.WIN
+            if observed == line:
+                return BetResult.VOID
+            return BetResult.LOSE
+        if ctx.total_side == "ТМ":
+            if observed < line:
+                return BetResult.WIN
+            if observed == line:
+                return BetResult.VOID
+            return BetResult.LOSE
+        return None
 
     def _selection_matches_outcome(
         self,
@@ -184,6 +248,48 @@ class ResultIngestionService:
             return int(f)
         except (TypeError, ValueError):
             return None
+
+    def _safe_decimal(self, value: object) -> Decimal | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return Decimal(str(value).strip().replace(",", "."))
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _first_present(self, payload: dict, *keys: str) -> object | None:
+        for key in keys:
+            if key in payload:
+                return payload.get(key)
+        return None
+
+    def _team_total_side_from_context(
+        self,
+        *,
+        team_name: str | None,
+        home_team: str | None,
+        away_team: str | None,
+    ) -> str | None:
+        if not team_name:
+            return None
+        return self._selection_side(selection=team_name, home_team=home_team, away_team=away_team)
+
+    def _supports_market_type(self, *, signal) -> bool:
+        market_type = str(getattr(signal, "market_type", "") or "").strip().lower()
+        if market_type in {"match_winner", "map_winner", "1x2"}:
+            return True
+        if getattr(signal, "sport", None) != SportType.FOOTBALL:
+            return False
+        ctx = FootballBetFormatterService().describe_total_context(
+            market_type=getattr(signal, "market_type", None),
+            market_label=getattr(signal, "market_label", None),
+            selection=getattr(signal, "selection", None),
+            home_team=getattr(signal, "home_team", None),
+            away_team=getattr(signal, "away_team", None),
+            section_name=getattr(signal, "section_name", None),
+            subsection_name=getattr(signal, "subsection_name", None),
+        )
+        return bool(ctx and ctx.total_side and ctx.total_line)
 
     def _unit_profit_loss(self, *, result: BetResult, odds_at_signal: Decimal) -> Decimal:
         if result == BetResult.WIN:
