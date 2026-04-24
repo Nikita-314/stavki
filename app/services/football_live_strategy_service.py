@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import re
 from typing import Any
 
 from app.core.enums import SportType
@@ -166,6 +168,114 @@ def _result_subtype(c: ProviderSignalCandidate) -> str:
 def _min_goals_strict_over(line: float) -> int:
     # strict over: 2.5 => need 3 total goals
     return int(line + 0.5)
+
+
+def _min_goals_to_win_over(line: float) -> int:
+    # Team total OVER should mean "win", not "push":
+    # 0.5 -> 1, 1.0 -> 2, 1.5 -> 2
+    return int(math.floor(float(line))) + 1
+
+
+def _analytics_from_candidate(c: ProviderSignalCandidate) -> dict[str, Any]:
+    fs = c.feature_snapshot_json or {}
+    fa = fs.get("football_analytics")
+    return dict(fa) if isinstance(fa, dict) else {}
+
+
+def _competition_is_blocked(c: ProviderSignalCandidate) -> bool:
+    blob = " ".join(
+        [
+            str(c.match.tournament_name or ""),
+            str(c.match.match_name or ""),
+            str(c.match.home_team or ""),
+            str(c.match.away_team or ""),
+        ]
+    )
+    t = _norm(blob)
+    simple_tokens = (
+        "women",
+        "female",
+        "жен",
+        "дев",
+        "youth",
+        "junior",
+        "reserve",
+        "reserves",
+        "e-football",
+        "efootball",
+        "esoccer",
+        "кибер",
+    )
+    if any(tok in t for tok in simple_tokens):
+        return True
+    if re.search(r"\bu(?:17|18|19|20|21|23)\b", t):
+        return True
+    if re.search(r"\bii\b", t):
+        return True
+    if re.search(r"\bb team\b", t):
+        return True
+    return False
+
+
+def _team_total_target_from_candidate(
+    c: ProviderSignalCandidate,
+) -> tuple[str | None, str | None, float | None, str | None]:
+    fmt = FootballBetFormatterService()
+    ctx = fmt.describe_total_context(
+        market_type=c.market.market_type,
+        market_label=c.market.market_label,
+        selection=c.market.selection,
+        home_team=c.match.home_team,
+        away_team=c.match.away_team,
+        section_name=c.market.section_name,
+        subsection_name=c.market.subsection_name,
+    )
+    if ctx is None:
+        return None, None, None, None
+
+    line_f: float | None = None
+    if ctx.total_line:
+        try:
+            line_f = float(str(ctx.total_line).replace(",", "."))
+        except ValueError:
+            line_f = None
+
+    target_scope = _norm(str(ctx.target_scope or ""))
+    if target_scope == "home_team":
+        return "home", c.match.home_team, line_f, target_scope
+    if target_scope == "away_team":
+        return "away", c.match.away_team, line_f, target_scope
+    if target_scope != "team_total":
+        return None, None, line_f, target_scope
+
+    combined = " ".join(
+        [
+            str(c.market.section_name or ""),
+            str(c.market.subsection_name or ""),
+            str(c.market.market_label or ""),
+            str(c.market.selection or ""),
+        ]
+    )
+    text = _norm(combined)
+    home = _norm(str(c.match.home_team or ""))
+    away = _norm(str(c.match.away_team or ""))
+
+    if ctx.team_name:
+        tname = _norm(ctx.team_name)
+        if home and tname == home:
+            return "home", c.match.home_team, line_f, target_scope
+        if away and tname == away:
+            return "away", c.match.away_team, line_f, target_scope
+
+    if any(tok in text for tok in ("it1", "ит1", "команда 1", "team 1", "home team")):
+        return "home", c.match.home_team, line_f, target_scope
+    if any(tok in text for tok in ("it2", "ит2", "команда 2", "team 2", "away team")):
+        return "away", c.match.away_team, line_f, target_scope
+    if home and home in text:
+        return "home", c.match.home_team, line_f, target_scope
+    if away and away in text:
+        return "away", c.match.away_team, line_f, target_scope
+    return None, None, line_f, target_scope
 
 
 def evaluate_s1_live_1x2_controlled(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
@@ -527,6 +637,103 @@ async def evaluate_s9_live_totals_over_controlled(c: ProviderSignalCandidate) ->
     )
 
 
+async def evaluate_s10_live_team_total_over_controlled(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
+    """Controlled LIVE team total OVER strategy."""
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+    analytics = _analytics_from_candidate(c)
+
+    reasons: list[str] = []
+    fam = FootballSignalSendFilterService().get_market_family(c)
+    if fam != "totals":
+        reasons.append("market_not_team_total")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if _competition_is_blocked(c):
+        reasons.append("competition_blocked")
+
+    if not _is_over_selection(str(c.market.selection or "")):
+        reasons.append("not_pure_over")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    side, team_name, line_f, target_scope = _team_total_target_from_candidate(c)
+    if target_scope not in {"home_team", "away_team", "team_total"}:
+        reasons.append("market_not_team_total")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    if side not in {"home", "away"} or not str(team_name or "").strip():
+        reasons.append("team_not_detected")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if line_f not in (0.5, 1.0, 1.5):
+        reasons.append("line_not_allowed")
+
+    if minute is None or minute < 15 or minute > 70:
+        reasons.append("minute_window")
+
+    if odds is None or not (1.45 <= float(odds) <= 2.40):
+        reasons.append("odds_window")
+
+    if sh is None or sa is None:
+        reasons.append("unknown_team_score")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    team_score = sh if side == "home" else sa
+    opp_score = sa if side == "home" else sh
+    if team_score is None:
+        reasons.append("unknown_team_score")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if line_f is not None:
+        goals_needed = _min_goals_to_win_over(line_f) - int(team_score)
+        if goals_needed <= 0:
+            reasons.append("already_won_line")
+        elif goals_needed > 1:
+            reasons.append("goals_needed_gt1")
+    else:
+        goals_needed = None
+
+    allowed_basic_scores = {(0, 0), (1, 0), (0, 1), (1, 1)}
+    if (sh, sa) not in allowed_basic_scores:
+        narrow_ok = False
+        if (
+            (sh, sa) in {(2, 0), (0, 2)}
+            and line_f is not None
+            and line_f <= 0.5
+            and team_score == 0
+            and opp_score == 2
+        ):
+            narrow_ok = True
+        if not narrow_ok:
+            reasons.append("score_state_block")
+
+    red_cards_home = _as_int(analytics.get("red_cards_home"))
+    red_cards_away = _as_int(analytics.get("red_cards_away"))
+    team_red_cards = red_cards_home if side == "home" else red_cards_away
+    if team_red_cards is not None and team_red_cards > 0:
+        reasons.append("red_card_block")
+
+    if reasons:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    return FootballLiveStrategyDecision(
+        passed=True,
+        strategy_id="S10_LIVE_TEAM_TOTAL_OVER_CONTROLLED",
+        strategy_name="Strategy 10: LIVE team total over (controlled)",
+        reasons=[
+            "market=team_total over only",
+            f"team={team_name}",
+            f"line={line_f}",
+            "minute 15..70",
+            "odds 1.45..2.40",
+            f"goals_needed={goals_needed}",
+            "no selected-team red card",
+            "competition not blocked",
+        ],
+    )
+
+
 def evaluate_s2_live_total_over_need_1_2(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
     lc = _lc_from_candidate(c)
     minute = _as_int(lc.get("minute"))
@@ -678,9 +885,13 @@ async def evaluate_football_live_strategies_async(c: ProviderSignalCandidate) ->
     d9 = await evaluate_s9_live_totals_over_controlled(c)
     if d9.passed:
         return d9
+    d10 = await evaluate_s10_live_team_total_over_controlled(c)
+    if d10.passed:
+        return d10
     rr: list[str] = []
     rr.extend(list(getattr(d8, "reasons", None) or [])[:12])
     rr.extend(list(getattr(d9, "reasons", None) or [])[:12])
+    rr.extend(list(getattr(d10, "reasons", None) or [])[:12])
     if not rr:
         rr = ["no_strategy_match"]
     return FootballLiveStrategyDecision(passed=False, reasons=rr)

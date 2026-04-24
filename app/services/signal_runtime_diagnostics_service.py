@@ -74,6 +74,7 @@ class SignalRuntimeDiagnosticsState:
     football_live_cycle_after_strategy: int = 0
     football_live_cycle_after_s8: int = 0
     football_live_cycle_after_s9: int = 0
+    football_live_cycle_after_s10: int = 0
     football_live_cycle_after_context_filter: int = 0
     football_live_cycle_after_value_filter: int = 0
     football_live_cycle_after_score: int = 0

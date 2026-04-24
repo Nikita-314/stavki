@@ -37,6 +37,8 @@ class FootballBetFormatterService:
     _NO_TOKENS = {"NO", "НЕТ", "N"}
     _OVER_TOKENS = {"OVER", "БОЛЬШЕ", "TB", "ТБ", "O"}
     _UNDER_TOKENS = {"UNDER", "МЕНЬШЕ", "TM", "ТМ", "U"}
+    _TEAM_TOTAL_HOME_TOKENS = {"IT1", "ИТ1"}
+    _TEAM_TOTAL_AWAY_TOKENS = {"IT2", "ИТ2"}
     _ODD_TOKENS = {"ODD", "НЕЧЕТ", "НЕЧЁТ", "НЕЧЕТНЫЙ", "НЕЧЁТНЫЙ"}
     _EVEN_TOKENS = {"EVEN", "ЧЕТ", "ЧЁТ", "ЧЕТНЫЙ", "ЧЁТНЫЙ"}
     _SHORT_TOKEN_ALIASES = {"Y", "N", "O", "U"}
@@ -591,7 +593,7 @@ class FootballBetFormatterService:
             away_team=away_team,
         )
         total_side = self._normalize_total_side(selection_s) or self._normalize_total_side(market_label_s)
-        total_line = self._extract_numeric_value(selection_s) or self._extract_numeric_value(market_label_s)
+        total_line = self._extract_total_line_value(selection_s) or self._extract_total_line_value(market_label_s)
         total_scope = self._compose_total_scope(period_scope=period_scope, target_scope=target_scope)
         return FootballTotalContext(
             total_scope=total_scope,
@@ -933,6 +935,10 @@ class FootballBetFormatterService:
             return home or "хозяева"
         if self._contains_exact_word_token(upper, self._AWAY_TOKENS):
             return away or "гости"
+        if self._contains_exact_word_token(upper, self._TEAM_TOTAL_HOME_TOKENS):
+            return home or "хозяева"
+        if self._contains_exact_word_token(upper, self._TEAM_TOTAL_AWAY_TOKENS):
+            return away or "гости"
         return None
 
     def _extract_score(self, raw: str) -> str | None:
@@ -944,6 +950,12 @@ class FootballBetFormatterService:
         if not match:
             return None
         return match.group(1).replace(",", ".")
+
+    def _extract_total_line_value(self, raw: str) -> str | None:
+        matches = re.findall(r"([0-9]+(?:[.,][0-9]+)?)", raw or "")
+        if not matches:
+            return None
+        return matches[-1].replace(",", ".")
 
     def _extract_signed_value(self, raw: str) -> str | None:
         match = re.search(r"([+-]\d+(?:[.,]\d+)?)", raw or "")
@@ -1015,6 +1027,10 @@ class FootballBetFormatterService:
 
         if target_scope in {"home_team", "away_team", "team_total"}:
             target = team_name or "команды"
+            if total_side == "ТБ" and total_line:
+                return f"{period_prefix}ИТБ {target} {total_line}".strip()
+            if total_side == "ТМ" and total_line:
+                return f"{period_prefix}ИТМ {target} {total_line}".strip()
             base = f"{period_prefix}тотал {target}".strip()
         else:
             base = f"{period_prefix}тотал".strip()
