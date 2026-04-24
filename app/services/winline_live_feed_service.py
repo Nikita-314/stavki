@@ -22,6 +22,7 @@ import websockets
 from websockets.exceptions import WebSocketException
 
 from app.core.config import Settings, get_settings
+from app.services.winline_raw_line_bridge_service import WinlineRawLineBridgeService
 from app.services.winline_ws_live_binary_codec import (
     LiveChunk,
     attach_tip_templates,
@@ -32,6 +33,8 @@ from app.services.winline_ws_live_binary_codec import (
 logger = logging.getLogger(__name__)
 
 _FOOTBALL_SPORT = 1
+_FOOTBALL_SCORE_RE = re.compile(r"\b(\d{1,2})\s*[:\-–]\s*(\d{1,2})\b")
+_FOOTBALL_CLOCK_RE = re.compile(r"(?:^|\s)(?:1Т|2Т|HT|1H|2H|\d{1,3}')", re.I)
 
 
 @dataclass
@@ -64,6 +67,128 @@ def _is_football_event(ev: dict[str, Any], champs: dict[int, dict[str, Any]]) ->
         return int(c.get("idSport", 0)) == _FOOTBALL_SPORT
     except (TypeError, ValueError):
         return False
+
+
+def _event_has_complete_match_identity(ev: dict[str, Any]) -> bool:
+    cid = ev.get("idChampionship")
+    if cid is None or str(cid).strip() in {"", "0"}:
+        return False
+    members = ev.get("members")
+    if not isinstance(members, list) or len(members) < 2:
+        return False
+    return bool(str(members[0]).strip() and str(members[1]).strip())
+
+
+def _event_has_score_tail(ev: dict[str, Any]) -> bool:
+    tail_utf = ev.get("tail_utf") if isinstance(ev.get("tail_utf"), list) else []
+    return any(isinstance(t, str) and _FOOTBALL_SCORE_RE.search(t) for t in tail_utf)
+
+
+def _event_has_football_clock(ev: dict[str, Any]) -> bool:
+    src = str(ev.get("sourceTime") or ev.get("time") or "").strip()
+    return bool(_FOOTBALL_CLOCK_RE.search(src))
+
+
+def _candidate_incomplete_football_event_ids(acc: _Accum) -> list[int]:
+    if not acc.events or not acc.lines or not acc.tips:
+        return []
+    br = WinlineRawLineBridgeService()
+    lines_by_event: dict[int, list[dict[str, Any]]] = {}
+    for ln in acc.lines:
+        try:
+            eid = int(ln.get("idEvent") or 0)
+        except (TypeError, ValueError):
+            continue
+        if eid <= 0:
+            continue
+        lines_by_event.setdefault(eid, []).append(ln)
+    out: list[int] = []
+    for eid, ev in acc.events.items():
+        if _event_has_complete_match_identity(ev):
+            continue
+        if int(ev.get("duration") or 0) != 45:
+            continue
+        if not _event_has_football_clock(ev) or not _event_has_score_tail(ev):
+            continue
+        merged_lines, _missing = attach_tip_templates(lines_by_event.get(int(eid), []), acc.tips)
+        if not merged_lines:
+            continue
+        market_types: set[str] = set()
+        for ln in merged_lines:
+            try:
+                mt, _src = br.resolve_line_market_type(ln)
+            except Exception:
+                continue
+            market_types.add(str(mt))
+        # Require both core football markets to avoid dragging basketball/volleyball/rugby into football.
+        if "1x2" in market_types and "total_goals" in market_types:
+            out.append(int(eid))
+    out.sort()
+    return out
+
+
+async def _hydrate_events_via_event_plus(
+    s: Settings,
+    *,
+    acc: _Accum,
+    event_ids: list[int],
+    recv_window_seconds: float,
+) -> tuple[int, int]:
+    if not event_ids:
+        return 0, 0
+    hydrated_before = 0
+    for eid in event_ids:
+        ev = acc.events.get(int(eid)) or {}
+        if _event_has_complete_match_identity(ev) and _is_football_event(ev, acc.champs):
+            hydrated_before += 1
+    pending = [int(eid) for eid in event_ids if int(eid) in acc.events]
+    if not pending:
+        return 0, hydrated_before
+    try:
+        async with websockets.connect(  # type: ignore[call-overload]
+            s.winline_live_ws_url,
+            ping_interval=None,
+            close_timeout=5,
+            open_timeout=float(s.winline_live_connect_timeout_seconds or 25),
+        ) as ws:
+            for cmd in ("lang", "RU", "data", "WINLINE", "getdate"):
+                await ws.send(str(cmd))
+            for eid in pending:
+                await ws.send("event.plus")
+                await ws.send(_enc_event(int(eid), 0))
+            deadline = time.monotonic() + max(3.0, recv_window_seconds)
+            while pending and time.monotonic() < deadline:
+                try:
+                    step, body = await _recv_gzip_step(ws, min(1.0, max(0.2, deadline - time.monotonic())))
+                except (TimeoutError, asyncio.TimeoutError):
+                    continue
+                if step != 4:
+                    continue
+                chunk: LiveChunk = parse_live_step4_body(body)
+                for c in chunk.championships:
+                    acc.champs[int(c["id"])] = c
+                for eid, ev in chunk.events.items():
+                    cur = acc.events.get(int(eid), {})
+                    cur.update(ev)
+                    acc.events[int(eid)] = cur
+                pending = [
+                    eid
+                    for eid in pending
+                    if not (
+                        _event_has_complete_match_identity(acc.events.get(int(eid), {}))
+                        and _is_football_event(acc.events.get(int(eid), {}), acc.champs)
+                    )
+                ]
+    except (TimeoutError, asyncio.TimeoutError, OSError, WebSocketException) as e:
+        logger.info("[FOOTBALL][WINLINE_LIVE] event_plus_hydration_failed: %s", e)
+    except Exception:  # noqa: BLE001
+        logger.info("[FOOTBALL][WINLINE_LIVE] event_plus_hydration_other_error", exc_info=True)
+    hydrated_after = 0
+    for eid in event_ids:
+        ev = acc.events.get(int(eid)) or {}
+        if _event_has_complete_match_identity(ev) and _is_football_event(ev, acc.champs):
+            hydrated_after += 1
+    return len(event_ids), hydrated_after
 
 
 def _build_multi_event_raw_payload(
@@ -308,6 +433,24 @@ class WinlineLiveFeedService:
                     err0,
                 )
             else:
+                incomplete_candidate_ids = _candidate_incomplete_football_event_ids(acc)
+                if incomplete_candidate_ids:
+                    recv_window = min(
+                        25.0,
+                        max(6.0, 0.10 * float(s.winline_live_total_timeout_seconds or 180) + len(incomplete_candidate_ids) * 0.20),
+                    )
+                    cand_n, hyd_n = await _hydrate_events_via_event_plus(
+                        s,
+                        acc=acc,
+                        event_ids=incomplete_candidate_ids,
+                        recv_window_seconds=recv_window,
+                    )
+                    logger.info(
+                        "[FOOTBALL][WINLINE_LIVE][HYDRATE] candidates=%s hydrated=%s recv_window_s=%.1f",
+                        cand_n,
+                        hyd_n,
+                        recv_window,
+                    )
                 fball_ids = [int(eid) for eid, ev in acc.events.items() if _is_football_event(ev, acc.champs)]
                 fball_ids.sort()
                 logger.info(
