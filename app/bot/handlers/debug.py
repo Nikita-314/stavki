@@ -468,7 +468,12 @@ def _format_signal_runtime_status_lines() -> list[str]:
         f"• Подсказка качества: {diag.get('football_live_quality_hint_ru') or '—'}",
         f"• Порог score (база): {diag.get('football_live_min_signal_score_base') or '—'}",
         f"• Отклонено в send-gate (reject): {diag.get('football_live_rejected_at_send_gate') or 0}",
-        f"• Safety-block S8 П1 0:0 без API context: {diag.get('football_live_rejected_s8_home_00_without_api_context') or 0}",
+        "• Safety-block S8 1X2 0:0 без API context: "
+        f"{diag.get('football_live_rejected_s8_1x2_00_without_api_context') or 0}",
+        "• Safety-block S8 1X2 0:0 без pressure_score>=2: "
+        f"{diag.get('football_live_rejected_s8_1x2_00_no_pressure') or 0}",
+        "• Safety-pass S8 1X2 0:0 с API pressure: "
+        f"{diag.get('football_live_passed_s8_1x2_00_with_api_pressure') or 0}",
         f"• К пулу: обычных (≥ порога): {diag.get('football_live_normal_sendable_count') or 0}",
         f"• К пулу: мягких (soft) live: {diag.get('football_live_soft_sendable_count') or 0}",
         f"• К пулу: soft gap ≤1.5: {diag.get('football_live_soft_sendable_tight_count') or 0}",
@@ -1261,6 +1266,14 @@ def _humanize_rejection_for_owner(raw: str | None) -> str:
             "blocked_s8_home_00_without_api_context",
             "временный safety-rule снял S8 П1 0:0 без API-Football context/pressure",
         ),
+        (
+            "blocked_s8_1x2_00_without_api_context",
+            "временный safety-rule снял S8 1X2 0:0 без API-Football context",
+        ),
+        (
+            "blocked_s8_1x2_00_no_pressure",
+            "временный safety-rule снял S8 1X2 0:0 без pressure_score >= 2",
+        ),
         ("blocked_stale_manual_live_source", "ручной live JSON слишком старый"),
         ("blocked_stale_live_source", "снимок live устарел по задержке обработки"),
         ("blocked_stale_live_events", "все live-матчи признаны протухшими"),
@@ -1282,6 +1295,8 @@ def _humanize_live_bottleneck_ru(token: str | None) -> str:
         "blocked_integrity": "не прошли проверку целостности ставки",
         "blocked_no_strategy_match": "после integrity ни один рынок не прошёл strategy gate (S8/S9)",
         "blocked_context_filter": "после strategy gate кандидаты сняты context filter",
+        "blocked_s8_1x2_00_without_api_context": "временный safety-rule снял S8 1X2 0:0 без API-Football context",
+        "blocked_s8_1x2_00_no_pressure": "временный safety-rule снял S8 1X2 0:0 без pressure_score >= 2",
         "blocked_s8_home_00_without_api_context": "временный safety-rule снял S8 П1 0:0 без API-Football context/pressure",
         "blocked_value_filter": "после context filter кандидаты сняты value filter",
         "blocked_low_score": "score ниже порога",
@@ -1323,6 +1338,8 @@ def _humanize_status_token(token: str | None) -> str:
         "blocked_no_enriched_scored_row": "после integrity не нашлось кандидата под S8/S9",
         "blocked_no_strategy_match": "после integrity не нашлось кандидата под S8/S9",
         "blocked_context_filter": "после strategy gate матч снят context filter",
+        "blocked_s8_1x2_00_without_api_context": "временный safety-rule снял S8 1X2 0:0 без API-Football context",
+        "blocked_s8_1x2_00_no_pressure": "временный safety-rule снял S8 1X2 0:0 без pressure_score >= 2",
         "blocked_s8_home_00_without_api_context": "временный safety-rule снял S8 П1 0:0 без API-Football context/pressure",
         "blocked_value_filter": "после context filter матч снят value filter",
         "blocked_live_market_sanity": "pre-send live sanity (счёт, текст, plausibility)",
@@ -1630,6 +1647,9 @@ def _format_football_prog_run_report(res: AutoSignalCycleResult) -> str:
                 f"• Мягких (soft) live: {lss.get('soft_sendable_total', 0)}",
                 f"• Soft gap ≤1.5: {lss.get('soft_sendable_tight', 0)}",
                 f"• Soft relief (main, gap до 2): {lss.get('soft_sendable_relief_single', 0)}",
+                f"• S8 1X2 0:0 reject без API context: {lss.get('rejected_s8_1x2_00_without_api_context', 0)}",
+                f"• S8 1X2 0:0 reject без pressure_score>=2: {lss.get('rejected_s8_1x2_00_no_pressure', 0)}",
+                f"• S8 1X2 0:0 passed с API pressure: {lss.get('passed_s8_1x2_00_with_api_pressure', 0)}",
                 f"• Отсеклось (reject) в send-gate: {lss.get('rejected_total', 0)}",
             ]
         )

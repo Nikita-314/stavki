@@ -85,9 +85,34 @@ def _default_live_context_participation() -> dict[str, object]:
         "api_football_mapping_ok": False,
         "api_football_stats_ok": False,
         "api_football_pressure_used": False,
+        "api_football_pressure_score": None,
+        "api_football_pressure_reason": None,
         "external_context_sources": [],
         "context_sources": ["Winline"],
         "context_label": "Winline",
+    }
+
+
+def _extract_api_football_context_flags(ctx: dict[str, object] | None) -> dict[str, object]:
+    payload = ctx if isinstance(ctx, dict) else {}
+    stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    stats_ok = any(v is not None for v in stats.values())
+    mapping_ok = bool(payload.get("fixture_id"))
+    pressure_score_raw = payload.get("selected_pressure_score")
+    try:
+        pressure_score = int(pressure_score_raw) if pressure_score_raw is not None else None
+    except Exception:
+        pressure_score = None
+    pressure_used = bool(mapping_ok and stats_ok and pressure_score is not None)
+    pressure_reason = payload.get("selected_pressure_reason")
+    if not pressure_reason:
+        pressure_reason = payload.get("skip_reason") or payload.get("reject_reason")
+    return {
+        "api_football_mapping_ok": mapping_ok,
+        "api_football_stats_ok": stats_ok,
+        "api_football_pressure_used": pressure_used,
+        "api_football_pressure_score": pressure_score,
+        "api_football_pressure_reason": pressure_reason,
     }
 
 
@@ -102,10 +127,10 @@ def _build_live_context_participation(candidate: ProviderSignalCandidate) -> dic
     out = _default_live_context_participation()
 
     ctx = fs.get("football_live_context_filter") if isinstance(fs.get("football_live_context_filter"), dict) else {}
-    stats = ctx.get("stats") if isinstance(ctx.get("stats"), dict) else {}
-    stats_ok = any(v is not None for v in stats.values())
-    mapping_ok = bool(ctx.get("fixture_id"))
-    pressure_used = bool(mapping_ok and stats_ok and ctx.get("selected_pressure_score") is not None)
+    api_flags = _extract_api_football_context_flags(ctx)
+    stats_ok = bool(api_flags.get("api_football_stats_ok"))
+    mapping_ok = bool(api_flags.get("api_football_mapping_ok"))
+    pressure_used = bool(api_flags.get("api_football_pressure_used"))
     used_api_football = bool(mapping_ok and stats_ok)
 
     sportmonks_used = bool(
@@ -139,6 +164,8 @@ def _build_live_context_participation(candidate: ProviderSignalCandidate) -> dic
     out["api_football_mapping_ok"] = mapping_ok
     out["api_football_stats_ok"] = stats_ok
     out["api_football_pressure_used"] = pressure_used
+    out["api_football_pressure_score"] = api_flags.get("api_football_pressure_score")
+    out["api_football_pressure_reason"] = api_flags.get("api_football_pressure_reason")
 
     external_sources: list[str] = []
     if used_api_football:
@@ -155,12 +182,36 @@ def _build_live_context_participation(candidate: ProviderSignalCandidate) -> dic
     return out
 
 
+def _attach_api_football_context(
+    candidate: ProviderSignalCandidate,
+    ctx_payload: dict[str, object],
+) -> ProviderSignalCandidate:
+    fs = dict(candidate.feature_snapshot_json or {})
+    ex = dict(candidate.explanation_json or {})
+    api_flags = _extract_api_football_context_flags(ctx_payload)
+    fs["football_live_context_filter"] = ctx_payload
+    ex["football_live_context_filter"] = ctx_payload
+    for key, value in api_flags.items():
+        fs[key] = value
+        ex[key] = value
+    return candidate.model_copy(update={"feature_snapshot_json": fs, "explanation_json": ex})
+
+
 def _attach_live_context_participation(candidate: ProviderSignalCandidate) -> ProviderSignalCandidate:
     fs = dict(candidate.feature_snapshot_json or {})
     ex = dict(candidate.explanation_json or {})
     participation = _build_live_context_participation(candidate)
     fs["football_live_context_participation"] = participation
     ex["football_live_context_participation"] = participation
+    for key in (
+        "api_football_mapping_ok",
+        "api_football_stats_ok",
+        "api_football_pressure_used",
+        "api_football_pressure_score",
+        "api_football_pressure_reason",
+    ):
+        fs[key] = participation.get(key)
+        ex[key] = participation.get(key)
     return candidate.model_copy(update={"feature_snapshot_json": fs, "explanation_json": ex})
 
 
@@ -1107,6 +1158,8 @@ def compile_football_cycle_debug(
             "blocked_integrity": "integrity (тотал/маппинг/линия)",
             "blocked_no_strategy_match": "strategy gate (S8/S9)",
             "blocked_context_filter": "context filter",
+            "blocked_s8_1x2_00_without_api_context": "S8 1X2 0:0 without API context",
+            "blocked_s8_1x2_00_no_pressure": "S8 1X2 0:0 no pressure",
             "blocked_s8_home_00_without_api_context": "temporary S8 safety gate",
             "blocked_value_filter": "value filter",
             "blocked_low_score": "порог score + мягкий live send-gate",
@@ -1126,6 +1179,14 @@ def compile_football_cycle_debug(
     _bl_map = {
         "blocked_no_strategy_match": ("strategy", "strategy gate (S8/S9)"),
         "blocked_context_filter": ("context", "context filter"),
+        "blocked_s8_1x2_00_without_api_context": (
+            "context",
+            "temporary S8 safety gate (1X2 0:0 without API-Football context)",
+        ),
+        "blocked_s8_1x2_00_no_pressure": (
+            "context",
+            "temporary S8 safety gate (1X2 0:0 pressure_score < 2)",
+        ),
         "blocked_s8_home_00_without_api_context": (
             "context",
             "temporary S8 safety gate (home 0:0 without API-Football context)",
@@ -1151,6 +1212,8 @@ def compile_football_cycle_debug(
     _agg_why = {
         "blocked_no_strategy_match": "после integrity не нашлось кандидата под S8/S9",
         "blocked_context_filter": "после стратегии матч отсеян context filter",
+        "blocked_s8_1x2_00_without_api_context": "S8 1X2 при 0:0 временно запрещён без API-Football context",
+        "blocked_s8_1x2_00_no_pressure": "S8 1X2 при 0:0 временно запрещён без pressure_score >= 2",
         "blocked_s8_home_00_without_api_context": "опасный S8-паттерн П1 0:0 без API-Football context временно запрещён",
         "blocked_value_filter": "после context filter не пройден value filter",
         "blocked_low_score": "score чуть ниже порога",
@@ -1167,6 +1230,8 @@ def compile_football_cycle_debug(
     _why_order = (
         "blocked_no_strategy_match",
         "blocked_context_filter",
+        "blocked_s8_1x2_00_without_api_context",
+        "blocked_s8_1x2_00_no_pressure",
         "blocked_s8_home_00_without_api_context",
         "blocked_value_filter",
         "blocked_live_quality_gate",
@@ -1378,6 +1443,8 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
         if gb in {
             "blocked_no_strategy_match",
             "blocked_context_filter",
+            "blocked_s8_1x2_00_without_api_context",
+            "blocked_s8_1x2_00_no_pressure",
             "blocked_s8_home_00_without_api_context",
             "blocked_value_filter",
         }:
@@ -1408,6 +1475,10 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
         return "blocked_no_strategy_match"
     if msg == "blocked_context_filter" or rr == "blocked_context_filter":
         return "blocked_context_filter"
+    if msg == "blocked_s8_1x2_00_without_api_context" or rr == "blocked_s8_1x2_00_without_api_context":
+        return "blocked_s8_1x2_00_without_api_context"
+    if msg == "blocked_s8_1x2_00_no_pressure" or rr == "blocked_s8_1x2_00_no_pressure":
+        return "blocked_s8_1x2_00_no_pressure"
     if msg == "blocked_s8_home_00_without_api_context" or rr == "blocked_s8_home_00_without_api_context":
         return "blocked_s8_home_00_without_api_context"
     if msg == "blocked_value_filter" or rr == "blocked_value_filter":
@@ -1469,6 +1540,8 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_integrity": "не прошли проверку целостности ставки",
         "blocked_no_strategy_match": "после integrity ни один рынок не прошёл strategy gate (S8/S9)",
         "blocked_context_filter": "после strategy gate кандидаты сняты context filter",
+        "blocked_s8_1x2_00_without_api_context": "временный safety-rule снял S8 1X2 0:0 без API-Football context",
+        "blocked_s8_1x2_00_no_pressure": "временный safety-rule снял S8 1X2 0:0 без pressure_score >= 2",
         "blocked_s8_home_00_without_api_context": "временный safety-rule снял S8 П1 0:0 без API-Football context/pressure",
         "blocked_value_filter": "после context filter кандидаты сняты value filter",
         "blocked_low_score": "score ниже порога",
@@ -2100,6 +2173,9 @@ class AutoSignalService:
             football_live_cycle_after_s9=0,
             football_live_cycle_after_s10=0,
             football_live_rejected_s8_home_00_without_api_context=0,
+            football_live_rejected_s8_1x2_00_without_api_context=0,
+            football_live_rejected_s8_1x2_00_no_pressure=0,
+            football_live_passed_s8_1x2_00_with_api_pressure=0,
         )
         if runtime.is_paused():
             logger.info("[FOOTBALL][BLOCK] skipped due to paused")
@@ -2213,6 +2289,9 @@ class AutoSignalService:
                     football_live_cycle_after_s9=0,
                     football_live_cycle_after_s10=0,
                     football_live_rejected_s8_home_00_without_api_context=0,
+                    football_live_rejected_s8_1x2_00_without_api_context=0,
+                    football_live_rejected_s8_1x2_00_no_pressure=0,
+                    football_live_passed_s8_1x2_00_with_api_pressure=0,
                     football_live_cycle_after_context_filter=0,
                     football_live_rejected_invalid_selection=0,
                     football_live_rejected_no_pressure=0,
@@ -2255,6 +2334,9 @@ class AutoSignalService:
             football_live_cycle_after_s9=0,
             football_live_cycle_after_s10=0,
             football_live_rejected_s8_home_00_without_api_context=0,
+            football_live_rejected_s8_1x2_00_without_api_context=0,
+            football_live_rejected_s8_1x2_00_no_pressure=0,
+            football_live_passed_s8_1x2_00_with_api_pressure=0,
             football_live_cycle_after_context_filter=0,
             football_live_rejected_invalid_selection=0,
             football_live_rejected_no_pressure=0,
@@ -4011,6 +4093,9 @@ class AutoSignalService:
             football_live_rejected_no_pressure=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_passed_pressure=0,
+            football_live_rejected_s8_1x2_00_without_api_context=0,
+            football_live_rejected_s8_1x2_00_no_pressure=0,
+            football_live_passed_s8_1x2_00_with_api_pressure=0,
             football_live_context_filter_last_cycle_json=None,
             football_live_cycle_after_value_filter=0,
             football_live_rejected_value_low_favorite=0,
@@ -4137,15 +4222,48 @@ class AutoSignalService:
                 return "away"
             return "draw"
 
-        def _pressure_score(*, shots_total_for: int | None, shots_total_against: int | None, shots_on_for: int | None, shots_on_against: int | None, possession_for: int | None) -> int:
+        def _pressure_score_details(
+            *,
+            shots_total_for: int | None,
+            shots_total_against: int | None,
+            shots_on_for: int | None,
+            shots_on_against: int | None,
+            possession_for: int | None,
+        ) -> tuple[int, str]:
             score = 0
-            if shots_total_for is not None and shots_total_against is not None and (shots_total_for - shots_total_against) >= 3:
+            hits: list[str] = []
+            miss: list[str] = []
+            shots_total_diff = (
+                (shots_total_for - shots_total_against)
+                if shots_total_for is not None and shots_total_against is not None
+                else None
+            )
+            shots_on_diff = (
+                (shots_on_for - shots_on_against)
+                if shots_on_for is not None and shots_on_against is not None
+                else None
+            )
+            if shots_total_diff is not None and shots_total_diff >= 4:
                 score += 1
-            if shots_on_for is not None and shots_on_against is not None and (shots_on_for - shots_on_against) >= 2:
+                hits.append(f"shots_total_diff={shots_total_diff}>=4")
+            else:
+                miss.append(f"shots_total_diff={shots_total_diff}")
+            if shots_on_diff is not None and shots_on_diff >= 2:
                 score += 1
-            if possession_for is not None and possession_for >= 55:
+                hits.append(f"shots_on_target_diff={shots_on_diff}>=2")
+            else:
+                miss.append(f"shots_on_target_diff={shots_on_diff}")
+            if possession_for is not None and possession_for >= 58:
                 score += 1
-            return score
+                hits.append(f"possession={possession_for}>=58")
+            else:
+                miss.append(f"possession={possession_for}")
+            parts: list[str] = []
+            if hits:
+                parts.append("met: " + ", ".join(hits))
+            if miss:
+                parts.append("missed: " + ", ".join(miss))
+            return score, "; ".join(parts) if parts else "no_api_football_pressure_stats"
 
         def _context_payload_from_stats(stats: object) -> dict[str, object]:
             if stats is None:
@@ -4182,20 +4300,22 @@ class AutoSignalService:
                 continue
 
             if not api_ctx_svc or not live_fixtures_af:
-                prev_fs_ctx = dict(cand.feature_snapshot_json or {})
-                prev_fs_ctx["football_live_context_filter"] = {
+                cand_ctx = _attach_api_football_context(
+                    cand,
+                    {
                     "source": "api_football",
                     "enabled": False,
                     "decision": "skip",
                     "skip_reason": "api_football_unavailable",
-                }
+                    },
+                )
                 logger.info(
                     "[CONTEXT] match=%s selection=%s side=%s -> skip(api_football_unavailable)",
                     str(cand.match.match_name or "")[:140],
                     str(cand.market.selection or ""),
                     sel_side,
                 )
-                after_context.append(cand.model_copy(update={"feature_snapshot_json": prev_fs_ctx}))
+                after_context.append(cand_ctx)
                 continue
 
             fx = api_ctx_svc.map_winline_match_to_fixture(
@@ -4204,20 +4324,22 @@ class AutoSignalService:
                 fixtures=live_fixtures_af,
             )
             if fx is None:
-                prev_fs_ctx = dict(cand.feature_snapshot_json or {})
-                prev_fs_ctx["football_live_context_filter"] = {
+                cand_ctx = _attach_api_football_context(
+                    cand,
+                    {
                     "source": "api_football",
                     "enabled": True,
                     "decision": "skip",
                     "skip_reason": "api_football_fixture_not_mapped",
-                }
+                    },
+                )
                 logger.info(
                     "[CONTEXT] match=%s selection=%s side=%s -> skip(api_football_fixture_not_mapped)",
                     str(cand.match.match_name or "")[:140],
                     str(cand.market.selection or ""),
                     sel_side,
                 )
-                after_context.append(cand.model_copy(update={"feature_snapshot_json": prev_fs_ctx}))
+                after_context.append(cand_ctx)
                 continue
 
             stats = stats_by_fixture.get(int(fx.fixture_id))
@@ -4228,14 +4350,16 @@ class AutoSignalService:
                     stats = None
                 stats_by_fixture[int(fx.fixture_id)] = stats
             if stats is None:
-                prev_fs_ctx = dict(cand.feature_snapshot_json or {})
-                prev_fs_ctx["football_live_context_filter"] = {
+                cand_ctx = _attach_api_football_context(
+                    cand,
+                    {
                     "source": "api_football",
                     "enabled": True,
                     "fixture_id": int(fx.fixture_id),
                     "decision": "skip",
                     "skip_reason": "api_football_stats_missing",
-                }
+                    },
+                )
                 logger.info(
                     "[CONTEXT] match=%s selection=%s side=%s fixture=%s -> skip(api_football_stats_missing)",
                     str(cand.match.match_name or "")[:140],
@@ -4243,17 +4367,17 @@ class AutoSignalService:
                     sel_side,
                     int(fx.fixture_id),
                 )
-                after_context.append(cand.model_copy(update={"feature_snapshot_json": prev_fs_ctx}))
+                after_context.append(cand_ctx)
                 continue
 
-            home_pressure = _pressure_score(
+            home_pressure, home_pressure_reason = _pressure_score_details(
                 shots_total_for=getattr(stats, "home_shots_total", None),
                 shots_total_against=getattr(stats, "away_shots_total", None),
                 shots_on_for=getattr(stats, "home_shots_on_target", None),
                 shots_on_against=getattr(stats, "away_shots_on_target", None),
                 possession_for=getattr(stats, "home_possession", None),
             )
-            away_pressure = _pressure_score(
+            away_pressure, away_pressure_reason = _pressure_score_details(
                 shots_total_for=getattr(stats, "away_shots_total", None),
                 shots_total_against=getattr(stats, "home_shots_total", None),
                 shots_on_for=getattr(stats, "away_shots_on_target", None),
@@ -4261,6 +4385,7 @@ class AutoSignalService:
                 possession_for=getattr(stats, "away_possession", None),
             )
             selected_pressure = home_pressure if sel_side == "home" else away_pressure
+            selected_pressure_reason = home_pressure_reason if sel_side == "home" else away_pressure_reason
             winner_side = _winner_side_from_score(sh_i, sa_i)
             trailing = bool(winner_side in {"home", "away"} and winner_side != sel_side)
             pressure_supportive = bool(selected_pressure >= 2)
@@ -4275,8 +4400,11 @@ class AutoSignalService:
                 "fixture_id": int(fx.fixture_id),
                 "selected_side": sel_side,
                 "selected_pressure_score": int(selected_pressure),
+                "selected_pressure_reason": selected_pressure_reason,
                 "home_pressure_score": int(home_pressure),
+                "home_pressure_reason": home_pressure_reason,
                 "away_pressure_score": int(away_pressure),
+                "away_pressure_reason": away_pressure_reason,
                 "pressure_supportive": pressure_supportive,
                 "decision": decision,
                 "reject_reason": reject_reason,
@@ -4300,8 +4428,7 @@ class AutoSignalService:
                 f" ({reject_reason})" if reject_reason else "",
             )
 
-            prev_fs_ctx = dict(cand.feature_snapshot_json or {})
-            cand_ctx = cand.model_copy(update={"feature_snapshot_json": {**prev_fs_ctx, "football_live_context_filter": ctx_payload}})
+            cand_ctx = _attach_api_football_context(cand, ctx_payload)
             sample = {
                 "event_id": str(_football_event_id(cand_ctx) or ""),
                 "match": str(cand_ctx.match.match_name or ""),
@@ -4313,6 +4440,7 @@ class AutoSignalService:
                 "home_pressure": int(home_pressure),
                 "away_pressure": int(away_pressure),
                 "selected_pressure": int(selected_pressure),
+                "selected_pressure_reason": selected_pressure_reason,
                 "decision": decision,
                 "reject_reason": reject_reason,
                 "stats": _context_payload_from_stats(stats),
@@ -4431,14 +4559,60 @@ class AutoSignalService:
             )
 
         # --- TEMP SAFETY GATE (post context, pre value) ---
-        # Emergency guard: do not publish S8 home FT 1X2 at 0:0 when API-Football
-        # context/pressure did not actually participate.
-        s8_home_00_without_api_context_rejected = 0
-        s8_home_00_without_api_context_samples: list[dict[str, object]] = []
-        s8_home_00_without_api_context_limit = 6
-        s8_home_00_without_api_context_drop_by_eid: dict[str, str] = {}
-        s8_home_00_without_api_context_drop_reasons: dict[str, str] = {}
+        # Only for the dangerous pattern: S8 + classic 1X2 + 0:0. All other markets
+        # remain fail-open and continue unchanged.
+        s8_1x2_00_without_api_context_rejected = 0
+        s8_1x2_00_no_pressure_rejected = 0
+        s8_1x2_00_with_api_pressure_passed = 0
+        s8_1x2_00_without_api_context_samples: list[dict[str, object]] = []
+        s8_1x2_00_no_pressure_samples: list[dict[str, object]] = []
+        s8_1x2_00_with_api_pressure_samples: list[dict[str, object]] = []
+        s8_1x2_00_sample_limit = 6
+        s8_1x2_00_drop_by_eid: dict[str, str] = {}
+        s8_1x2_00_drop_reasons: dict[str, str] = {}
         after_s8_safety: list[ProviderSignalCandidate] = []
+
+        def _build_s8_1x2_00_safety_sample(
+            cand: ProviderSignalCandidate,
+            participation: dict[str, object],
+            *,
+            minute_i: int | None,
+            sh_i: int | None,
+            sa_i: int | None,
+            safety_decision: str,
+        ) -> dict[str, object]:
+            bet = fmt.format_bet(
+                market_type=cand.market.market_type,
+                market_label=cand.market.market_label,
+                selection=cand.market.selection,
+                home_team=cand.match.home_team,
+                away_team=cand.match.away_team,
+                section_name=cand.market.section_name,
+                subsection_name=cand.market.subsection_name,
+            )
+            ctx_payload = (
+                (cand.feature_snapshot_json or {}).get("football_live_context_filter")
+                if isinstance((cand.feature_snapshot_json or {}).get("football_live_context_filter"), dict)
+                else {}
+            )
+            return {
+                "event_id": str(_football_event_id(cand) or ""),
+                "match": str(cand.match.match_name or ""),
+                "minute": minute_i,
+                "score": f"{sh_i}:{sa_i}" if sh_i is not None and sa_i is not None else None,
+                "odds": str(cand.market.odds_value) if cand.market.odds_value is not None else None,
+                "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
+                "selected_side": _side_from_selection_1x2(cand),
+                "context_label": participation.get("context_label"),
+                "api_football_mapping_ok": bool(participation.get("api_football_mapping_ok")),
+                "api_football_stats_ok": bool(participation.get("api_football_stats_ok")),
+                "api_football_pressure_used": bool(participation.get("api_football_pressure_used")),
+                "api_football_pressure_score": participation.get("api_football_pressure_score"),
+                "api_football_pressure_reason": participation.get("api_football_pressure_reason"),
+                "context_decision": ctx_payload.get("decision") if isinstance(ctx_payload, dict) else None,
+                "safety_decision": safety_decision,
+            }
+
         for cand in candidates_to_ingest:
             ex0 = dict(cand.explanation_json or {})
             sid0 = str(ex0.get("football_live_strategy_id") or "").strip()
@@ -4447,71 +4621,109 @@ class AutoSignalService:
             st0 = _result_subtype_local(cand)
             side0 = _side_from_selection_1x2(cand)
             minute_i, sh_i, sa_i = _live_ctx_from_candidate(cand)
-            participation = _build_live_context_participation(cand)
-            api_stats_ok = bool(participation.get("api_football_stats_ok"))
-            api_pressure_used = bool(participation.get("api_football_pressure_used"))
-            should_block = (
+            is_s8_1x2_00 = (
                 sid0 == "S8_LIVE_1X2_WINLINE_STRICT"
                 and fam0 == "result"
                 and mt0 in {"1x2", "match_winner"}
                 and st0 == "ft_1x2_candidate"
-                and side0 == "home"
+                and side0 in {"home", "away"}
                 and (sh_i, sa_i) == (0, 0)
-                and (not api_stats_ok or not api_pressure_used)
             )
-            if not should_block:
+            if not is_s8_1x2_00:
                 after_s8_safety.append(cand)
                 continue
 
-            s8_home_00_without_api_context_rejected += 1
-            eid0 = str(_football_event_id(cand) or "")
-            if eid0:
-                s8_home_00_without_api_context_drop_by_eid[eid0] = "blocked_s8_home_00_without_api_context"
-                s8_home_00_without_api_context_drop_reasons[eid0] = (
-                    "temporary safety rule: S8 home FT 1X2 at 0:0 requires API-Football stats + pressure"
+            participation = _build_live_context_participation(cand)
+            api_mapping_ok = bool(participation.get("api_football_mapping_ok"))
+            api_stats_ok = bool(participation.get("api_football_stats_ok"))
+            api_pressure_used = bool(participation.get("api_football_pressure_used"))
+            pressure_score_raw = participation.get("api_football_pressure_score")
+            try:
+                pressure_score = int(pressure_score_raw) if pressure_score_raw is not None else None
+            except Exception:
+                pressure_score = None
+
+            if not (api_mapping_ok and api_stats_ok and api_pressure_used):
+                s8_1x2_00_without_api_context_rejected += 1
+                sample = _build_s8_1x2_00_safety_sample(
+                    cand,
+                    participation,
+                    minute_i=minute_i,
+                    sh_i=sh_i,
+                    sa_i=sa_i,
+                    safety_decision="blocked_s8_1x2_00_without_api_context",
                 )
-                try:
-                    strategy_by_eid.pop(eid0, None)
-                except Exception:
-                    pass
-            if len(s8_home_00_without_api_context_samples) < s8_home_00_without_api_context_limit:
-                bet = fmt.format_bet(
-                    market_type=cand.market.market_type,
-                    market_label=cand.market.market_label,
-                    selection=cand.market.selection,
-                    home_team=cand.match.home_team,
-                    away_team=cand.match.away_team,
-                    section_name=cand.market.section_name,
-                    subsection_name=cand.market.subsection_name,
+                eid0 = str(sample.get("event_id") or "")
+                if eid0:
+                    s8_1x2_00_drop_by_eid[eid0] = "blocked_s8_1x2_00_without_api_context"
+                    s8_1x2_00_drop_reasons[eid0] = (
+                        "temporary safety rule: S8 1X2 at 0:0 requires mapped API-Football stats + pressure"
+                    )
+                    try:
+                        strategy_by_eid.pop(eid0, None)
+                    except Exception:
+                        pass
+                if len(s8_1x2_00_without_api_context_samples) < s8_1x2_00_sample_limit:
+                    s8_1x2_00_without_api_context_samples.append(sample)
+                continue
+
+            if pressure_score is None or pressure_score < 2:
+                s8_1x2_00_no_pressure_rejected += 1
+                sample = _build_s8_1x2_00_safety_sample(
+                    cand,
+                    participation,
+                    minute_i=minute_i,
+                    sh_i=sh_i,
+                    sa_i=sa_i,
+                    safety_decision="blocked_s8_1x2_00_no_pressure",
                 )
-                s8_home_00_without_api_context_samples.append(
-                    {
-                        "event_id": eid0,
-                        "match": str(cand.match.match_name or ""),
-                        "minute": minute_i,
-                        "score": f"{sh_i}:{sa_i}" if sh_i is not None and sa_i is not None else None,
-                        "odds": (str(cand.market.odds_value) if cand.market.odds_value is not None else None),
-                        "bet_text": bet.main_label + (f" ({bet.detail_label})" if bet.detail_label else ""),
-                        "context_label": participation.get("context_label"),
-                        "api_football_stats_ok": api_stats_ok,
-                        "api_football_pressure_used": api_pressure_used,
-                        "context_decision": (
-                            (cand.feature_snapshot_json or {}).get("football_live_context_filter", {}).get("decision")
-                            if isinstance((cand.feature_snapshot_json or {}).get("football_live_context_filter"), dict)
-                            else None
-                        ),
-                    }
+                eid0 = str(sample.get("event_id") or "")
+                if eid0:
+                    s8_1x2_00_drop_by_eid[eid0] = "blocked_s8_1x2_00_no_pressure"
+                    s8_1x2_00_drop_reasons[eid0] = str(
+                        participation.get("api_football_pressure_reason")
+                        or "temporary safety rule: pressure_score < 2 for S8 1X2 at 0:0"
+                    )
+                    try:
+                        strategy_by_eid.pop(eid0, None)
+                    except Exception:
+                        pass
+                if len(s8_1x2_00_no_pressure_samples) < s8_1x2_00_sample_limit:
+                    s8_1x2_00_no_pressure_samples.append(sample)
+                continue
+
+            s8_1x2_00_with_api_pressure_passed += 1
+            if len(s8_1x2_00_with_api_pressure_samples) < s8_1x2_00_sample_limit:
+                s8_1x2_00_with_api_pressure_samples.append(
+                    _build_s8_1x2_00_safety_sample(
+                        cand,
+                        participation,
+                        minute_i=minute_i,
+                        sh_i=sh_i,
+                        sa_i=sa_i,
+                        safety_decision="passed_s8_1x2_00_with_api_pressure",
+                    )
                 )
+            after_s8_safety.append(cand)
 
         candidates_to_ingest = after_s8_safety
         diagnostics.update(
-            football_live_rejected_s8_home_00_without_api_context=int(s8_home_00_without_api_context_rejected)
+            football_live_rejected_s8_home_00_without_api_context=int(s8_1x2_00_without_api_context_rejected),
+            football_live_rejected_s8_1x2_00_without_api_context=int(s8_1x2_00_without_api_context_rejected),
+            football_live_rejected_s8_1x2_00_no_pressure=int(s8_1x2_00_no_pressure_rejected),
+            football_live_passed_s8_1x2_00_with_api_pressure=int(s8_1x2_00_with_api_pressure_passed),
         )
         try:
-            strategy_gate_debug["rejected_s8_home_00_without_api_context"] = int(
-                s8_home_00_without_api_context_rejected
+            strategy_gate_debug["rejected_s8_1x2_00_without_api_context"] = int(
+                s8_1x2_00_without_api_context_rejected
             )
-            strategy_gate_debug["s8_home_00_without_api_context_samples"] = s8_home_00_without_api_context_samples
+            strategy_gate_debug["rejected_s8_1x2_00_no_pressure"] = int(s8_1x2_00_no_pressure_rejected)
+            strategy_gate_debug["passed_s8_1x2_00_with_api_pressure"] = int(
+                s8_1x2_00_with_api_pressure_passed
+            )
+            strategy_gate_debug["s8_1x2_00_without_api_context_samples"] = s8_1x2_00_without_api_context_samples
+            strategy_gate_debug["s8_1x2_00_no_pressure_samples"] = s8_1x2_00_no_pressure_samples
+            strategy_gate_debug["s8_1x2_00_with_api_pressure_samples"] = s8_1x2_00_with_api_pressure_samples
         except Exception:
             pass
         if not candidates_to_ingest:
@@ -4531,8 +4743,16 @@ class AutoSignalService:
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_sent_count=0,
-                last_delivery_reason="blocked_s8_home_00_without_api_context",
-                note="temporary safety rule blocked S8 home 0:0 without API-Football context",
+                last_delivery_reason=(
+                    "blocked_s8_1x2_00_without_api_context"
+                    if s8_1x2_00_without_api_context_rejected > 0
+                    else "blocked_s8_1x2_00_no_pressure"
+                ),
+                note=(
+                    "temporary safety rule blocked S8 1X2 at 0:0 without mapped API-Football context"
+                    if s8_1x2_00_without_api_context_rejected > 0
+                    else "temporary safety rule blocked S8 1X2 at 0:0 because pressure_score < 2"
+                ),
             )
             _dbg_s8safe = compile_football_cycle_debug(
                 fb_preview=fb_preview,
@@ -4547,14 +4767,18 @@ class AutoSignalService:
                 send_filter_stats=send_filter_result.stats if send_filter_result else None,
                 integrity_dropped_checks=list(integrity_result.dropped_checks),
                 dry_run=dry_run,
-                global_block="blocked_s8_home_00_without_api_context",
+                global_block=(
+                    "blocked_s8_1x2_00_without_api_context"
+                    if s8_1x2_00_without_api_context_rejected > 0
+                    else "blocked_s8_1x2_00_no_pressure"
+                ),
                 min_score_base=float(settings.football_min_signal_score or 60.0),
                 score_relief_note="s8_safety_gate",
                 live_send_stats=strategy_gate_debug,
                 finalist_send_meta={},
                 single_relief_max_gap=float(single_gap_max),
-                live_sanity_drop_by_eid=s8_home_00_without_api_context_drop_by_eid,
-                live_sanity_drop_reasons=s8_home_00_without_api_context_drop_reasons,
+                live_sanity_drop_by_eid=s8_1x2_00_drop_by_eid,
+                live_sanity_drop_reasons=s8_1x2_00_drop_reasons,
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -4566,7 +4790,11 @@ class AutoSignalService:
                 skipped_candidates_count=int(omitted_by_limit),
                 notifications_sent_count=0,
                 preview_only=False,
-                message="blocked_s8_home_00_without_api_context",
+                message=(
+                    "blocked_s8_1x2_00_without_api_context"
+                    if s8_1x2_00_without_api_context_rejected > 0
+                    else "blocked_s8_1x2_00_no_pressure"
+                ),
                 raw_events_count=raw_events_count,
                 normalized_markets_count=normalized_markets_count,
                 candidates_before_filter_count=len(candidates_before_filter),
@@ -4578,7 +4806,11 @@ class AutoSignalService:
                 last_live_http_status=fetch_res.status_code,
                 fallback_used=fallback_used,
                 fallback_source_name=fallback_source_name,
-                rejection_reason="blocked_s8_home_00_without_api_context",
+                rejection_reason=(
+                    "blocked_s8_1x2_00_without_api_context"
+                    if s8_1x2_00_without_api_context_rejected > 0
+                    else "blocked_s8_1x2_00_no_pressure"
+                ),
                 dry_run=dry_run,
                 report_matches_found=report_matches_found,
                 report_candidates=report_candidates,
@@ -4586,7 +4818,11 @@ class AutoSignalService:
                 report_after_integrity=report_after_integrity,
                 report_after_scoring=0,
                 report_final_signal="НЕТ",
-                report_rejection_code="blocked_s8_home_00_without_api_context",
+                report_rejection_code=(
+                    "blocked_s8_1x2_00_without_api_context"
+                    if s8_1x2_00_without_api_context_rejected > 0
+                    else "blocked_s8_1x2_00_no_pressure"
+                ),
                 football_cycle_debug=_dbg_s8safe,
             )
 
@@ -4799,8 +5035,8 @@ class AutoSignalService:
                 live_send_stats=strategy_gate_debug,
                 finalist_send_meta={},
                 single_relief_max_gap=float(single_gap_max),
-                live_sanity_drop_by_eid=s8_home_00_without_api_context_drop_by_eid,
-                live_sanity_drop_reasons=s8_home_00_without_api_context_drop_reasons,
+                live_sanity_drop_by_eid=s8_1x2_00_drop_by_eid,
+                live_sanity_drop_reasons=s8_1x2_00_drop_reasons,
             )
             return AutoSignalCycleResult(
                 endpoint=fetch_res.endpoint,
@@ -5249,9 +5485,9 @@ class AutoSignalService:
             samples=away_draw_samples,
         )
 
-        combined_live_drop_by_eid = dict(s8_home_00_without_api_context_drop_by_eid)
+        combined_live_drop_by_eid = dict(s8_1x2_00_drop_by_eid)
         combined_live_drop_by_eid.update(live_sanity_drop_by_eid)
-        combined_live_drop_reasons = dict(s8_home_00_without_api_context_drop_reasons)
+        combined_live_drop_reasons = dict(s8_1x2_00_drop_reasons)
         combined_live_drop_reasons.update(live_sanity_drop_reasons)
         cycle_dbg = compile_football_cycle_debug(
             fb_preview=fb_preview,

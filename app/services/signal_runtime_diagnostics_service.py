@@ -115,6 +115,9 @@ class SignalRuntimeDiagnosticsState:
     football_live_rejected_no_pressure: int = 0
     football_live_rejected_s8_home_00_without_api_context: int = 0
     football_live_passed_pressure: int = 0
+    football_live_rejected_s8_1x2_00_without_api_context: int = 0
+    football_live_rejected_s8_1x2_00_no_pressure: int = 0
+    football_live_passed_s8_1x2_00_with_api_pressure: int = 0
     football_live_context_filter_last_cycle_json: str | None = None
 
     # --- S8 value filter diagnostics (per-cycle) ---
