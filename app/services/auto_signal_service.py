@@ -788,7 +788,7 @@ def compile_football_cycle_debug(
         elif n_int == 0:
             final_status = "blocked_integrity"
         elif n_int > 0 and best_c is None:
-            final_status = "blocked_no_enriched_scored_row"
+            final_status = "blocked_no_strategy_match"
         elif n_final > 0:
             final_status = "selected"
         elif (
@@ -817,8 +817,8 @@ def compile_football_cycle_debug(
             why_code, why_ru = "integrity", "Не прошла проверку целостности ставки"
         elif best_c is None:
             why_code, why_ru = (
-                "no_enriched_scored",
-                "Нет enriched+scored по матчу (integrity могла пройти, пул scoring пуст)",
+                "no_strategy_match",
+                "После integrity ни один кандидат не прошёл explicit strategy gate (S8/S9)",
             )
         elif n_final > 0:
             why_code, why_ru = "sendable", "Готова к рассмотрению на отправку"
@@ -922,7 +922,15 @@ def compile_football_cycle_debug(
 
     if global_block:
         gb = global_block.lower()
-        forced = "blocked_non_real_source" if ("non_live" in gb or "non_real" in gb) else "blocked_unknown"
+        force_map = {
+            "preview_only_enabled": "blocked_preview_only",
+        }
+        if "non_live" in gb or "non_real" in gb:
+            forced = "blocked_non_real_source"
+        else:
+            forced = force_map.get(gb, gb)
+            if not forced.startswith("blocked_"):
+                forced = "blocked_unknown"
         for r in rows:
             r["final_status"] = forced
 
@@ -938,6 +946,7 @@ def compile_football_cycle_debug(
         "blocked_impossible_live_outcome",
         "blocked_low_live_plausibility",
         "blocked_live_market_sanity",
+        "blocked_live_quality_gate",
     }
     n_sanity_fresh = sum(1 for r in fresh_accepted if str(r.get("final_status")) in _sany_toks)
     fresh_live_send_breakdown = {
@@ -1006,34 +1015,39 @@ def compile_football_cycle_debug(
         else []
     )
     blocker_priority = [
+        "blocked_no_strategy_match",
+        "blocked_live_quality_gate",
         "blocked_invalid_live_market_text",
         "blocked_impossible_live_outcome",
         "blocked_low_live_plausibility",
         "blocked_live_market_sanity",
+        "blocked_context_filter",
+        "blocked_value_filter",
         "blocked_duplicate_idea",
         "blocked_low_score",
         "blocked_send_filter",
         "blocked_integrity",
         "blocked_too_far_in_time",
     ]
+    blocker_rank = {token: idx for idx, token in enumerate(blocker_priority)}
     main_blocker_status = "unknown"
+    def _dominant_blocker(counter: Counter[str]) -> str:
+        return max(counter.items(), key=lambda kv: (int(kv[1]), -int(blocker_rank.get(str(kv[0]), 9999))))[0]
     if fresh_accepted:
         if not problem_status_rows_fresh:
             main_blocker_status = "none"
         else:
-            for token in blocker_priority:
-                if any(str(r.get("final_status")) == token for r in problem_status_rows_fresh):
-                    main_blocker_status = token
-                    break
+            main_blocker_status = _dominant_blocker(
+                Counter(str(r.get("final_status")) for r in problem_status_rows_fresh)
+            )
     elif rows:
         main_blocker_status = bottleneck_hint or "unknown"
         if not problem_status_rows:
             main_blocker_status = "none"
         else:
-            for token in blocker_priority:
-                if any(str(r.get("final_status")) == token for r in problem_status_rows):
-                    main_blocker_status = token
-                    break
+            main_blocker_status = _dominant_blocker(
+                Counter(str(r.get("final_status")) for r in problem_status_rows)
+            )
 
     m_with_send = sum(1 for r in rows if str(r.get("sendable_status") or "") in ("normal", "soft"))
     m_norm_m = sum(1 for r in rows if r.get("sendable_status") == "normal")
@@ -1091,7 +1105,11 @@ def compile_football_cycle_debug(
         st_ru_map = {
             "blocked_send_filter": "фильтр отправки (рынок/время/семейство)",
             "blocked_integrity": "integrity (тотал/маппинг/линия)",
+            "blocked_no_strategy_match": "strategy gate (S8/S9)",
+            "blocked_context_filter": "context filter",
+            "blocked_value_filter": "value filter",
             "blocked_low_score": "порог score + мягкий live send-gate",
+            "blocked_live_quality_gate": "combat quality gate",
             "blocked_duplicate_idea": "сессия: эта идея уже в памяти",
             "blocked_too_far_in_time": "слишком далеко по времени",
             "blocked_unknown": "не классифицировано",
@@ -1105,11 +1123,16 @@ def compile_football_cycle_debug(
         else:
             bottleneck_no_sendable_ru = "нет кандидатов с разобранной причиной — см. final_status по матчам"
     _bl_map = {
+        "blocked_no_strategy_match": ("strategy", "strategy gate (S8/S9)"),
+        "blocked_context_filter": ("context", "context filter"),
+        "blocked_value_filter": ("value", "value filter"),
         "blocked_low_score": ("score", "порог score"),
+        "blocked_live_quality_gate": ("quality", "combat quality gate"),
         "blocked_duplicate_idea": ("duplicate_idea", "повтор идеи в сессии"),
         "blocked_send_filter": ("send_filter", "фильтр отправки"),
         "blocked_integrity": ("integrity", "проверка целостности"),
         "blocked_too_far_in_time": ("time", "слишком далеко по времени"),
+        "blocked_no_enriched_scored_row": ("strategy", "strategy gate (S8/S9)"),
         "blocked_unknown": ("unknown", "не классифицировано"),
         "no_candidates": ("none", "нет кандидатов"),
         "none": ("ok", "нет блокирующих причин по матчам"),
@@ -1121,16 +1144,25 @@ def compile_football_cycle_debug(
     )
 
     _agg_why = {
+        "blocked_no_strategy_match": "после integrity не нашлось кандидата под S8/S9",
+        "blocked_context_filter": "после стратегии матч отсеян context filter",
+        "blocked_value_filter": "после context filter не пройден value filter",
         "blocked_low_score": "score чуть ниже порога",
+        "blocked_live_quality_gate": "не пройден combat quality gate",
         "blocked_duplicate_idea": "идея уже отправлялась в сессии",
         "blocked_send_filter": "рынок отсеян фильтром отправки",
         "blocked_integrity": "рынок не прошёл integrity",
         "blocked_too_far_in_time": "слишком далеко по времени",
+        "blocked_no_enriched_scored_row": "после integrity не нашлось кандидата под S8/S9",
         "blocked_unknown": "причина не классифицирована",
     }
     non_sel_fresh = [r for r in fresh_accepted if str(r.get("final_status")) != "selected"]
     _cnt_nf = Counter(str(r.get("final_status")) for r in non_sel_fresh)
     _why_order = (
+        "blocked_no_strategy_match",
+        "blocked_context_filter",
+        "blocked_value_filter",
+        "blocked_live_quality_gate",
         "blocked_low_score",
         "blocked_duplicate_idea",
         "blocked_integrity",
@@ -1169,7 +1201,11 @@ def compile_football_cycle_debug(
         }
 
     _qh_map = {
+        "strategy": "Матчи доходят до integrity, но ни один рынок не проходит explicit strategy gate (S8/S9)",
+        "context": "Стратегия что-то находит, но context filter снимает эти идеи",
+        "value": "После context filter кандидаты не проходят value filter",
         "score": "Сигналы есть, но лучшим live-идеям не хватает score до порога",
+        "quality": "Есть сильные идеи, но финальный combat quality gate снимает их перед отправкой",
         "duplicate_idea": "Повторные идеи блокируются, ждём новые live-сценарии",
         "send_filter": "Идеи отсекаются фильтром рынков/времени — посмотрите состав live-линии",
         "integrity": "Идеи есть, но рынок не проходит проверку целостности ставки",
@@ -1325,6 +1361,15 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
     msg = (res.message or "").strip().lower()
     rr = (res.rejection_reason or "").strip().lower()
     diag = diag or {}
+    dbg = res.football_cycle_debug or {}
+    if isinstance(dbg, dict):
+        lq = dbg.get("live_quality_summary") or {}
+        main_blocker_status = str(lq.get("main_blocker_status") or "").strip().lower()
+        if main_blocker_status and main_blocker_status not in {"unknown", "none", "ok"}:
+            return main_blocker_status
+        gb = str(dbg.get("global_block") or "").strip().lower()
+        if gb in {"blocked_no_strategy_match", "blocked_context_filter", "blocked_value_filter"}:
+            return gb
     if msg == "paused" or "paused" in rr:
         return "blocked_paused"
     if msg == "football_disabled" or "football_disabled" in rr:
@@ -1347,6 +1392,14 @@ def _infer_football_live_cycle_bottleneck(res: AutoSignalCycleResult, diag: dict
         return "blocked_stale_live_source"
     if msg == "blocked_stale_live_events" or rr == "blocked_stale_live_events":
         return "blocked_stale_live_events"
+    if msg == "blocked_no_strategy_match" or rr == "blocked_no_strategy_match":
+        return "blocked_no_strategy_match"
+    if msg == "blocked_context_filter" or rr == "blocked_context_filter":
+        return "blocked_context_filter"
+    if msg == "blocked_value_filter" or rr == "blocked_value_filter":
+        return "blocked_value_filter"
+    if msg == "blocked_live_quality_gate" or rr == "blocked_live_quality_gate":
+        return "blocked_live_quality_gate"
     if not res.fetch_ok and ("unauthorized" in rr or "quota" in rr or "live_unavailable" in rr):
         return "blocked_live_provider_auth_or_quota"
     if not res.fetch_ok:
@@ -1400,6 +1453,9 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_no_live_matches": "нет live-матчей футбола в выборке провайдера",
         "blocked_send_filter": "все отсеяны фильтром отправки (live/семья/время)",
         "blocked_integrity": "не прошли проверку целостности ставки",
+        "blocked_no_strategy_match": "после integrity ни один рынок не прошёл strategy gate (S8/S9)",
+        "blocked_context_filter": "после strategy gate кандидаты сняты context filter",
+        "blocked_value_filter": "после context filter кандидаты сняты value filter",
         "blocked_low_score": "score ниже порога",
         "blocked_duplicate_idea": "повтор той же идеи в рамках live-сессии",
         "blocked_dedup_db": "отсеяно дедупликацией в базе",
@@ -1429,7 +1485,7 @@ def _combat_bottleneck_ru(token: str | None) -> str:
         "blocked_live_quality_gate": "не прошёл combat quality gate",
         "blocked_core_late_high_gap_total": "тотал: слишком много голов нужно на поздней стадии",
         "blocked_late_live_market": "поздняя стадия / timing: рынок уже неадекватен для live-сигнала",
-        "blocked_no_enriched_scored_row": "нет готовой оценённой ставки по матчу после обогащения",
+        "blocked_no_enriched_scored_row": "после integrity ни один рынок не прошёл strategy gate (S8/S9)",
     }
     return m.get(str(token), str(token).replace("_", " "))
 
@@ -1599,6 +1655,7 @@ def format_football_session_start_user_message(
     agg = d.get("football_pipeline_aggregate") or {}
     lq = d.get("live_quality_summary") or {}
     live_n = int(agg.get("total_live_matches_tracked") or 0)
+    source_live_n = int(cres.raw_events_count or diag.get("football_winline_football_event_count") or live_n)
     s_norm = int(agg.get("normal_sendable_matches") or 0)
     s_soft = int(agg.get("soft_sendable_matches") or 0)
     s_total = s_norm + s_soft
@@ -1610,7 +1667,8 @@ def format_football_session_start_user_message(
     if sub:
         lines_u.append(sub)
     lines_u.extend([*cadence, ""])
-    lines_u.append(f"📊 Сейчас в live: {live_n} матчей")
+    lines_u.append(f"📊 Live-матчей в источнике: {source_live_n}")
+    lines_u.append(f"🧹 После bridge/freshness в контуре: {live_n}")
     lines_u.append(f"🎯 Подходящих сигналов (готовых к отправке): {s_total}")
     lines_u.append(f"💾 Записано в базу: {n_db}  ·  📨 Отправлено в Telegram: {n_sent}")
     lines_u.append("")
@@ -1691,6 +1749,7 @@ def format_football_session_start_debug_message(
     matches: list[dict] = list(d.get("matches") or [])
 
     live_n = int(agg.get("total_live_matches_tracked") or 0)
+    source_live_n = int(cres.raw_events_count or diag.get("football_winline_football_event_count") or live_n)
     w_c = int(agg.get("with_candidates_pre_send_pipeline") or 0)
     af = int(agg.get("after_send_filter") or 0)
     ai = int(agg.get("after_integrity") or 0)
@@ -1708,7 +1767,8 @@ def format_football_session_start_debug_message(
         head,
         *cadence,
         "",
-        f"📊 Сейчас в live: {live_n} матч(ей) (в снимке контура)",
+        f"📊 Live-матчей в источнике: {source_live_n}",
+        f"🧹 После bridge/freshness (в контуре): {live_n}",
         f"🧩 С кандидатами (после препроцессинга): {w_c}",
         f"⬇️ После send filter: {af} матч(ей) с кандидатами",
         f"⬇️ После integrity: {ai}",
