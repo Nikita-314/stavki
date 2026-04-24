@@ -150,7 +150,7 @@ def _winline_shows_in_play(time_str: str | None, numer: int | None) -> bool:
     if not s:
         return False
     if re.search(
-        r"(?i)перер|ht\b|half|int\.|инт\.|меж|ot\b|aet|экстр",
+        r"(?i)перер|(?:^|\b)\d?\s*пер\.?\d*|ht\b|half|int\.|инт\.|меж|ot\b|aet|экстр",
         s,
     ):
         return True
