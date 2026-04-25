@@ -227,6 +227,7 @@ def test_team_total_high_odds_is_blocked() -> None:
     assert row is not None
     assert row["goals_needed_to_win"] == 1
     assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
     assert "blocked_team_total_high_odds" in str(row["block_reason"])
 
 
@@ -245,6 +246,7 @@ def test_match_total_low_odds_is_blocked() -> None:
     )
     assert row is not None
     assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
     assert "blocked_total_odds_window" in str(row["block_reason"])
 
 
@@ -281,4 +283,89 @@ def test_period_total_is_blocked() -> None:
     )
     assert row is not None
     assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "blocked"
     assert "blocked_period_total" in str(row["block_reason"])
+
+
+def test_high_risk_late_total_can_be_watchlist_not_eligible() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 3.5",
+            minute=78,
+            score_home=2,
+            score_away=1,
+            odds="1.80",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
+    assert "blocked_late_total_over" in str(row["block_reason"])
+
+
+def test_exotic_result_does_not_enter_watchlist() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="match_winner",
+            market_label="Европейский гандикап",
+            selection="1",
+            score_home=1,
+            score_away=1,
+            api=True,
+        )
+    )
+    assert row is not None
+    assert row["preview_bucket"] == "blocked"
+
+
+def test_1x2_with_api_can_enter_watchlist() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="1x2",
+            market_label="1X2",
+            selection="1",
+            score_home=0,
+            score_away=0,
+            api=True,
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
+    assert "blocked_1x2_00_without_pressure" in str(row["block_reason"])
+
+
+def test_trailing_1x2_does_not_enter_watchlist() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="1x2",
+            market_label="1X2",
+            selection="1",
+            score_home=1,
+            score_away=2,
+            api=True,
+        )
+    )
+    assert row is not None
+    assert row["preview_bucket"] == "blocked"
+
+
+def test_team_total_odds_3_0_can_be_watchlist_not_eligible() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Инд. тотал 1",
+            selection="ИТ1 Больше 1.5",
+            score_home=1,
+            score_away=0,
+            odds="3.00",
+            section_name="Team totals",
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
+    assert "blocked_team_total_high_odds" in str(row["block_reason"])

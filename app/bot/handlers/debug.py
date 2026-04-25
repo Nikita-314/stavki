@@ -1073,12 +1073,44 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
     except (json.JSONDecodeError, TypeError):
         top = []
     try:
+        eligible_top = json.loads(str(diag.get("football_live_ranker_eligible_top_json") or "[]"))
+        if not isinstance(eligible_top, list):
+            eligible_top = []
+    except (json.JSONDecodeError, TypeError):
+        eligible_top = []
+    try:
+        watchlist_top = json.loads(str(diag.get("football_live_ranker_watchlist_top_json") or "[]"))
+        if not isinstance(watchlist_top, list):
+            watchlist_top = []
+    except (json.JSONDecodeError, TypeError):
+        watchlist_top = []
+    try:
         blocked_breakdown = json.loads(str(diag.get("football_live_ranker_blocked_breakdown_json") or "{}"))
         if not isinstance(blocked_breakdown, dict):
             blocked_breakdown = {}
     except (json.JSONDecodeError, TypeError):
         blocked_breakdown = {}
     eligible_count = int(diag.get("football_live_ranker_eligible_count") or 0)
+    watchlist_count = int(diag.get("football_live_ranker_watchlist_count") or 0)
+
+    def _append_ranker_rows(lines_out: list[str], rows: list[object]) -> None:
+        if not rows:
+            lines_out.append("— нет")
+            return
+        for idx, row in enumerate(rows[:10], start=1):
+            if not isinstance(row, dict):
+                continue
+            eligible = "yes" if row.get("send_eligible") else "no"
+            api = "yes" if row.get("api_intelligence") else "no"
+            lines_out.extend(
+                [
+                    f"{idx}. {row.get('match') or '—'}",
+                    f"   {row.get('minute') or '—'}' {row.get('score') or '—'} | {row.get('proposed_bet') or '—'} | odds {row.get('odds') or '—'}",
+                    f"   score={row.get('analytic_score')} risk={row.get('risk_level')} api={api} bucket={row.get('preview_bucket') or '—'} eligible={eligible}",
+                    f"   why: {row.get('confidence_reason') or '—'}",
+                    f"   block: {row.get('block_reason') or '—'}",
+                ]
+            )
 
     lines = [
         "🧪 S12_LIVE_ANALYTIC_RANKER preview-only",
@@ -1087,6 +1119,7 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
         f"ranker opportunities: {int(diag.get('football_live_ranker_candidates') or 0)}",
         f"top_count: {int(diag.get('football_live_ranker_top_count') or 0)}",
         f"eligible_count: {eligible_count}",
+        f"watchlist_count: {watchlist_count}",
         f"api_intelligence: {int(diag.get('football_live_ranker_api_count') or 0)}",
         f"blocked_preview: {int(diag.get('football_live_ranker_blocked_count') or 0)}",
         f"blocked_high_risk_count: {int(blocked_breakdown.get('blocked_high_risk_preview') or 0)}",
@@ -1094,24 +1127,16 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
         f"blocked_no_api_1x2_count: {int(blocked_breakdown.get('blocked_1x2_without_api_intelligence') or 0)}",
         f"blocked_trailing_count: {int(blocked_breakdown.get('blocked_trailing_side_1x2') or 0)}",
         "",
-        "Top-10:",
+        "Eligible ideas:",
     ]
-    if not top:
-        lines.append("— нет opportunities после integrity для FT 1X2 / total over need 1 / team total over need 1")
-    for idx, row in enumerate(top[:10], start=1):
-        if not isinstance(row, dict):
-            continue
-        eligible = "yes" if row.get("send_eligible") else "no"
-        api = "yes" if row.get("api_intelligence") else "no"
-        lines.extend(
-            [
-                f"{idx}. {row.get('match') or '—'}",
-                f"   {row.get('minute') or '—'}' {row.get('score') or '—'} | {row.get('proposed_bet') or '—'} | odds {row.get('odds') or '—'}",
-                f"   score={row.get('analytic_score')} risk={row.get('risk_level')} api={api} eligible={eligible}",
-                f"   why: {row.get('confidence_reason') or '—'}",
-                f"   block: {row.get('block_reason') or '—'}",
-            ]
-        )
+    _append_ranker_rows(lines, eligible_top)
+    lines.extend(["", "Watchlist ideas:"])
+    _append_ranker_rows(lines, watchlist_top)
+    lines.extend(["", "Blocked summary:"])
+    if blocked_breakdown:
+        lines.extend([f"• {k}: {v}" for k, v in list(blocked_breakdown.items())[:10]])
+    else:
+        lines.append("— нет")
     blocked_top = [row for row in top if isinstance(row, dict) and not bool(row.get("send_eligible"))]
     if eligible_count < 10 and blocked_top:
         lines.extend(["", "Top blocked ideas (preview):"])

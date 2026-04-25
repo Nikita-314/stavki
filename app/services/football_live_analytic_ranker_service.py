@@ -16,9 +16,12 @@ class FootballLiveRankerResult:
     total_candidates: int
     opportunities: int
     top: list[dict[str, object]]
+    eligible_top: list[dict[str, object]]
+    watchlist_top: list[dict[str, object]]
     api_count: int
     blocked_count: int
     eligible_count: int
+    watchlist_count: int
     blocked_breakdown: dict[str, int]
 
 
@@ -34,21 +37,21 @@ class FootballLiveAnalyticRankerService:
 
     def rank(self, candidates: list[ProviderSignalCandidate], *, limit: int = 10) -> FootballLiveRankerResult:
         rows = [row for c in candidates if (row := self.evaluate(c)) is not None]
-        rows.sort(
-            key=lambda r: (
-                1 if bool(r.get("send_eligible")) else 0,
-                float(r.get("analytic_score") or 0.0),
-            ),
-            reverse=True,
-        )
-        top = rows[: max(1, int(limit))]
+        rows.sort(key=lambda r: (self._bucket_rank(str(r.get("preview_bucket") or "")), float(r.get("analytic_score") or 0.0)), reverse=True)
+        eligible_top = [r for r in rows if r.get("preview_bucket") == "eligible"][: max(1, int(limit))]
+        watchlist_top = [r for r in rows if r.get("preview_bucket") == "watchlist"][: max(1, int(limit))]
+        blocked_top = [r for r in rows if r.get("preview_bucket") == "blocked"][: max(1, int(limit))]
+        top = [*eligible_top, *watchlist_top, *blocked_top][: max(1, int(limit))]
         return FootballLiveRankerResult(
             total_candidates=len(candidates),
             opportunities=len(rows),
             top=top,
+            eligible_top=eligible_top,
+            watchlist_top=watchlist_top,
             api_count=sum(1 for r in rows if bool(r.get("api_intelligence"))),
-            blocked_count=sum(1 for r in rows if not bool(r.get("send_eligible"))),
-            eligible_count=sum(1 for r in rows if bool(r.get("send_eligible"))),
+            blocked_count=sum(1 for r in rows if r.get("preview_bucket") == "blocked"),
+            eligible_count=sum(1 for r in rows if r.get("preview_bucket") == "eligible"),
+            watchlist_count=sum(1 for r in rows if r.get("preview_bucket") == "watchlist"),
             blocked_breakdown=self._blocked_breakdown(rows),
         )
 
@@ -126,6 +129,8 @@ class FootballLiveAnalyticRankerService:
 
         if goals_needed is not None and goals_needed != 1:
             block_reasons.append("goals_needed_not_1")
+        if odds is not None and odds > Decimal("3.50"):
+            block_reasons.append("blocked_watchlist_odds_gt_3_50")
 
         score += self._minute_score(minute, kind, reasons)
         score += self._odds_score(odds, reasons)
@@ -143,6 +148,16 @@ class FootballLiveAnalyticRankerService:
         send_eligible = not block_reasons
         if not send_eligible:
             score = min(score, 49.0)
+        preview_bucket = "eligible" if send_eligible else "watchlist" if self._is_watchlist_candidate(
+            kind=kind,
+            minute=minute,
+            odds=odds,
+            api=api,
+            selection_side=selection_side,
+            sh=sh,
+            sa=sa,
+            block_reasons=block_reasons,
+        ) else "blocked"
 
         return {
             "match": str(c.match.match_name or ""),
@@ -158,10 +173,52 @@ class FootballLiveAnalyticRankerService:
             "confidence_reason": "; ".join(reasons[:8]) or "no_positive_factors",
             "missing_data": missing,
             "send_eligible": bool(send_eligible),
+            "preview_bucket": preview_bucket,
             "block_reason": ", ".join(block_reasons) if block_reasons else None,
             "block_reasons": block_reasons,
             "goals_needed_to_win": goals_needed,
         }
+
+    def _bucket_rank(self, bucket: str) -> int:
+        return {"eligible": 3, "watchlist": 2, "blocked": 1}.get(bucket, 0)
+
+    def _is_watchlist_candidate(
+        self,
+        *,
+        kind: str,
+        minute: int | None,
+        odds: Decimal | None,
+        api: dict[str, Any],
+        selection_side: str | None,
+        sh: int | None,
+        sa: int | None,
+        block_reasons: list[str],
+    ) -> bool:
+        hard_no = {
+            "missing_minute",
+            "missing_score",
+            "missing_odds",
+            "missing_minute_score",
+            "missing_minute_odds",
+            "missing_score_odds",
+            "missing_minute_score_odds",
+            "odds_outside_sane_range",
+            "blocked_watchlist_odds_gt_3_50",
+            "blocked_exotic_result_like",
+            "competition_blocked",
+            "goals_needed_not_1",
+            "blocked_period_total",
+            "blocked_trailing_side_1x2",
+        }
+        if any(reason in hard_no for reason in block_reasons):
+            return False
+        if kind == "ft_1x2":
+            return bool(api and not self._is_trailing_side(selection_side, sh, sa))
+        if kind == "match_total_over_need_1":
+            return bool(minute is not None and 35 <= minute <= 80 and odds is not None and odds <= Decimal("3.50"))
+        if kind == "team_total_over_need_1":
+            return bool(minute is not None and 35 <= minute <= 80 and odds is not None and odds <= Decimal("3.20"))
+        return False
 
     def _blocked_breakdown(self, rows: list[dict[str, object]]) -> dict[str, int]:
         out: dict[str, int] = {}
