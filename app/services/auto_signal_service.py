@@ -47,6 +47,7 @@ from app.services.football_live_adaptive_learning_service import (
     preview_live_adaptive_tag_keys,
     snapshot_json_for_diagnostics,
 )
+from app.services.api_football_team_intelligence_service import ApiFootballTeamIntelligenceService
 from app.services.football_live_strategy_service import (
     evaluate_football_live_strategies,
     evaluate_football_live_strategies_async,
@@ -3132,6 +3133,47 @@ class AutoSignalService:
         if invalid_total_scope_drops:
             logger.info("[FOOTBALL][INTEGRITY] dropped_invalid_total_scope=%s", invalid_total_scope_drops)
         post_integrity_count = len(candidates_to_ingest)
+        api_intelligence_examples: list[dict[str, object]] = []
+        try:
+            intelligence = ApiFootballTeamIntelligenceService()
+            intelligence_res = intelligence.enrich_candidates(list(candidates_to_ingest), max_matches=5)
+            candidates_to_ingest = intelligence_res.candidates
+            fb_post_integrity_saved = _football_only(candidates_to_ingest)
+            api_intelligence_examples = intelligence_res.examples
+            diagnostics.update(
+                api_football_intelligence_attempted=int(intelligence_res.attempted),
+                api_football_intelligence_mapped=int(intelligence_res.mapped),
+                api_football_intelligence_loaded=int(intelligence_res.loaded),
+                api_football_intelligence_missing=int(intelligence_res.missing),
+                api_football_intelligence_cache_hits=int(intelligence_res.cache_hits),
+                api_football_intelligence_requests_used=int(intelligence_res.requests_used),
+                api_football_intelligence_examples_json=(
+                    json.dumps(api_intelligence_examples, default=str, ensure_ascii=False)[:20000]
+                    if api_intelligence_examples
+                    else None
+                ),
+            )
+            if intelligence_res.attempted:
+                logger.info(
+                    "[API_FOOTBALL][INTELLIGENCE] attempted=%s mapped=%s loaded=%s missing=%s requests=%s cache_hits=%s",
+                    intelligence_res.attempted,
+                    intelligence_res.mapped,
+                    intelligence_res.loaded,
+                    intelligence_res.missing,
+                    intelligence_res.requests_used,
+                    intelligence_res.cache_hits,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[API_FOOTBALL][INTELLIGENCE] enrichment skipped: %s", exc)
+            diagnostics.update(
+                api_football_intelligence_attempted=0,
+                api_football_intelligence_mapped=0,
+                api_football_intelligence_loaded=0,
+                api_football_intelligence_missing=int(len(candidates_to_ingest)),
+                api_football_intelligence_cache_hits=0,
+                api_football_intelligence_requests_used=0,
+                api_football_intelligence_examples_json=None,
+            )
         if not candidates_to_ingest:
             if adaptive_compare_only:
                 from app.services.football_live_adaptive_compare_service import run_adaptive_compare_report

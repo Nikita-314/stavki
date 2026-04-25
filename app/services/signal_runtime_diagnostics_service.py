@@ -111,6 +111,14 @@ class SignalRuntimeDiagnosticsState:
     football_live_rejected_at_send_gate: int = 0
     """Candidates scored but rejected by live send gate (classify: reject)."""
 
+    api_football_intelligence_attempted: int = 0
+    api_football_intelligence_mapped: int = 0
+    api_football_intelligence_loaded: int = 0
+    api_football_intelligence_missing: int = 0
+    api_football_intelligence_cache_hits: int = 0
+    api_football_intelligence_requests_used: int = 0
+    api_football_intelligence_examples_json: str | None = None
+
     football_live_rejected_invalid_selection: int = 0
     """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""
     football_live_rejected_no_pressure: int = 0

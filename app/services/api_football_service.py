@@ -236,6 +236,9 @@ class ApiFootballFixtureLite:
     starting_at: str | None = None
     status_short: str | None = None
     status_long: str | None = None
+    league_id: int | None = None
+    league_country: str | None = None
+    season: int | None = None
 
 
 @dataclass(frozen=True)
@@ -360,6 +363,9 @@ class ApiFootballService:
                     starting_at=str(fx.get("date") or "") or None,
                     status_short=str(status.get("short") or "") or None,
                     status_long=str(status.get("long") or "") or None,
+                    league_id=_safe_int(league.get("id")),
+                    league_country=str(league.get("country") or "") or None,
+                    season=_safe_int(league.get("season")),
                 )
             )
         return out
@@ -412,6 +418,9 @@ class ApiFootballService:
                     starting_at=str(fx.get("date") or "") or None,
                     status_short=str(status.get("short") or "") or None,
                     status_long=str(status.get("long") or "") or None,
+                    league_id=_safe_int(league.get("id")),
+                    league_country=str(league.get("country") or "") or None,
+                    season=_safe_int(league.get("season")),
                 )
             )
         return out
