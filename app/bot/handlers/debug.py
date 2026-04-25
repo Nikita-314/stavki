@@ -967,13 +967,23 @@ async def cmd_whoami(message: Message) -> None:
     )
 
 
-@router.message(_text_is("📊 Статус сигналов"))
+@router.message(_text_is("📊 Статус сигналов", "Статус сигналов"))
 @router.message(Command("signal_status"))
 async def cmd_signal_status(message: Message) -> None:
     if not _is_allowed(message):
         await _deny(message)
         return
-    await message.answer("\n".join(_format_signal_runtime_status_lines()), reply_markup=get_signal_control_keyboard())
+    logger.info(
+        "Signal status requested: chat_id=%s user_id=%s text=%r",
+        message.chat.id if getattr(message, "chat", None) is not None else None,
+        message.from_user.id if message.from_user else None,
+        message.text,
+    )
+    await _answer_long_message(
+        message,
+        "\n".join(_format_signal_runtime_status_lines()),
+        reply_markup=get_signal_control_keyboard(),
+    )
 
 
 @router.message(_text_is("⏸ Стоп"))
