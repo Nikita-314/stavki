@@ -1072,6 +1072,13 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
             top = []
     except (json.JSONDecodeError, TypeError):
         top = []
+    try:
+        blocked_breakdown = json.loads(str(diag.get("football_live_ranker_blocked_breakdown_json") or "{}"))
+        if not isinstance(blocked_breakdown, dict):
+            blocked_breakdown = {}
+    except (json.JSONDecodeError, TypeError):
+        blocked_breakdown = {}
+    eligible_count = int(diag.get("football_live_ranker_eligible_count") or 0)
 
     lines = [
         "🧪 S12_LIVE_ANALYTIC_RANKER preview-only",
@@ -1079,8 +1086,13 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
         f"after_integrity: {res.report_after_integrity}",
         f"ranker opportunities: {int(diag.get('football_live_ranker_candidates') or 0)}",
         f"top_count: {int(diag.get('football_live_ranker_top_count') or 0)}",
+        f"eligible_count: {eligible_count}",
         f"api_intelligence: {int(diag.get('football_live_ranker_api_count') or 0)}",
         f"blocked_preview: {int(diag.get('football_live_ranker_blocked_count') or 0)}",
+        f"blocked_high_risk_count: {int(blocked_breakdown.get('blocked_high_risk_preview') or 0)}",
+        f"blocked_exotic_count: {int(blocked_breakdown.get('blocked_exotic_result_like') or 0)}",
+        f"blocked_no_api_1x2_count: {int(blocked_breakdown.get('blocked_1x2_without_api_intelligence') or 0)}",
+        f"blocked_trailing_count: {int(blocked_breakdown.get('blocked_trailing_side_1x2') or 0)}",
         "",
         "Top-10:",
     ]
@@ -1100,6 +1112,14 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
                 f"   block: {row.get('block_reason') or '—'}",
             ]
         )
+    blocked_top = [row for row in top if isinstance(row, dict) and not bool(row.get("send_eligible"))]
+    if eligible_count < 10 and blocked_top:
+        lines.extend(["", "Top blocked ideas (preview):"])
+        for idx, row in enumerate(blocked_top[:5], start=1):
+            lines.append(
+                f"{idx}. {row.get('match') or '—'} | {row.get('proposed_bet') or '—'} | "
+                f"score={row.get('analytic_score')} | block={row.get('block_reason') or '—'}"
+            )
     await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 

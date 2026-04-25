@@ -18,6 +18,8 @@ class FootballLiveRankerResult:
     top: list[dict[str, object]]
     api_count: int
     blocked_count: int
+    eligible_count: int
+    blocked_breakdown: dict[str, int]
 
 
 class FootballLiveAnalyticRankerService:
@@ -46,6 +48,8 @@ class FootballLiveAnalyticRankerService:
             top=top,
             api_count=sum(1 for r in rows if bool(r.get("api_intelligence"))),
             blocked_count=sum(1 for r in rows if not bool(r.get("send_eligible"))),
+            eligible_count=sum(1 for r in rows if bool(r.get("send_eligible"))),
+            blocked_breakdown=self._blocked_breakdown(rows),
         )
 
     def evaluate(self, c: ProviderSignalCandidate) -> dict[str, object] | None:
@@ -79,10 +83,17 @@ class FootballLiveAnalyticRankerService:
 
         kind = str(opportunity["kind"])
         goals_needed = opportunity.get("goals_needed_to_win")
+        selection_side = self._selection_side(c)
         if kind == "ft_1x2":
             score += 42.0
-            if (sh, sa) == (0, 0) and not api:
-                block_reasons.append("ft_1x2_00_without_api_intelligence")
+            if self._is_exotic_result_like(c):
+                block_reasons.append("blocked_exotic_result_like")
+            if not api:
+                block_reasons.append("blocked_1x2_without_api_intelligence")
+            if (sh, sa) == (0, 0) and not self._has_api_pressure(c):
+                block_reasons.append("blocked_1x2_00_without_pressure")
+            if self._is_trailing_side(selection_side, sh, sa):
+                block_reasons.append("blocked_trailing_side_1x2")
             if api:
                 score += 8.0
                 reasons.append("api_intelligence_available")
@@ -90,10 +101,28 @@ class FootballLiveAnalyticRankerService:
         elif kind == "match_total_over_need_1":
             score += 58.0
             reasons.append("match_total_over_need_1")
+            if opportunity.get("period_scope") != "match":
+                block_reasons.append("blocked_period_total")
+            if minute is not None and not (35 <= minute <= 70):
+                block_reasons.append("blocked_total_minute_window")
+                if minute > 70:
+                    block_reasons.append("blocked_late_total_over")
+            if odds is not None and not (Decimal("1.45") <= odds <= Decimal("2.40")):
+                block_reasons.append("blocked_total_odds_window")
         elif kind == "team_total_over_need_1":
             score += 52.0
             reasons.append("team_total_over_need_1")
             risk_points += 1
+            if opportunity.get("period_scope") != "match":
+                block_reasons.append("blocked_period_total")
+            if minute is not None and not (35 <= minute <= 70):
+                block_reasons.append("blocked_total_minute_window")
+                if minute > 70:
+                    block_reasons.append("blocked_late_total_over")
+            if odds is not None and odds < Decimal("1.45"):
+                block_reasons.append("blocked_total_odds_window")
+            if odds is not None and odds > Decimal("2.40"):
+                block_reasons.append("blocked_team_total_high_odds")
 
         if goals_needed is not None and goals_needed != 1:
             block_reasons.append("goals_needed_not_1")
@@ -108,10 +137,12 @@ class FootballLiveAnalyticRankerService:
             if kind == "ft_1x2":
                 risk_points += 2
 
+        risk_level = "high" if risk_points >= 3 or block_reasons else "medium" if risk_points else "low"
+        if risk_level == "high" and "blocked_high_risk_preview" not in block_reasons:
+            block_reasons.append("blocked_high_risk_preview")
         send_eligible = not block_reasons
         if not send_eligible:
             score = min(score, 49.0)
-        risk_level = "high" if risk_points >= 3 or block_reasons else "medium" if risk_points else "low"
 
         return {
             "match": str(c.match.match_name or ""),
@@ -128,8 +159,20 @@ class FootballLiveAnalyticRankerService:
             "missing_data": missing,
             "send_eligible": bool(send_eligible),
             "block_reason": ", ".join(block_reasons) if block_reasons else None,
+            "block_reasons": block_reasons,
             "goals_needed_to_win": goals_needed,
         }
+
+    def _blocked_breakdown(self, rows: list[dict[str, object]]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for row in rows:
+            reasons = row.get("block_reasons")
+            if not isinstance(reasons, list) or not reasons:
+                continue
+            for reason in reasons:
+                key = str(reason)
+                out[key] = int(out.get(key, 0) or 0) + 1
+        return dict(sorted(out.items(), key=lambda kv: kv[1], reverse=True))
 
     def _opportunity(self, c: ProviderSignalCandidate, sh: int | None, sa: int | None) -> dict[str, object] | None:
         fam = self._family.get_market_family(c)
@@ -154,9 +197,17 @@ class FootballLiveAnalyticRankerService:
             return None
         goals_needed = self._goals_needed(ctx.target_scope, line, sh, sa)
         if ctx.target_scope == "match":
-            return {"kind": "match_total_over_need_1", "goals_needed_to_win": goals_needed}
+            return {
+                "kind": "match_total_over_need_1",
+                "goals_needed_to_win": goals_needed,
+                "period_scope": ctx.period_scope,
+            }
         if ctx.target_scope in {"home_team", "away_team", "team_total"}:
-            return {"kind": "team_total_over_need_1", "goals_needed_to_win": goals_needed}
+            return {
+                "kind": "team_total_over_need_1",
+                "goals_needed_to_win": goals_needed,
+                "period_scope": ctx.period_scope,
+            }
         return None
 
     def _goals_needed(self, target_scope: str, line: float, sh: int | None, sa: int | None) -> int | None:
@@ -261,6 +312,40 @@ class FootballLiveAnalyticRankerService:
         if sel in {"x", "н", "draw", "ничья"}:
             return "draw"
         return None
+
+    def _is_trailing_side(self, side: str | None, sh: int | None, sa: int | None) -> bool:
+        if side not in {"home", "away"} or sh is None or sa is None:
+            return False
+        return bool((side == "home" and sh < sa) or (side == "away" and sa < sh))
+
+    def _is_exotic_result_like(self, c: ProviderSignalCandidate) -> bool:
+        blob = " ".join(
+            [
+                c.market.market_type or "",
+                c.market.market_label or "",
+                c.market.selection or "",
+                c.market.section_name or "",
+                c.market.subsection_name or "",
+            ]
+        ).lower().replace("ё", "е")
+        return bool(
+            re.search(
+                r"(?:european\s*handicap|handicap|гандикап|фора|interval|интервал|тайм|half|period|период|next\s*goal|следующ(?:ий|его)\s+гол|remainder|остат)",
+                blob,
+            )
+        )
+
+    def _has_api_pressure(self, c: ProviderSignalCandidate) -> bool:
+        fs = c.feature_snapshot_json if isinstance(c.feature_snapshot_json, dict) else {}
+        part = fs.get("football_live_context_participation")
+        if isinstance(part, dict):
+            score = self._int(part.get("api_football_pressure_score"))
+            return bool(part.get("api_football_pressure_used") and score is not None and score >= 2)
+        ctx = fs.get("football_live_context_filter")
+        if isinstance(ctx, dict):
+            score = self._int(ctx.get("selected_pressure_score"))
+            return bool(ctx.get("fixture_id") and score is not None and score >= 2)
+        return False
 
     def _is_blocked_competition(self, c: ProviderSignalCandidate) -> bool:
         blob = " ".join([c.match.tournament_name or "", c.match.match_name or "", c.match.home_team or "", c.match.away_team or ""]).lower().replace("ё", "е")

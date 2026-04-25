@@ -122,6 +122,8 @@ class SignalRuntimeDiagnosticsState:
     football_live_ranker_top_count: int = 0
     football_live_ranker_api_count: int = 0
     football_live_ranker_blocked_count: int = 0
+    football_live_ranker_eligible_count: int = 0
+    football_live_ranker_blocked_breakdown_json: str | None = None
     football_live_ranker_top_json: str | None = None
 
     football_live_rejected_invalid_selection: int = 0

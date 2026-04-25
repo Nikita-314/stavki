@@ -3186,12 +3186,19 @@ class AutoSignalService:
                 football_live_ranker_top_count=int(len(ranker_res.top)),
                 football_live_ranker_api_count=int(ranker_res.api_count),
                 football_live_ranker_blocked_count=int(ranker_res.blocked_count),
+                football_live_ranker_eligible_count=int(ranker_res.eligible_count),
+                football_live_ranker_blocked_breakdown_json=json.dumps(
+                    ranker_res.blocked_breakdown,
+                    default=str,
+                    ensure_ascii=False,
+                )[:12000],
                 football_live_ranker_top_json=json.dumps(ranker_res.top, default=str, ensure_ascii=False)[:30000],
             )
             logger.info(
-                "[FOOTBALL][S12_RANKER] opportunities=%s top=%s api=%s blocked=%s",
+                "[FOOTBALL][S12_RANKER] opportunities=%s top=%s eligible=%s api=%s blocked=%s",
                 ranker_res.opportunities,
                 len(ranker_res.top),
+                ranker_res.eligible_count,
                 ranker_res.api_count,
                 ranker_res.blocked_count,
             )
@@ -3202,6 +3209,8 @@ class AutoSignalService:
                 football_live_ranker_top_count=0,
                 football_live_ranker_api_count=0,
                 football_live_ranker_blocked_count=0,
+                football_live_ranker_eligible_count=0,
+                football_live_ranker_blocked_breakdown_json=None,
                 football_live_ranker_top_json=None,
             )
         if not candidates_to_ingest:

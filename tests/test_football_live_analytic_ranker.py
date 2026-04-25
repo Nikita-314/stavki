@@ -72,7 +72,8 @@ def test_1x2_00_without_api_is_hard_blocked() -> None:
     )
     assert row is not None
     assert row["send_eligible"] is False
-    assert row["block_reason"] == "ft_1x2_00_without_api_intelligence"
+    assert "blocked_1x2_without_api_intelligence" in str(row["block_reason"])
+    assert "blocked_1x2_00_without_pressure" in str(row["block_reason"])
 
 
 def test_match_total_over_need_1_is_eligible() -> None:
@@ -123,7 +124,7 @@ def test_goals_needed_gt_1_is_blocked() -> None:
     assert row is not None
     assert row["goals_needed_to_win"] == 3
     assert row["send_eligible"] is False
-    assert row["block_reason"] == "goals_needed_not_1"
+    assert "goals_needed_not_1" in str(row["block_reason"])
 
 
 def test_youth_competition_is_blocked() -> None:
@@ -139,7 +140,8 @@ def test_youth_competition_is_blocked() -> None:
     assert row is not None
     assert row["send_eligible"] is False
     assert row["risk_level"] == "high"
-    assert row["block_reason"] == "competition_blocked"
+    assert "competition_blocked" in str(row["block_reason"])
+    assert "blocked_high_risk_preview" in str(row["block_reason"])
 
 
 def test_cyrillic_women_marker_is_blocked() -> None:
@@ -156,4 +158,127 @@ def test_cyrillic_women_marker_is_blocked() -> None:
     )
     assert row is not None
     assert row["send_eligible"] is False
-    assert row["block_reason"] == "competition_blocked"
+    assert "competition_blocked" in str(row["block_reason"])
+
+
+def test_exotic_result_like_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="match_winner",
+            market_label="Европейский гандикап",
+            selection="1",
+            score_home=1,
+            score_away=1,
+            api=True,
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert "blocked_exotic_result_like" in str(row["block_reason"])
+
+
+def test_1x2_trailing_side_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="1x2",
+            market_label="1X2",
+            selection="1",
+            score_home=1,
+            score_away=2,
+            api=True,
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert "blocked_trailing_side_1x2" in str(row["block_reason"])
+
+
+def test_late_match_total_over_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 3.5",
+            minute=80,
+            score_home=2,
+            score_away=1,
+            odds="1.80",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["goals_needed_to_win"] == 1
+    assert row["send_eligible"] is False
+    assert "blocked_late_total_over" in str(row["block_reason"])
+
+
+def test_team_total_high_odds_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Инд. тотал 1",
+            selection="ИТ1 Больше 1.5",
+            score_home=1,
+            score_away=0,
+            odds="3.11",
+            section_name="Team totals",
+        )
+    )
+    assert row is not None
+    assert row["goals_needed_to_win"] == 1
+    assert row["send_eligible"] is False
+    assert "blocked_team_total_high_odds" in str(row["block_reason"])
+
+
+def test_match_total_low_odds_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 0.5",
+            minute=47,
+            score_home=0,
+            score_away=0,
+            odds="1.25",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert "blocked_total_odds_window" in str(row["block_reason"])
+
+
+def test_team_total_early_minute_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Инд. тотал 1",
+            selection="ИТ1 Больше 0.5",
+            minute=9,
+            score_home=0,
+            score_away=0,
+            odds="1.80",
+            section_name="Team totals",
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert "blocked_total_minute_window" in str(row["block_reason"])
+
+
+def test_period_total_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="1-й тайм Тотал [a] (@NP@)",
+            selection="Больше 0.5",
+            minute=45,
+            score_home=0,
+            score_away=0,
+            odds="1.80",
+            section_name="1-й тайм",
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert "blocked_period_total" in str(row["block_reason"])
