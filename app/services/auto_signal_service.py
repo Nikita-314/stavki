@@ -977,15 +977,19 @@ def compile_football_cycle_debug(
         gb = global_block.lower()
         force_map = {
             "preview_only_enabled": "blocked_preview_only",
+            "blocked_stale_live_events": "blocked_stale_live_events",
         }
         if "non_live" in gb or "non_real" in gb:
             forced = "blocked_non_real_source"
-        else:
+        elif gb in force_map:
             forced = force_map.get(gb, gb)
             if not forced.startswith("blocked_"):
                 forced = "blocked_unknown"
-        for r in rows:
-            r["final_status"] = forced
+        else:
+            forced = None
+        if forced:
+            for r in rows:
+                r["final_status"] = forced
 
     status_counts = Counter(str(r["final_status"]) for r in rows)
     fresh_accepted = [
