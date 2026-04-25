@@ -391,3 +391,80 @@ def test_team_total_odds_3_0_can_be_watchlist_not_eligible() -> None:
     assert row["send_eligible"] is False
     assert row["preview_bucket"] == "watchlist"
     assert row["risk_level"] == "high"
+
+
+def test_match_total_need2_moves_to_watchlist() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 2.5",
+            minute=50,
+            score_home=1,
+            score_away=0,
+            odds="1.95",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["goals_needed_to_win"] == 2
+    assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
+    assert "watchlist_match_total_over_need_2" in str(row.get("watchlist_reasons"))
+
+
+def test_match_total_need2_never_eligible() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 2.5",
+            minute=50,
+            score_home=0,
+            score_away=1,
+            odds="2.10",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["goals_needed_to_win"] == 2
+    assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "watchlist"
+
+
+def test_team_total_need2_stays_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Инд. тотал 1",
+            selection="ИТ1 Больше 2.5",
+            minute=50,
+            score_home=1,
+            score_away=0,
+            odds="1.95",
+            section_name="Team totals",
+        )
+    )
+    assert row is not None
+    assert row["goals_needed_to_win"] == 2
+    assert row["preview_bucket"] == "blocked"
+    assert "goals_needed_not_1" in str(row["block_reason"])
+
+
+def test_match_total_need3_stays_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 3.5",
+            minute=50,
+            score_home=1,
+            score_away=0,
+            odds="1.95",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["goals_needed_to_win"] == 3
+    assert row["preview_bucket"] == "blocked"
+    assert "goals_needed_not_1" in str(row["block_reason"])

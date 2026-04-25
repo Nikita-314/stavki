@@ -78,6 +78,7 @@ class FootballLiveAnalyticRankerService:
         score = 0.0
         reasons: list[str] = []
         block_reasons: list[str] = []
+        watchlist_reasons: list[str] = []
         risk_points = 0
 
         if missing:
@@ -146,8 +147,23 @@ class FootballLiveAnalyticRankerService:
                 risk_points += 2
                 reasons.append("team_total_high_odds_watchlist")
 
+        force_watchlist = False
         if goals_needed is not None and goals_needed != 1:
-            block_reasons.append("goals_needed_not_1")
+            if goals_needed == 2 and self._can_watchlist_match_total_need2(
+                kind=kind,
+                minute=minute,
+                odds=odds,
+                sh=sh,
+                sa=sa,
+                competition_blocked=("competition_blocked" in block_reasons),
+                period_blocked=("blocked_period_total" in block_reasons),
+                missing=missing,
+            ):
+                force_watchlist = True
+                watchlist_reasons.append("watchlist_match_total_over_need_2")
+                reasons.append("watchlist_match_total_over_need_2")
+            else:
+                block_reasons.append("goals_needed_not_1")
 
         score += self._minute_score(minute, kind, reasons)
         score += self._odds_score(odds, reasons)
@@ -166,7 +182,7 @@ class FootballLiveAnalyticRankerService:
         risk_level = "high" if risk_points >= 3 else "medium" if risk_points else "low"
         if hard_blocked:
             score = min(score, 49.0)
-        preview_bucket = "blocked" if hard_blocked else ("watchlist" if risk_level == "high" else "eligible")
+        preview_bucket = "blocked" if hard_blocked else ("watchlist" if (force_watchlist or risk_level == "high") else "eligible")
         send_eligible = preview_bucket == "eligible"
 
         return {
@@ -186,6 +202,7 @@ class FootballLiveAnalyticRankerService:
             "preview_bucket": preview_bucket,
             "block_reason": ", ".join(block_reasons) if block_reasons else None,
             "block_reasons": block_reasons,
+            "watchlist_reasons": watchlist_reasons,
             "goals_needed_to_win": goals_needed,
         }
 
@@ -203,7 +220,39 @@ class FootballLiveAnalyticRankerService:
                 out[key] = int(out.get(key, 0) or 0) + 1
         out["risk_high_count"] = sum(1 for r in rows if str(r.get("risk_level")) == "high")
         out["moved_to_watchlist_count"] = sum(1 for r in rows if r.get("preview_bucket") == "watchlist")
+        out["watchlist_need2_count"] = sum(
+            1
+            for r in rows
+            if isinstance(r.get("watchlist_reasons"), list)
+            and "watchlist_match_total_over_need_2" in r.get("watchlist_reasons", [])
+        )
         return dict(sorted(out.items(), key=lambda kv: kv[1], reverse=True))
+
+    def _can_watchlist_match_total_need2(
+        self,
+        *,
+        kind: str,
+        minute: int | None,
+        odds: Decimal | None,
+        sh: int | None,
+        sa: int | None,
+        competition_blocked: bool,
+        period_blocked: bool,
+        missing: list[str],
+    ) -> bool:
+        if kind != "match_total_over_need_1":
+            return False
+        if competition_blocked or period_blocked or bool(missing):
+            return False
+        if minute is None or odds is None or sh is None or sa is None:
+            return False
+        if not (35 <= minute <= 65):
+            return False
+        if not (Decimal("1.60") <= odds <= Decimal("2.80")):
+            return False
+        if (sh + sa) > 1:
+            return False
+        return True
 
     def _opportunity(self, c: ProviderSignalCandidate, sh: int | None, sa: int | None) -> dict[str, object] | None:
         fam = self._family.get_market_family(c)
