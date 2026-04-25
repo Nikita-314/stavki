@@ -3181,6 +3181,12 @@ class AutoSignalService:
             )
         try:
             ranker_res = FootballLiveAnalyticRankerService().rank(list(candidates_to_ingest), limit=10)
+            ranker_preview_snapshot = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "top_eligible": ranker_res.eligible_top,
+                "top_watchlist": ranker_res.watchlist_top,
+                "blocked_summary": ranker_res.blocked_breakdown,
+            }
             diagnostics.update(
                 football_live_ranker_candidates=int(ranker_res.opportunities),
                 football_live_ranker_top_count=int(len(ranker_res.top)),
@@ -3204,6 +3210,11 @@ class AutoSignalService:
                     default=str,
                     ensure_ascii=False,
                 )[:30000],
+                football_live_ranker_preview_snapshot_json=json.dumps(
+                    ranker_preview_snapshot,
+                    default=str,
+                    ensure_ascii=False,
+                )[:60000],
             )
             logger.info(
                 "[FOOTBALL][S12_RANKER] opportunities=%s top=%s eligible=%s watchlist=%s api=%s blocked=%s",
@@ -3227,6 +3238,7 @@ class AutoSignalService:
                 football_live_ranker_top_json=None,
                 football_live_ranker_eligible_top_json=None,
                 football_live_ranker_watchlist_top_json=None,
+                football_live_ranker_preview_snapshot_json=None,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:

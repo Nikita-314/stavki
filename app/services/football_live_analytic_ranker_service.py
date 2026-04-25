@@ -408,9 +408,11 @@ class FootballLiveAnalyticRankerService:
         blob = " ".join([c.match.tournament_name or "", c.match.match_name or "", c.match.home_team or "", c.match.away_team or ""]).lower().replace("ё", "е")
         if "(ж)" in blob or "[ж]" in blob:
             return True
+        if re.search(r"(?<![a-zа-я0-9])рез(?:\.|(?=$|[^a-zа-я0-9]))", blob):
+            return True
         return bool(
             re.search(
-                r"\b(?:u1[789]|u2[013]|youth|women|woman|reserve|reserves|friendly|amateur|amateurs|товарищ|жен(?:щины)?|любител[ьи]|до\s*(?:17|18|19|20|21|23)|кибер|esoccer)\b",
+                r"\b(?:u1[789]|u2[013]|youth|women|woman|reserve|reserves|friendly|amateur|amateurs|товарищ|жен(?:щины)?|люб\.?|любител[ьи]|до\s*(?:17|18|19|20|21|23)|резерв\w*|дубл\w*|кибер|esoccer)\b",
                 blob,
             )
         )

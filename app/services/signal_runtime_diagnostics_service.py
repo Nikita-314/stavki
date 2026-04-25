@@ -128,6 +128,7 @@ class SignalRuntimeDiagnosticsState:
     football_live_ranker_top_json: str | None = None
     football_live_ranker_eligible_top_json: str | None = None
     football_live_ranker_watchlist_top_json: str | None = None
+    football_live_ranker_preview_snapshot_json: str | None = None
 
     football_live_rejected_invalid_selection: int = 0
     """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""

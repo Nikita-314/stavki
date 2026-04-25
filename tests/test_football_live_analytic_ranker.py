@@ -18,6 +18,8 @@ def _candidate(
     score_away: int = 0,
     odds: str = "1.80",
     tournament_name: str = "Premier League",
+    home_team: str = "Home",
+    away_team: str = "Away",
     section_name: str | None = None,
     subsection_name: str | None = None,
     api: bool = False,
@@ -45,9 +47,9 @@ def _candidate(
             external_event_id="evt-ranker",
             sport=SportType.FOOTBALL,
             tournament_name=tournament_name,
-            match_name="Home vs Away",
-            home_team="Home",
-            away_team="Away",
+            match_name=f"{home_team} vs {away_team}",
+            home_team=home_team,
+            away_team=away_team,
             event_start_at=datetime.now(timezone.utc),
             is_live=True,
             source_name="winline",
@@ -158,6 +160,24 @@ def test_cyrillic_women_marker_is_blocked() -> None:
     )
     assert row is not None
     assert row["send_eligible"] is False
+    assert "competition_blocked" in str(row["block_reason"])
+
+
+def test_cyrillic_reserve_team_marker_is_blocked() -> None:
+    row = FootballLiveAnalyticRankerService().evaluate(
+        _candidate(
+            market_type="total_goals",
+            market_label="Тотал [a] (@NP@)",
+            selection="Больше 1.5",
+            score_home=1,
+            score_away=0,
+            away_team="Спорт Уанкайо (рез)",
+            section_name="Totals",
+        )
+    )
+    assert row is not None
+    assert row["send_eligible"] is False
+    assert row["preview_bucket"] == "blocked"
     assert "competition_blocked" in str(row["block_reason"])
 
 

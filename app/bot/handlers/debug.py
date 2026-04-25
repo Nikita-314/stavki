@@ -1114,6 +1114,7 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
 
     lines = [
         "🧪 S12_LIVE_ANALYTIC_RANKER preview-only",
+        "⚠️ Preview-only: эти идеи НЕ отправляются в канал и НЕ считаются сигналами.",
         "",
         f"after_integrity: {res.report_after_integrity}",
         f"ranker opportunities: {int(diag.get('football_live_ranker_candidates') or 0)}",
