@@ -44,6 +44,7 @@ async def main() -> None:
                 command="football_live_debug",
                 description="[admin] Полный debug последнего football live цикла",
             ),
+            BotCommand(command="football_live_ranker_debug", description="[admin] S12 preview top-10 live идей"),
             BotCommand(command="signal_football", description="Включить рабочий режим футбола"),
             BotCommand(command="signal_cs2", description="Переключить CS2"),
             BotCommand(command="signal_dota", description="Переключить Dota"),

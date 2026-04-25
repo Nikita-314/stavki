@@ -1056,6 +1056,53 @@ async def cmd_football_live_debug(message: Message) -> None:
     await _answer_long_message(message, str(txt), reply_markup=get_signal_control_keyboard())
 
 
+@router.message(Command("football_live_ranker_debug"))
+async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """Preview-only S12 ranker: one dry-run cycle, no DB writes and no channel sends."""
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("S12 preview: запускаю dry-run live-cycle, сигналы не создаются и не отправляются...")
+    res = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=True)
+    AutoSignalService().log_football_cycle_trace(res)
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    try:
+        top = json.loads(str(diag.get("football_live_ranker_top_json") or "[]"))
+        if not isinstance(top, list):
+            top = []
+    except (json.JSONDecodeError, TypeError):
+        top = []
+
+    lines = [
+        "🧪 S12_LIVE_ANALYTIC_RANKER preview-only",
+        "",
+        f"after_integrity: {res.report_after_integrity}",
+        f"ranker opportunities: {int(diag.get('football_live_ranker_candidates') or 0)}",
+        f"top_count: {int(diag.get('football_live_ranker_top_count') or 0)}",
+        f"api_intelligence: {int(diag.get('football_live_ranker_api_count') or 0)}",
+        f"blocked_preview: {int(diag.get('football_live_ranker_blocked_count') or 0)}",
+        "",
+        "Top-10:",
+    ]
+    if not top:
+        lines.append("— нет opportunities после integrity для FT 1X2 / total over need 1 / team total over need 1")
+    for idx, row in enumerate(top[:10], start=1):
+        if not isinstance(row, dict):
+            continue
+        eligible = "yes" if row.get("send_eligible") else "no"
+        api = "yes" if row.get("api_intelligence") else "no"
+        lines.extend(
+            [
+                f"{idx}. {row.get('match') or '—'}",
+                f"   {row.get('minute') or '—'}' {row.get('score') or '—'} | {row.get('proposed_bet') or '—'} | odds {row.get('odds') or '—'}",
+                f"   score={row.get('analytic_score')} risk={row.get('risk_level')} api={api} eligible={eligible}",
+                f"   why: {row.get('confidence_reason') or '—'}",
+                f"   block: {row.get('block_reason') or '—'}",
+            ]
+        )
+    await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
+
+
 @router.message(Command("football_live_strategy_stats"))
 async def cmd_football_live_strategy_stats(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):

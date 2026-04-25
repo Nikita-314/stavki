@@ -118,6 +118,11 @@ class SignalRuntimeDiagnosticsState:
     api_football_intelligence_cache_hits: int = 0
     api_football_intelligence_requests_used: int = 0
     api_football_intelligence_examples_json: str | None = None
+    football_live_ranker_candidates: int = 0
+    football_live_ranker_top_count: int = 0
+    football_live_ranker_api_count: int = 0
+    football_live_ranker_blocked_count: int = 0
+    football_live_ranker_top_json: str | None = None
 
     football_live_rejected_invalid_selection: int = 0
     """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""

@@ -48,6 +48,7 @@ from app.services.football_live_adaptive_learning_service import (
     snapshot_json_for_diagnostics,
 )
 from app.services.api_football_team_intelligence_service import ApiFootballTeamIntelligenceService
+from app.services.football_live_analytic_ranker_service import FootballLiveAnalyticRankerService
 from app.services.football_live_strategy_service import (
     evaluate_football_live_strategies,
     evaluate_football_live_strategies_async,
@@ -3177,6 +3178,31 @@ class AutoSignalService:
                 api_football_intelligence_cache_hits=0,
                 api_football_intelligence_requests_used=0,
                 api_football_intelligence_examples_json=None,
+            )
+        try:
+            ranker_res = FootballLiveAnalyticRankerService().rank(list(candidates_to_ingest), limit=10)
+            diagnostics.update(
+                football_live_ranker_candidates=int(ranker_res.opportunities),
+                football_live_ranker_top_count=int(len(ranker_res.top)),
+                football_live_ranker_api_count=int(ranker_res.api_count),
+                football_live_ranker_blocked_count=int(ranker_res.blocked_count),
+                football_live_ranker_top_json=json.dumps(ranker_res.top, default=str, ensure_ascii=False)[:30000],
+            )
+            logger.info(
+                "[FOOTBALL][S12_RANKER] opportunities=%s top=%s api=%s blocked=%s",
+                ranker_res.opportunities,
+                len(ranker_res.top),
+                ranker_res.api_count,
+                ranker_res.blocked_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[FOOTBALL][S12_RANKER] preview skipped: %s", exc)
+            diagnostics.update(
+                football_live_ranker_candidates=0,
+                football_live_ranker_top_count=0,
+                football_live_ranker_api_count=0,
+                football_live_ranker_blocked_count=0,
+                football_live_ranker_top_json=None,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:
