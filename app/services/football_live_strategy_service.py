@@ -734,6 +734,115 @@ async def evaluate_s10_live_team_total_over_controlled(c: ProviderSignalCandidat
     )
 
 
+async def evaluate_s11_live_match_total_over_need_1_controlled(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
+    """Controlled LIVE match total OVER where exactly one more goal wins the line."""
+    lc = _lc_from_candidate(c)
+    minute = _as_int(lc.get("minute"))
+    sh = _as_int(lc.get("score_home"))
+    sa = _as_int(lc.get("score_away"))
+    odds = _odds_float(c)
+
+    reasons: list[str] = []
+    fam = FootballSignalSendFilterService().get_market_family(c)
+    if fam != "totals":
+        reasons.append("market_not_match_total")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    competition_blob = _norm(
+        " ".join(
+            [
+                str(c.match.tournament_name or ""),
+                str(c.match.match_name or ""),
+                str(c.match.home_team or ""),
+                str(c.match.away_team or ""),
+            ]
+        )
+    )
+    if _competition_is_blocked(c) or re.search(r"до\s*(?:17|18|19|20|21|23)\b", competition_blob):
+        reasons.append("competition_blocked")
+
+    if not _is_over_selection(str(c.market.selection or "")):
+        reasons.append("not_pure_over")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if minute is None or sh is None or sa is None:
+        reasons.append("missing_live_context")
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+
+    if minute < 35 or minute > 70:
+        reasons.append("minute_window")
+
+    if odds is None or not (1.45 <= float(odds) <= 2.40):
+        reasons.append("odds_window")
+
+    fmt = FootballBetFormatterService()
+    ctx = fmt.describe_total_context(
+        market_type=c.market.market_type,
+        market_label=c.market.market_label,
+        selection=c.market.selection,
+        home_team=c.match.home_team,
+        away_team=c.match.away_team,
+        section_name=c.market.section_name,
+        subsection_name=c.market.subsection_name,
+    )
+    line_f: float | None = None
+    target_scope = _norm(str(ctx.target_scope or "")) if ctx else ""
+    if ctx and ctx.total_line:
+        try:
+            line_f = float(str(ctx.total_line).replace(",", "."))
+        except ValueError:
+            line_f = None
+
+    combined_market_text = _norm(
+        " ".join(
+            [
+                str(c.market.section_name or ""),
+                str(c.market.subsection_name or ""),
+                str(c.market.market_label or ""),
+                str(c.market.selection or ""),
+            ]
+        )
+    )
+    is_corner_total = "corner" in combined_market_text or "углов" in combined_market_text
+    is_team_total = target_scope in {"home_team", "away_team", "team_total"}
+    period_scope = _norm(str(ctx.period_scope or "")) if ctx else ""
+    is_match_total = bool(ctx) and period_scope == "match" and not is_team_total and not is_corner_total
+    if not is_match_total:
+        reasons.append("market_not_match_total")
+
+    if line_f is None:
+        reasons.append("missing_live_context")
+    elif line_f not in (0.5, 1.5, 2.5):
+        reasons.append("line_not_allowed")
+
+    current_total_goals = int(sh) + int(sa)
+    if current_total_goals >= 3:
+        reasons.append("goals_3plus_block")
+
+    goals_needed: int | None = None
+    if line_f is not None:
+        goals_needed = _min_goals_to_win_over(line_f) - current_total_goals
+        if goals_needed != 1:
+            reasons.append("goals_needed_not_1")
+
+    if reasons:
+        return FootballLiveStrategyDecision(passed=False, reasons=reasons)
+    return FootballLiveStrategyDecision(
+        passed=True,
+        strategy_id="S11_LIVE_MATCH_TOTAL_OVER_NEED_1_CONTROLLED",
+        strategy_name="Strategy 11: LIVE match total over need 1 (controlled)",
+        reasons=[
+            "market=match_total over only",
+            f"line={line_f}",
+            "goals_needed_to_win=1",
+            "minute 35..70",
+            "odds 1.45..2.40",
+            "block women/youth/reserve/e-football",
+            "block goals>=3",
+        ],
+    )
+
+
 def evaluate_s2_live_total_over_need_1_2(c: ProviderSignalCandidate) -> FootballLiveStrategyDecision:
     lc = _lc_from_candidate(c)
     minute = _as_int(lc.get("minute"))

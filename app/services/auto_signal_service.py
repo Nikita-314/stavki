@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -2172,6 +2173,7 @@ class AutoSignalService:
             football_live_cycle_after_s8=0,
             football_live_cycle_after_s9=0,
             football_live_cycle_after_s10=0,
+            football_live_cycle_after_s11=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -2288,6 +2290,7 @@ class AutoSignalService:
                     football_live_cycle_after_s8=0,
                     football_live_cycle_after_s9=0,
                     football_live_cycle_after_s10=0,
+                    football_live_cycle_after_s11=0,
                     football_live_rejected_s8_home_00_without_api_context=0,
                     football_live_rejected_s8_1x2_00_without_api_context=0,
                     football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -2333,6 +2336,7 @@ class AutoSignalService:
             football_live_cycle_after_s8=0,
             football_live_cycle_after_s9=0,
             football_live_cycle_after_s10=0,
+            football_live_cycle_after_s11=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -3651,13 +3655,16 @@ class AutoSignalService:
         s8_passed: list[ProviderSignalCandidate] = []
         s9_passed: list[ProviderSignalCandidate] = []
         s10_passed: list[ProviderSignalCandidate] = []
+        s11_passed: list[ProviderSignalCandidate] = []
         s9_candidates: list[ProviderSignalCandidate] = []
         s10_candidates: list[ProviderSignalCandidate] = []
+        s11_candidates: list[ProviderSignalCandidate] = []
         s10_team_total_count = 0
         from app.services.football_live_strategy_service import (
             evaluate_s8_live_1x2_winline_strict,
             evaluate_s9_live_totals_over_controlled,
             evaluate_s10_live_team_total_over_controlled,
+            evaluate_s11_live_match_total_over_need_1_controlled,
         )
         away_draw_samples: list[dict[str, object]] = []
         away_draw_samples_limit = 10
@@ -3992,6 +3999,11 @@ class AutoSignalService:
             if not d10.passed:
                 for r in (d10.reasons or [])[:12]:
                     s10_fail[str(r)] = int(s10_fail.get(str(r), 0) or 0) + 1
+                try:
+                    if family_svc.get_market_family(c) == "totals":
+                        s11_candidates.append(c)
+                except Exception:
+                    pass
                 if len(strategy_rejected_samples) < strategy_rejected_limit:
                     try:
                         eid0 = _football_event_id(c) or ""
@@ -4047,7 +4059,69 @@ class AutoSignalService:
             prev_expl["football_live_strategy_reasons"] = list(d10.reasons or [])
             s10_passed.append(c.model_copy(update={"explanation_json": prev_expl}))
 
-        strategy_passed = [*s8_passed, *s9_passed, *s10_passed]
+        # --- S11 fourth (only for totals that failed S9/S10) ---
+        s11_fail: dict[str, int] = {}
+        s11_pass_samples: list[dict[str, object]] = []
+        s11_pass_sample_limit = 5
+        for c in s11_candidates:
+            d11 = await evaluate_s11_live_match_total_over_need_1_controlled(c)
+            if not d11.passed:
+                for r in (d11.reasons or [])[:12]:
+                    s11_fail[str(r)] = int(s11_fail.get(str(r), 0) or 0) + 1
+                continue
+
+            eid = _football_event_id(c)
+            if eid and eid not in strategy_by_eid:
+                strategy_by_eid[eid] = d11.strategy_id or ""
+            strategy_stats[str(d11.strategy_id or "S11_LIVE_MATCH_TOTAL_OVER_NEED_1_CONTROLLED")] = int(
+                strategy_stats.get(str(d11.strategy_id or "S11_LIVE_MATCH_TOTAL_OVER_NEED_1_CONTROLLED"), 0) or 0
+            ) + 1
+            prev_expl = dict(c.explanation_json or {})
+            prev_expl["football_live_strategy_id"] = d11.strategy_id
+            prev_expl["football_live_strategy_name"] = d11.strategy_name
+            prev_expl["football_live_strategy_reasons"] = list(d11.reasons or [])
+            cand_s11 = c.model_copy(update={"explanation_json": prev_expl})
+            s11_passed.append(cand_s11)
+            if len(s11_pass_samples) < s11_pass_sample_limit:
+                try:
+                    lc = (
+                        (cand_s11.feature_snapshot_json or {}).get("football_analytics")
+                        if isinstance(cand_s11.feature_snapshot_json, dict)
+                        else None
+                    )
+                    minute0 = lc.get("minute") if isinstance(lc, dict) else None
+                    sh0 = lc.get("score_home") if isinstance(lc, dict) else None
+                    sa0 = lc.get("score_away") if isinstance(lc, dict) else None
+                    ctx0 = fmt.describe_total_context(
+                        market_type=cand_s11.market.market_type,
+                        market_label=cand_s11.market.market_label,
+                        selection=cand_s11.market.selection,
+                        home_team=cand_s11.match.home_team,
+                        away_team=cand_s11.match.away_team,
+                        section_name=cand_s11.market.section_name,
+                        subsection_name=cand_s11.market.subsection_name,
+                    )
+                    line0 = None
+                    if ctx0 and ctx0.total_line:
+                        line0 = float(str(ctx0.total_line).replace(",", "."))
+                    goals_needed0 = None
+                    if line0 is not None and sh0 is not None and sa0 is not None:
+                        goals_needed0 = int(math.floor(float(line0))) + 1 - (int(sh0) + int(sa0))
+                    s11_pass_samples.append(
+                        {
+                            "event_id": str(eid or ""),
+                            "match": str(cand_s11.match.match_name or ""),
+                            "minute": minute0,
+                            "score": f"{sh0}:{sa0}" if sh0 is not None and sa0 is not None else None,
+                            "line": line0,
+                            "odds": str(cand_s11.market.odds_value) if cand_s11.market.odds_value is not None else None,
+                            "goals_needed_to_win": goals_needed0,
+                        }
+                    )
+                except Exception:
+                    pass
+
+        strategy_passed = [*s8_passed, *s9_passed, *s10_passed, *s11_passed]
         candidates_to_ingest = strategy_passed
         side_after_s8 = _side_breakdown(list(s8_passed))
         strategy_gate_debug = {
@@ -4078,16 +4152,21 @@ class AutoSignalService:
             "s10_team_total_candidates": int(s10_team_total_count),
             "s10_pass": int(len(s10_passed)),
             "s10_reject_breakdown": dict(sorted(s10_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+            "s11_pass": int(len(s11_passed)),
+            "s11_reject_breakdown": dict(sorted(s11_fail.items(), key=lambda kv: kv[1], reverse=True)[:60]),
+            "s11_pass_samples": s11_pass_samples,
             "after_s8": int(len(s8_passed)),
             "after_s9": int(len(s8_passed) + len(s9_passed)),
-            "after_s10": int(len(strategy_passed)),
+            "after_s10": int(len(s8_passed) + len(s9_passed) + len(s10_passed)),
+            "after_s11": int(len(strategy_passed)),
             "strategy_rejected_samples": strategy_rejected_samples,
             "ft_1x2_rejected_samples": ft_1x2_rejected_samples,
         }
         diagnostics.update(
             football_live_cycle_after_s8=int(len(s8_passed)),
             football_live_cycle_after_s9=int(len(s8_passed) + len(s9_passed)),
-            football_live_cycle_after_s10=int(len(strategy_passed)),
+            football_live_cycle_after_s10=int(len(s8_passed) + len(s9_passed) + len(s10_passed)),
+            football_live_cycle_after_s11=int(len(strategy_passed)),
             football_live_cycle_after_strategy=int(len(strategy_passed)),
             football_live_cycle_after_context_filter=0,
             football_live_rejected_no_pressure=0,

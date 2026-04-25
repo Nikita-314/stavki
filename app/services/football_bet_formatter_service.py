@@ -1036,6 +1036,10 @@ class FootballBetFormatterService:
                 return f"{period_prefix}ИТМ {target} {total_line}".strip()
             base = f"{period_prefix}тотал {target}".strip()
         else:
+            if total_side == "ТБ" and total_line:
+                return f"{period_prefix}ТБ {total_line}".strip()
+            if total_side == "ТМ" and total_line:
+                return f"{period_prefix}ТМ {total_line}".strip()
             base = f"{period_prefix}тотал".strip()
 
         if side_text and total_line:
