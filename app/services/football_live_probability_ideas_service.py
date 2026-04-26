@@ -88,10 +88,10 @@ class FootballLiveProbabilityIdeasService:
         if not str(row.get("best_bet") or "").strip():
             return False
         edge = self._decimal(row.get("value_edge"))
-        if edge is None or edge < Decimal("0.07"):
+        if edge is None or edge < Decimal("0.05"):
             return False
         conf = self._int(row.get("confidence_score"))
-        if conf is None or conf < 60:
+        if conf is None or conf < 55:
             return False
         if str(row.get("risk_level") or "").lower() == "high":
             return False

@@ -54,6 +54,7 @@ from app.services.football_live_probability_ideas_settlement_service import Foot
 from app.services.football_live_probability_model_service import FootballLiveProbabilityModelService
 from app.services.football_live_s13_controlled_service import (
     S13_CONTROLLED_STRATEGY_ID,
+    S13_MAX_SIGNALS_PER_LIVE_CYCLE,
     select_s13_controlled_candidates,
 )
 from app.services.football_live_strategy_service import (
@@ -2193,8 +2194,10 @@ class AutoSignalService:
             football_live_cycle_after_s11=0,
             football_live_cycle_after_s13=0,
             football_live_s13_candidates=0,
+            football_live_s13_after_gate=0,
             football_live_s13_sent=0,
             football_live_s13_blocked=0,
+            football_live_s13_blocked_by_limit=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -2314,8 +2317,10 @@ class AutoSignalService:
                     football_live_cycle_after_s11=0,
                     football_live_cycle_after_s13=0,
                     football_live_s13_candidates=0,
+                    football_live_s13_after_gate=0,
                     football_live_s13_sent=0,
                     football_live_s13_blocked=0,
+                    football_live_s13_blocked_by_limit=0,
                     football_live_rejected_s8_home_00_without_api_context=0,
                     football_live_rejected_s8_1x2_00_without_api_context=0,
                     football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -2364,8 +2369,10 @@ class AutoSignalService:
             football_live_cycle_after_s11=0,
             football_live_cycle_after_s13=0,
             football_live_s13_candidates=0,
+            football_live_s13_after_gate=0,
             football_live_s13_sent=0,
             football_live_s13_blocked=0,
+            football_live_s13_blocked_by_limit=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -3307,10 +3314,10 @@ class AutoSignalService:
                 )[:50000],
                 football_live_probability_ideas_saved=int(ideas_saved),
                 football_live_probability_ideas_usable_count=int(prob_res.usable_count),
-                football_live_s13_candidates=int(prob_res.usable_count),
+                football_live_s13_candidates=int(len(prob_res.ideas)),
             )
             logger.info(
-                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s usable=%s raw_high_risk=%s saved=%s edge>=0.07=%s confidence>=60=%s",
+                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s usable=%s raw_high_risk=%s saved=%s edge>=0.05=%s confidence>=55=%s",
                 prob_res.total_matches,
                 prob_res.with_api_intelligence,
                 prob_res.without_api_intelligence,
@@ -3336,8 +3343,10 @@ class AutoSignalService:
                 football_live_probability_ideas_saved=0,
                 football_live_probability_ideas_usable_count=0,
                 football_live_s13_candidates=0,
+                football_live_s13_after_gate=0,
                 football_live_s13_sent=0,
                 football_live_s13_blocked=0,
+                football_live_s13_blocked_by_limit=0,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:
@@ -4370,7 +4379,6 @@ class AutoSignalService:
             s13_rows,
             enabled=s13_controlled_enabled,
         )
-        s13_by_key: dict[tuple[str, str, str], ProviderSignalCandidate] = {}
         already_keys = {
             (
                 str(_football_event_id(_c) or ""),
@@ -4379,16 +4387,31 @@ class AutoSignalService:
             )
             for _c in [*s8_passed, *s9_passed, *s10_passed, *s11_passed, *s12_passed]
         }
+        s13_seen_keys: set[tuple[str, str, str]] = set()
+        s13_after_dedup: list[ProviderSignalCandidate] = []
         for _c in s13_passed_raw:
             _k = (
                 str(_football_event_id(_c) or ""),
                 str(_c.market.market_type or ""),
                 str(_c.market.selection or ""),
             )
+            if _k in s13_seen_keys:
+                continue
+            s13_seen_keys.add(_k)
             if _k in already_keys:
                 continue
-            s13_by_key[_k] = _c
-        s13_passed = list(s13_by_key.values())
+            s13_after_dedup.append(_c)
+        s13_blocked_by_limit = max(0, len(s13_after_dedup) - S13_MAX_SIGNALS_PER_LIVE_CYCLE)
+        s13_passed = s13_after_dedup[:S13_MAX_SIGNALS_PER_LIVE_CYCLE]
+        if s13_controlled_enabled:
+            logger.info(
+                "[FOOTBALL][S13_CONTROLLED] after_integrity=%s s13_candidates_total=%s s13_after_gate=%s s13_sent=%s s13_blocked_by_limit=%s",
+                int(post_integrity_count),
+                int(s13_meta.get("evaluated", 0)),
+                int(s13_meta.get("after_gate", 0)),
+                int(len(s13_passed)),
+                int(s13_blocked_by_limit),
+            )
         if s13_passed:
             strategy_stats[S13_CONTROLLED_STRATEGY_ID] = int(strategy_stats.get(S13_CONTROLLED_STRATEGY_ID, 0) or 0) + int(len(s13_passed))
             for _c in s13_passed:
@@ -4444,8 +4467,10 @@ class AutoSignalService:
             "after_s12_controlled": int(after_s12_total),
             "s13_controlled_enabled": bool(s13_controlled_enabled),
             "s13_controlled_candidates": int(s13_meta.get("evaluated", 0)),
+            "s13_controlled_after_gate": int(s13_meta.get("after_gate", 0)),
             "s13_controlled_sent": int(len(s13_passed)),
             "s13_controlled_blocked": int(s13_meta.get("blocked", 0)),
+            "s13_controlled_blocked_by_limit": int(s13_blocked_by_limit),
             "after_s13": int(after_s13_total),
             "strategy_rejected_samples": strategy_rejected_samples,
             "ft_1x2_rejected_samples": ft_1x2_rejected_samples,
@@ -4461,8 +4486,10 @@ class AutoSignalService:
             football_live_s12_controlled_sent=int(len(s12_passed)),
             football_live_s12_controlled_blocked=int(s12_meta.get("blocked", 0)),
             football_live_s13_candidates=int(s13_meta.get("evaluated", 0)),
+            football_live_s13_after_gate=int(s13_meta.get("after_gate", 0)),
             football_live_s13_sent=int(len(s13_passed)),
             football_live_s13_blocked=int(s13_meta.get("blocked", 0)),
+            football_live_s13_blocked_by_limit=int(s13_blocked_by_limit),
             football_live_cycle_after_strategy=int(len(strategy_passed)),
             football_live_cycle_after_context_filter=0,
             football_live_rejected_no_pressure=0,
@@ -4500,8 +4527,12 @@ class AutoSignalService:
                 football_live_s12_controlled_sent=0,
                 football_live_s12_controlled_blocked=int(s12_meta.get("blocked", 0)),
                 football_live_s13_candidates=int(s13_meta.get("evaluated", 0)),
+                football_live_s13_after_gate=int(s13_meta.get("after_gate", 0)),
                 football_live_s13_sent=0,
                 football_live_s13_blocked=int(s13_meta.get("blocked", 0)),
+                football_live_s13_blocked_by_limit=int(
+                    max(0, len(s13_after_dedup) - S13_MAX_SIGNALS_PER_LIVE_CYCLE)
+                ),
                 last_delivery_reason="blocked_no_strategy_match",
                 note="no candidate matched explicit football live strategies",
             )

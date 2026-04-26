@@ -10,6 +10,7 @@ from app.schemas.provider_models import ProviderOddsMarket, ProviderSignalCandid
 
 S13_CONTROLLED_STRATEGY_ID = "S13_LIVE_ANALYTIC_PROBABILITY_MODEL"
 S13_CONTROLLED_STRATEGY_NAME = "S13 live analytic probability model"
+S13_MAX_SIGNALS_PER_LIVE_CYCLE = 5
 
 
 @dataclass(frozen=True)
@@ -18,16 +19,28 @@ class S13ControlledDecision:
     reasons: list[str]
 
 
+S13_GATE_MIN_EDGE = Decimal("0.05")
+S13_GATE_MIN_CONFIDENCE = 55
+
+
+def _row_send_score(row: dict[str, Any]) -> float:
+    edge = _decimal(row.get("value_edge"))
+    conf = _int(row.get("confidence_score"))
+    if edge is None or conf is None:
+        return -1.0
+    return float(edge * Decimal(conf))
+
+
 def evaluate_s13_controlled_idea(row: dict[str, Any]) -> S13ControlledDecision:
     reasons: list[str] = []
     if not bool(row.get("is_usable")):
         reasons.append("not_usable")
     edge = _decimal(row.get("value_edge"))
-    if edge is None or edge < Decimal("0.07"):
-        reasons.append("edge_lt_0_07")
+    if edge is None or edge < S13_GATE_MIN_EDGE:
+        reasons.append("edge_lt_0_05")
     confidence = _int(row.get("confidence_score"))
-    if confidence is None or confidence < 65:
-        reasons.append("confidence_lt_65")
+    if confidence is None or confidence < S13_GATE_MIN_CONFIDENCE:
+        reasons.append("confidence_lt_55")
     risk = str(row.get("risk_level") or "").lower().strip()
     if risk == "high" or risk not in {"low", "medium"}:
         reasons.append("risk_not_low_medium")
@@ -79,25 +92,50 @@ def select_s13_controlled_candidates(
     *,
     enabled: bool,
 ) -> tuple[list[ProviderSignalCandidate], dict[str, int]]:
+    """Return all gate-passed S13 candidates sorted by (value_edge * confidence_score) desc.
+
+    Per-cycle cap (TOP-5) and cross-strategy dedup are applied in auto_signal_service.
+    """
     if not enabled or not rows:
-        return [], {"evaluated": 0, "sent": 0, "blocked": 0}
-    out: list[ProviderSignalCandidate] = []
+        return [], {
+            "evaluated": 0,
+            "after_gate": 0,
+            "sent": 0,
+            "blocked": 0,
+            "blocked_by_gate": 0,
+            "blocked_by_candidate_build": 0,
+        }
     evaluated = 0
-    blocked = 0
+    blocked_by_gate = 0
+    blocked_by_candidate_build = 0
+    passed: list[tuple[dict[str, Any], list[str]]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         evaluated += 1
         decision = evaluate_s13_controlled_idea(row)
         if not decision.passed:
-            blocked += 1
+            blocked_by_gate += 1
             continue
-        cand = _idea_to_candidate(row, decision.reasons)
+        passed.append((row, decision.reasons))
+    passed.sort(key=lambda t: _row_send_score(t[0]), reverse=True)
+    out: list[ProviderSignalCandidate] = []
+    for row, reasons in passed:
+        cand = _idea_to_candidate(row, reasons)
         if cand is None:
-            blocked += 1
+            blocked_by_candidate_build += 1
             continue
         out.append(cand)
-    return out, {"evaluated": evaluated, "sent": len(out), "blocked": blocked}
+    after_gate = len(passed)
+    blocked = int(blocked_by_gate + blocked_by_candidate_build)
+    return out, {
+        "evaluated": evaluated,
+        "after_gate": after_gate,
+        "sent": len(out),
+        "blocked": blocked,
+        "blocked_by_gate": blocked_by_gate,
+        "blocked_by_candidate_build": blocked_by_candidate_build,
+    }
 
 
 def _idea_to_candidate(row: dict[str, Any], reasons: list[str]) -> ProviderSignalCandidate | None:
@@ -154,7 +192,7 @@ def _idea_to_candidate(row: dict[str, Any], reasons: list[str]) -> ProviderSigna
         edge=_decimal(row.get("value_edge")),
         model_name=S13_CONTROLLED_STRATEGY_ID,
         model_version_name="controlled_v1",
-        signal_score=Decimal(str(row.get("confidence_score") or "65")),
+        signal_score=Decimal(str(row.get("confidence_score") or str(S13_GATE_MIN_CONFIDENCE))),
         notes="live_auto",
         feature_snapshot_json=fs,
         raw_model_output_json={"s13_probability_idea": dict(row)},

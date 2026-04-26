@@ -65,8 +65,8 @@ class FootballLiveProbabilityModelService:
             ideas=ideas,
             top_raw=raw_top,
             usable_top=usable_top,
-            value_edge_7_count=sum(1 for r in ideas if float(r.get("value_edge") or 0.0) >= 0.07),
-            confidence_60_count=sum(1 for r in ideas if float(r.get("confidence_score") or 0.0) >= 60.0),
+            value_edge_7_count=sum(1 for r in ideas if float(r.get("value_edge") or 0.0) >= 0.05),
+            confidence_60_count=sum(1 for r in ideas if float(r.get("confidence_score") or 0.0) >= 55.0),
             usable_count=len(usable),
             raw_high_risk_count=sum(1 for r in ideas if str(r.get("risk_level") or "") == "high"),
         )
@@ -535,12 +535,12 @@ class FootballLiveProbabilityModelService:
         value_edge: float,
     ) -> tuple[bool, list[str]]:
         blockers: list[str] = []
-        if value_edge < 0.07:
-            blockers.append("value_edge_lt_0_07")
+        if value_edge < 0.05:
+            blockers.append("value_edge_lt_0_05")
         if risk == "high":
             blockers.append("risk_high")
-        if confidence < 60:
-            blockers.append("confidence_lt_60")
+        if confidence < 55:
+            blockers.append("confidence_lt_55")
         if competition_risk == "high":
             blockers.append("competition_high_risk")
         if minute > 75:

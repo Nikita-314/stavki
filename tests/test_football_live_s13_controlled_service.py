@@ -48,7 +48,11 @@ def _row(**overrides: object) -> dict[str, object]:
 def test_s13_controlled_selects_only_strict_usable_idea() -> None:
     out, meta = select_s13_controlled_candidates([_row()], enabled=True)
     assert len(out) == 1
-    assert meta == {"evaluated": 1, "sent": 1, "blocked": 0}
+    assert meta["evaluated"] == 1
+    assert meta["after_gate"] == 1
+    assert meta["sent"] == 1
+    assert meta["blocked"] == 0
+    assert meta["blocked_by_gate"] == 0
     cand = out[0]
     assert cand.model_name == S13_CONTROLLED_STRATEGY_ID
     assert cand.predicted_prob == Decimal("0.62")
@@ -56,10 +60,20 @@ def test_s13_controlled_selects_only_strict_usable_idea() -> None:
 
 
 def test_s13_controlled_blocks_low_edge_low_confidence_and_high_risk() -> None:
-    assert evaluate_s13_controlled_idea(_row(value_edge=0.069)).passed is False
-    assert "edge_lt_0_07" in evaluate_s13_controlled_idea(_row(value_edge=0.069)).reasons
-    assert "confidence_lt_65" in evaluate_s13_controlled_idea(_row(confidence_score=64)).reasons
+    assert evaluate_s13_controlled_idea(_row(value_edge=0.049)).passed is False
+    assert "edge_lt_0_05" in evaluate_s13_controlled_idea(_row(value_edge=0.049)).reasons
+    assert evaluate_s13_controlled_idea(_row(value_edge=0.051, confidence_score=55)).passed is True
+    assert "confidence_lt_55" in evaluate_s13_controlled_idea(_row(confidence_score=54)).reasons
     assert "risk_not_low_medium" in evaluate_s13_controlled_idea(_row(risk_level="high")).reasons
+
+
+def test_s13_controlled_sorts_by_edge_times_confidence() -> None:
+    low = _row(event_id="e-low", value_edge=0.10, confidence_score=55)
+    high = _row(event_id="e-high", value_edge=0.10, confidence_score=80)
+    out, _meta = select_s13_controlled_candidates([low, high], enabled=True)
+    assert len(out) == 2
+    assert out[0].signal_score == Decimal("80")
+    assert out[1].signal_score == Decimal("55")
 
 
 def test_s13_controlled_market_specific_windows() -> None:
