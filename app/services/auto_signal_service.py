@@ -5469,6 +5469,12 @@ class AutoSignalService:
         for idx, cand in enumerate(candidates_to_ingest):
             family = family_svc.get_market_family(cand)
             analytics = analytics_svc.build_snapshot(cand, market_family=family)
+            prev_fs = dict(cand.feature_snapshot_json or {})
+            prev_fa = prev_fs.get("football_analytics") if isinstance(prev_fs.get("football_analytics"), dict) else {}
+            if isinstance(prev_fa, dict):
+                for _k in ("minute", "score_home", "score_away"):
+                    if analytics.get(_k) is None and prev_fa.get(_k) is not None:
+                        analytics[_k] = prev_fa.get(_k)
             if analytics.get("score_home") is not None or analytics.get("minute") is not None:
                 live_fields_seen = True
             lf = learning_helper.multiplier_for_family(learning_multipliers, family) if learning_enabled else 1.0
@@ -5479,7 +5485,6 @@ class AutoSignalService:
                 learning_factor=lf,
             )
             base_decimal = scoring_svc.to_signal_score_decimal(breakdown)
-            prev_fs = dict(cand.feature_snapshot_json or {})
             prev_expl = dict(cand.explanation_json or {})
             if str(prev_expl.get("football_live_strategy_id") or "") == S13_CONTROLLED_STRATEGY_ID:
                 s13_payload = prev_fs.get("football_live_s13_probability")
