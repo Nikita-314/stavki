@@ -3774,6 +3774,10 @@ class AutoSignalService:
             evaluate_s10_live_team_total_over_controlled,
             evaluate_s11_live_match_total_over_need_1_controlled,
         )
+        from app.services.football_live_s12_controlled_service import (
+            S12_CONTROLLED_STRATEGY_ID,
+            select_s12_controlled_candidates,
+        )
         away_draw_samples: list[dict[str, object]] = []
         away_draw_samples_limit = 10
 
@@ -4229,7 +4233,40 @@ class AutoSignalService:
                 except Exception:
                     pass
 
-        strategy_passed = [*s8_passed, *s9_passed, *s10_passed, *s11_passed]
+        s12_controlled_enabled = bool(getattr(settings, "s12_live_signals_enabled", False))
+        s12_passed_raw, s12_meta = select_s12_controlled_candidates(
+            list(candidates_to_ingest),
+            enabled=s12_controlled_enabled,
+        )
+        s12_by_key: dict[tuple[str, str, str], ProviderSignalCandidate] = {}
+        already_keys: set[tuple[str, str, str]] = set()
+        for _c in [*s8_passed, *s9_passed, *s10_passed, *s11_passed]:
+            already_keys.add(
+                (
+                    str(_football_event_id(_c) or ""),
+                    str(_c.market.market_type or ""),
+                    str(_c.market.selection or ""),
+                )
+            )
+        for _c in s12_passed_raw:
+            _k = (
+                str(_football_event_id(_c) or ""),
+                str(_c.market.market_type or ""),
+                str(_c.market.selection or ""),
+            )
+            if _k in already_keys:
+                continue
+            s12_by_key[_k] = _c
+        s12_passed = list(s12_by_key.values())
+        if s12_passed:
+            strategy_stats[S12_CONTROLLED_STRATEGY_ID] = int(strategy_stats.get(S12_CONTROLLED_STRATEGY_ID, 0) or 0) + int(len(s12_passed))
+            for _c in s12_passed:
+                _eid = _football_event_id(_c)
+                if _eid and _eid not in strategy_by_eid:
+                    strategy_by_eid[_eid] = S12_CONTROLLED_STRATEGY_ID
+
+        s11_total = int(len(s8_passed) + len(s9_passed) + len(s10_passed) + len(s11_passed))
+        strategy_passed = [*s8_passed, *s9_passed, *s10_passed, *s11_passed, *s12_passed]
         candidates_to_ingest = strategy_passed
         side_after_s8 = _side_breakdown(list(s8_passed))
         strategy_gate_debug = {
@@ -4266,7 +4303,12 @@ class AutoSignalService:
             "after_s8": int(len(s8_passed)),
             "after_s9": int(len(s8_passed) + len(s9_passed)),
             "after_s10": int(len(s8_passed) + len(s9_passed) + len(s10_passed)),
-            "after_s11": int(len(strategy_passed)),
+            "after_s11": int(s11_total),
+            "s12_controlled_enabled": bool(s12_controlled_enabled),
+            "s12_controlled_candidates": int(s12_meta.get("evaluated", 0)),
+            "s12_controlled_sent": int(len(s12_passed)),
+            "s12_controlled_blocked": int(s12_meta.get("blocked", 0)),
+            "after_s12_controlled": int(len(strategy_passed)),
             "strategy_rejected_samples": strategy_rejected_samples,
             "ft_1x2_rejected_samples": ft_1x2_rejected_samples,
         }
@@ -4274,7 +4316,11 @@ class AutoSignalService:
             football_live_cycle_after_s8=int(len(s8_passed)),
             football_live_cycle_after_s9=int(len(s8_passed) + len(s9_passed)),
             football_live_cycle_after_s10=int(len(s8_passed) + len(s9_passed) + len(s10_passed)),
-            football_live_cycle_after_s11=int(len(strategy_passed)),
+            football_live_cycle_after_s11=int(s11_total),
+            football_live_cycle_after_s12_controlled=int(len(strategy_passed)),
+            football_live_s12_controlled_candidates=int(s12_meta.get("evaluated", 0)),
+            football_live_s12_controlled_sent=int(len(s12_passed)),
+            football_live_s12_controlled_blocked=int(s12_meta.get("blocked", 0)),
             football_live_cycle_after_strategy=int(len(strategy_passed)),
             football_live_cycle_after_context_filter=0,
             football_live_rejected_no_pressure=0,
@@ -4306,6 +4352,10 @@ class AutoSignalService:
                 final_signals_count=0,
                 messages_sent_count=0,
                 football_sent_count=0,
+                football_live_cycle_after_s12_controlled=0,
+                football_live_s12_controlled_candidates=int(s12_meta.get("evaluated", 0)),
+                football_live_s12_controlled_sent=0,
+                football_live_s12_controlled_blocked=int(s12_meta.get("blocked", 0)),
                 last_delivery_reason="blocked_no_strategy_match",
                 note="no candidate matched explicit football live strategies",
             )
