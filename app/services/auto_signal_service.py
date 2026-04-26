@@ -87,6 +87,10 @@ def _football_only(candidates: list[ProviderSignalCandidate]) -> list[ProviderSi
     return [c for c in candidates if getattr(getattr(c, "match", None), "sport", None) == SportType.FOOTBALL]
 
 
+def _is_s13_controlled_candidate(c: ProviderSignalCandidate) -> bool:
+    return str((c.explanation_json or {}).get("football_live_strategy_id") or "") == S13_CONTROLLED_STRATEGY_ID
+
+
 def _default_live_context_participation() -> dict[str, object]:
     return {
         "used_api_football": False,
@@ -252,7 +256,7 @@ def classify_live_sendable_candidate(
     if fam == "exotic":
         return "reject", None
     codes = (c.explanation_json or {}).get("football_scoring_reason_codes") or []
-    if not codes:
+    if not codes and not _is_s13_controlled_candidate(c):
         return "reject", None
     if fam not in _LIVE_MAIN_SOFT:
         return "reject", None
@@ -340,7 +344,7 @@ def _assert_finalist_safe_for_live_send(
         return False
     if fam_svc.is_corner_market(c) or fam_svc.get_market_family(c) == "exotic":
         return False
-    if not (c.explanation_json or {}).get("football_scoring_reason_codes"):
+    if not (c.explanation_json or {}).get("football_scoring_reason_codes") and not _is_s13_controlled_candidate(c):
         return False
     return True
 
