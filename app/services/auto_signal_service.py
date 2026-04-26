@@ -3247,16 +3247,25 @@ class AutoSignalService:
                 football_live_probability_matches=int(prob_res.total_matches),
                 football_live_probability_with_api=int(prob_res.with_api_intelligence),
                 football_live_probability_without_api=int(prob_res.without_api_intelligence),
-                football_live_probability_top_count=int(len(prob_res.top)),
+                football_live_probability_top_count=int(len(prob_res.top_raw)),
                 football_live_probability_value_edge_7_count=int(prob_res.value_edge_7_count),
                 football_live_probability_confidence_60_count=int(prob_res.confidence_60_count),
-                football_live_probability_top_json=json.dumps(prob_res.top, default=str, ensure_ascii=False)[:50000],
+                football_live_probability_usable_count=int(prob_res.usable_count),
+                football_live_probability_raw_high_risk_count=int(prob_res.raw_high_risk_count),
+                football_live_probability_top_json=json.dumps(prob_res.top_raw, default=str, ensure_ascii=False)[:50000],
+                football_live_probability_usable_top_json=json.dumps(
+                    prob_res.usable_top,
+                    default=str,
+                    ensure_ascii=False,
+                )[:50000],
             )
             logger.info(
-                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s edge>=0.07=%s confidence>=60=%s",
+                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s usable=%s raw_high_risk=%s edge>=0.07=%s confidence>=60=%s",
                 prob_res.total_matches,
                 prob_res.with_api_intelligence,
                 prob_res.without_api_intelligence,
+                prob_res.usable_count,
+                prob_res.raw_high_risk_count,
                 prob_res.value_edge_7_count,
                 prob_res.confidence_60_count,
             )
@@ -3269,7 +3278,10 @@ class AutoSignalService:
                 football_live_probability_top_count=0,
                 football_live_probability_value_edge_7_count=0,
                 football_live_probability_confidence_60_count=0,
+                football_live_probability_usable_count=0,
+                football_live_probability_raw_high_risk_count=0,
                 football_live_probability_top_json=None,
+                football_live_probability_usable_top_json=None,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:

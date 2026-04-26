@@ -1162,11 +1162,17 @@ async def cmd_football_live_probability_debug(message: Message, sessionmaker: as
     AutoSignalService().log_football_cycle_trace(res)
     diag = SignalRuntimeDiagnosticsService().get_state()
     try:
-        top = json.loads(str(diag.get("football_live_probability_top_json") or "[]"))
-        if not isinstance(top, list):
-            top = []
+        usable_top = json.loads(str(diag.get("football_live_probability_usable_top_json") or "[]"))
+        if not isinstance(usable_top, list):
+            usable_top = []
     except (json.JSONDecodeError, TypeError):
-        top = []
+        usable_top = []
+    try:
+        raw_top = json.loads(str(diag.get("football_live_probability_top_json") or "[]"))
+        if not isinstance(raw_top, list):
+            raw_top = []
+    except (json.JSONDecodeError, TypeError):
+        raw_top = []
 
     lines = [
         "🧪 S13_LIVE_ANALYTIC_PROBABILITY_MODEL preview-only",
@@ -1178,14 +1184,17 @@ async def cmd_football_live_probability_debug(message: Message, sessionmaker: as
         f"without_api_intelligence: {int(diag.get('football_live_probability_without_api') or 0)}",
         f"value_edge>=0.07: {int(diag.get('football_live_probability_value_edge_7_count') or 0)}",
         f"confidence>=60: {int(diag.get('football_live_probability_confidence_60_count') or 0)}",
+        f"usable_count: {int(diag.get('football_live_probability_usable_count') or 0)}",
+        f"raw_high_risk_count: {int(diag.get('football_live_probability_raw_high_risk_count') or 0)}",
         "",
-        "Top-15 ideas by value_edge:",
+        "A) Usable value ideas (sorted by usable_score=value_edge*confidence):",
     ]
 
-    if not top:
-        lines.append("— нет")
-    else:
-        for idx, row in enumerate(top[:15], start=1):
+    def _append(rows: list[object], *, with_usable_score: bool) -> None:
+        if not rows:
+            lines.append("— нет")
+            return
+        for idx, row in enumerate(rows[:15], start=1):
             if not isinstance(row, dict):
                 continue
             api = "yes" if row.get("api_intelligence_available") else "no"
@@ -1194,15 +1203,31 @@ async def cmd_football_live_probability_debug(message: Message, sessionmaker: as
                 reason_line = "; ".join([str(x) for x in reasons[:3]])
             else:
                 reason_line = "—"
+            blockers = row.get("usable_blockers")
+            blockers_line = ", ".join([str(x) for x in blockers[:4]]) if isinstance(blockers, list) and blockers else "—"
             lines.extend(
                 [
                     f"{idx}. {row.get('match') or '—'}",
                     f"   {row.get('minute') or '—'}' {row.get('score') or '—'} | {row.get('best_bet') or '—'} | odds {row.get('best_bet_odds') or '—'}",
-                    f"   implied={row.get('implied_probability')} model={row.get('model_probability')} edge={row.get('value_edge')}",
+                    (
+                        f"   usable_score={row.get('usable_score')} implied={row.get('implied_probability')} "
+                        f"model={row.get('model_probability')} edge={row.get('value_edge')}"
+                        if with_usable_score
+                        else f"   implied={row.get('implied_probability')} model={row.get('model_probability')} edge={row.get('value_edge')}"
+                    ),
                     f"   conf={row.get('confidence_score')} risk={row.get('risk_level')} api={api}",
+                    f"   blockers: {blockers_line}",
                     f"   why: {reason_line}",
                 ]
             )
+
+    _append(usable_top, with_usable_score=True)
+    lines.extend(["", "B) High-risk raw edge ideas (diagnostic only):"])
+    raw_high = [r for r in raw_top if isinstance(r, dict) and str(r.get("risk_level") or "") == "high"]
+    if not raw_high:
+        lines.append("— нет")
+    else:
+        _append(raw_high, with_usable_score=False)
     await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 

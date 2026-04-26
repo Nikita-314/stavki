@@ -136,7 +136,10 @@ class SignalRuntimeDiagnosticsState:
     football_live_probability_top_count: int = 0
     football_live_probability_value_edge_7_count: int = 0
     football_live_probability_confidence_60_count: int = 0
+    football_live_probability_usable_count: int = 0
+    football_live_probability_raw_high_risk_count: int = 0
     football_live_probability_top_json: str | None = None
+    football_live_probability_usable_top_json: str | None = None
     football_live_s12_controlled_candidates: int = 0
     football_live_s12_controlled_sent: int = 0
     football_live_s12_controlled_blocked: int = 0

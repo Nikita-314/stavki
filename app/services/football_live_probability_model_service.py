@@ -16,9 +16,12 @@ class FootballLiveProbabilityModelResult:
     with_api_intelligence: int
     without_api_intelligence: int
     ideas: list[dict[str, object]]
-    top: list[dict[str, object]]
+    top_raw: list[dict[str, object]]
+    usable_top: list[dict[str, object]]
     value_edge_7_count: int
     confidence_60_count: int
+    usable_count: int
+    raw_high_risk_count: int
 
 
 class FootballLiveProbabilityModelService:
@@ -45,15 +48,27 @@ class FootballLiveProbabilityModelService:
             ideas.append(idea)
 
         ideas.sort(key=lambda r: (float(r.get("value_edge") or -9.0), float(r.get("confidence_score") or 0.0)), reverse=True)
-        top = ideas[: max(1, int(limit))]
+        raw_top = ideas[: max(1, int(limit))]
+        usable = [r for r in ideas if bool(r.get("is_usable"))]
+        usable.sort(
+            key=lambda r: (
+                float(r.get("usable_score") or -999.0),
+                float(r.get("value_edge") or -9.0),
+            ),
+            reverse=True,
+        )
+        usable_top = usable[: max(1, int(limit))]
         return FootballLiveProbabilityModelResult(
             total_matches=len(ideas),
             with_api_intelligence=with_api,
             without_api_intelligence=max(0, len(ideas) - with_api),
             ideas=ideas,
-            top=top,
+            top_raw=raw_top,
+            usable_top=usable_top,
             value_edge_7_count=sum(1 for r in ideas if float(r.get("value_edge") or 0.0) >= 0.07),
             confidence_60_count=sum(1 for r in ideas if float(r.get("confidence_score") or 0.0) >= 60.0),
+            usable_count=len(usable),
+            raw_high_risk_count=sum(1 for r in ideas if str(r.get("risk_level") or "") == "high"),
         )
 
     def _evaluate_match(self, rows: list[ProviderSignalCandidate]) -> dict[str, object] | None:
@@ -71,30 +86,93 @@ class FootballLiveProbabilityModelService:
         ph, pd, pa, reasons_api = self._apply_api_adjustments(ph, pd, pa, api)
         over_p = self._over_next_goal_probability(rows, minute=minute, sh=sh, sa=sa, api=api)
         best = self._best_bet(rows, ph=ph, pd=pd, pa=pa, over_p=over_p)
+        if not best.get("best_bet") or not best.get("best_bet_odds"):
+            return None
         implied = float(best.get("implied_probability") or 0.0)
         model_p = float(best.get("model_probability") or 0.0)
-        edge = round(model_p - implied, 4)
         missing: list[str] = []
         if not api_ok:
             missing.append("api_intelligence")
         if not odds_1x2:
             missing.append("1x2_odds_snapshot")
+        if not best.get("best_bet") or not best.get("best_bet_odds"):
+            missing.append("best_bet_missing")
+        total_goals = sh + sa
+        penalties: list[str] = []
+        model_mult = 1.0
+        conf_delta = 0.0
+        best_odds = self._float(best.get("best_bet_odds"))
+        best_line = self._float(best.get("line"))
+        best_kind = str(best.get("bet_kind") or "")
+        best_goals_needed = self._int(best.get("goals_needed_to_win"))
+        if competition_risk == "high":
+            model_mult *= 0.76
+            conf_delta -= 25.0
+            penalties.append("penalty_competition_high")
+        elif competition_risk == "medium":
+            model_mult *= 0.92
+            conf_delta -= 8.0
+            penalties.append("penalty_competition_medium")
+        if minute > 75:
+            model_mult *= 0.82
+            conf_delta -= 14.0
+            penalties.append("penalty_late_minute")
+        if best_odds is not None and best_odds > 3.00:
+            model_mult *= 0.80
+            conf_delta -= 14.0
+            penalties.append("penalty_high_odds")
+        if best_kind == "match_total_over" and best_line is not None and best_line > 3.5:
+            model_mult *= 0.78
+            conf_delta -= 18.0
+            penalties.append("penalty_match_total_line_gt_3_5")
+        if best_kind == "team_total_over" and best_line is not None and best_line > 2.5:
+            model_mult *= 0.76
+            conf_delta -= 18.0
+            penalties.append("penalty_team_total_line_gt_2_5")
+        if total_goals >= 4:
+            model_mult *= 0.84
+            conf_delta -= 12.0
+            penalties.append("penalty_high_score_state")
+        if best_kind == "ft_1x2" and not api_ok:
+            model_mult *= 0.72
+            conf_delta -= 22.0
+            penalties.append("penalty_1x2_without_api")
+        model_p = max(0.01, min(0.98, model_p * model_mult))
+        edge = round(model_p - implied, 4)
         confidence = self._confidence_score(
             api_ok=api_ok,
             odds_1x2=bool(odds_1x2),
             minute=minute,
             sh=sh,
             sa=sa,
-            best_odds=self._float(best.get("best_bet_odds")),
+            best_odds=best_odds,
+            best_kind=best_kind,
             competition_risk=competition_risk,
         )
+        confidence = int(max(5, min(95, confidence + conf_delta)))
         risk = self._risk_level(
             minute=minute,
-            odds=self._float(best.get("best_bet_odds")),
-            missing=missing,
+            odds=best_odds,
+            critical_missing=bool(best.get("best_bet") is None or best.get("best_bet_odds") is None),
             competition_risk=competition_risk,
         )
-        reasons = [*reasons_api, f"competition={competition_risk}", *self._live_reasons(minute=minute, sh=sh, sa=sa), *list(best.get("reasons") or [])]
+        reasons = [
+            *reasons_api,
+            f"competition={competition_risk}",
+            *self._live_reasons(minute=minute, sh=sh, sa=sa),
+            *list(best.get("reasons") or []),
+            *penalties,
+        ]
+        is_usable, usable_blockers = self._is_usable_idea(
+            minute=minute,
+            risk=risk,
+            confidence=confidence,
+            api_ok=api_ok,
+            best=best,
+            competition_risk=competition_risk,
+            total_goals=total_goals,
+        )
+        usable_score = round(max(0.0, edge) * float(confidence), 4) if is_usable else 0.0
 
         return {
             "match": str(c0.match.match_name or ""),
@@ -109,10 +187,16 @@ class FootballLiveProbabilityModelService:
             "over_next_goal_probability": round(over_p, 4),
             "best_bet": best.get("best_bet"),
             "best_bet_odds": best.get("best_bet_odds"),
+            "bet_kind": best.get("bet_kind"),
+            "line": best.get("line"),
+            "goals_needed_to_win": best.get("goals_needed_to_win"),
             "implied_probability": round(implied, 4),
             "model_probability": round(model_p, 4),
             "value_edge": edge,
             "confidence_score": int(confidence),
+            "usable_score": usable_score,
+            "is_usable": bool(is_usable),
+            "usable_blockers": usable_blockers,
             "api_intelligence_available": api_ok,
             "reasons": reasons[:10],
             "missing_data": missing,
@@ -247,6 +331,12 @@ class FootballLiveProbabilityModelService:
             "model_probability": 0.0,
             "edge": -9.0,
             "reasons": [],
+            "bet_kind": None,
+            "line": None,
+            "goals_needed_to_win": None,
+            "is_exotic": False,
+            "is_corner": False,
+            "is_period": False,
         }
         for c in rows:
             odd = self._float(c.market.odds_value)
@@ -259,6 +349,12 @@ class FootballLiveProbabilityModelService:
             mt = (c.market.market_type or "").strip().lower()
             model_p = None
             reason = ""
+            bet_kind = None
+            line: float | None = None
+            goals_needed: int | None = None
+            is_exotic = False
+            is_corner = False
+            is_period = False
             if fam == "result" and mt in {"1x2", "match_winner"}:
                 if self._is_exotic_result_like(c):
                     continue
@@ -269,6 +365,7 @@ class FootballLiveProbabilityModelService:
                     model_p, reason = pa, "model_1x2_away"
                 elif side == "draw":
                     model_p, reason = pd, "model_1x2_draw"
+                bet_kind = "ft_1x2"
             else:
                 if self._is_corner_market(c):
                     continue
@@ -283,9 +380,13 @@ class FootballLiveProbabilityModelService:
                 )
                 if ctx and ctx.total_side == "ТБ" and ctx.period_scope == "match":
                     line = self._float(ctx.total_line) if ctx.total_line is not None else None
+                    is_period = ctx.period_scope != "match"
+                    is_exotic = bool(getattr(ctx, "is_exotic_total", False))
                     if line is not None:
+                        goals_needed = self._goals_needed_to_win(c, ctx, line)
                         if ctx.target_scope == "match":
                             model_p, reason = over_p, "model_over_next_goal"
+                            bet_kind = "match_total_over"
                         elif ctx.target_scope in {"home_team", "away_team", "team_total"}:
                             # team total over: scale over-next-goal by side bias from 1x2 probs
                             side_boost = 0.0
@@ -295,6 +396,7 @@ class FootballLiveProbabilityModelService:
                                 side_boost = (pa - ph) * 0.35
                             model_p = max(0.02, min(0.95, over_p + side_boost))
                             reason = "model_team_total_over"
+                            bet_kind = "team_total_over"
             if model_p is None:
                 continue
             edge = model_p - implied
@@ -314,8 +416,87 @@ class FootballLiveProbabilityModelService:
                     "model_probability": model_p,
                     "edge": edge,
                     "reasons": [reason],
+                    "bet_kind": bet_kind,
+                    "line": line,
+                    "goals_needed_to_win": goals_needed,
+                    "is_exotic": bool(is_exotic),
+                    "is_corner": bool(is_corner),
+                    "is_period": bool(is_period),
                 }
         return best
+
+    def _goals_needed_to_win(self, c: ProviderSignalCandidate, ctx: Any, line: float) -> int | None:
+        minute, sh, sa = self._live_state(c)
+        if minute is None or sh is None or sa is None:
+            return None
+        if ctx.target_scope == "match":
+            base = sh + sa
+        elif ctx.target_scope == "home_team":
+            base = sh
+        elif ctx.target_scope == "away_team":
+            base = sa
+        else:
+            return None
+        return int(math.floor(line)) + 1 - int(base)
+
+    def _is_usable_idea(
+        self,
+        *,
+        minute: int,
+        risk: str,
+        confidence: int,
+        api_ok: bool,
+        best: dict[str, object],
+        competition_risk: str,
+        total_goals: int,
+    ) -> tuple[bool, list[str]]:
+        blockers: list[str] = []
+        if risk == "high":
+            blockers.append("risk_high")
+        if confidence < 60:
+            blockers.append("confidence_lt_60")
+        if competition_risk == "high":
+            blockers.append("competition_high_risk")
+        if minute > 75:
+            blockers.append("late_gt_75")
+        best_odds = self._float(best.get("best_bet_odds"))
+        if best_odds is None or best_odds > 3.00:
+            blockers.append("odds_gt_3_00_or_missing")
+        if bool(best.get("is_corner")):
+            blockers.append("corners_blocked")
+        if bool(best.get("is_exotic")):
+            blockers.append("exotic_blocked")
+        if bool(best.get("is_period")):
+            blockers.append("period_blocked")
+        if total_goals >= 4:
+            blockers.append("score_total_goals_4plus")
+        kind = str(best.get("bet_kind") or "")
+        line = self._float(best.get("line"))
+        goals_needed = self._int(best.get("goals_needed_to_win"))
+        if kind == "ft_1x2":
+            if not api_ok:
+                blockers.append("1x2_without_api_blocked")
+        elif kind == "match_total_over":
+            if goals_needed != 1:
+                blockers.append("match_total_goals_needed_not_1")
+            if minute < 35 or minute > 75:
+                blockers.append("match_total_minute_window")
+            if best_odds is None or best_odds < 1.35 or best_odds > 2.60:
+                blockers.append("match_total_odds_window")
+            if line is None or line > 3.5:
+                blockers.append("match_total_line_gt_3_5")
+        elif kind == "team_total_over":
+            if goals_needed != 1:
+                blockers.append("team_total_goals_needed_not_1")
+            if minute < 35 or minute > 70:
+                blockers.append("team_total_minute_window")
+            if best_odds is None or best_odds < 1.45 or best_odds > 2.60:
+                blockers.append("team_total_odds_window")
+            if line is None or line > 2.5:
+                blockers.append("team_total_line_gt_2_5")
+        else:
+            blockers.append("unsupported_kind")
+        return (len(blockers) == 0), blockers
 
     def _is_corner_market(self, c: ProviderSignalCandidate) -> bool:
         text = " ".join(
@@ -349,6 +530,7 @@ class FootballLiveProbabilityModelService:
         sh: int,
         sa: int,
         best_odds: float | None,
+        best_kind: str,
         competition_risk: str,
     ) -> int:
         score = 25.0
@@ -360,16 +542,18 @@ class FootballLiveProbabilityModelService:
             score += 20.0
         if best_odds is not None and 1.35 <= best_odds <= 3.20:
             score += 10.0
+        if best_kind in {"match_total_over", "team_total_over"}:
+            score += 10.0
         if competition_risk == "high":
             score -= 22.0
         elif competition_risk == "medium":
             score -= 8.0
         return int(max(5.0, min(95.0, score)))
 
-    def _risk_level(self, *, minute: int, odds: float | None, missing: list[str], competition_risk: str) -> str:
+    def _risk_level(self, *, minute: int, odds: float | None, critical_missing: bool, competition_risk: str) -> str:
         if competition_risk == "high":
             return "high"
-        if missing:
+        if critical_missing:
             return "high"
         if minute >= 85:
             return "high"
