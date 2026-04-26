@@ -1234,7 +1234,8 @@ async def cmd_football_live_probability_debug(message: Message, sessionmaker: as
     await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 
-@router.message(Command("football_probability_ideas_status"))
+@router.message(Command("football_prob_ideas_status"))
+@router.message(lambda m: (m.text or "").strip().startswith("/football_probability_ideas_status"))
 async def cmd_football_probability_ideas_status(
     message: Message,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -4099,7 +4100,7 @@ async def cmd_debug_help(message: Message) -> None:
                 "- /server_checklist",
                 "- /regression_pack",
                 "- /football_live_probability_debug",
-                "- /football_probability_ideas_status",
+                "- /football_prob_ideas_status",
             ]
         ),
         reply_markup=get_debug_keyboard(),
