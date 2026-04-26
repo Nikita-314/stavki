@@ -203,9 +203,12 @@ def _is_start_button_text(message: Message) -> bool:
     # Telegram clients can send variation selectors/non-breaking spaces.
     norm = raw.replace("\ufe0f", "").replace("\u00a0", " ").strip().lower()
     norm = re.sub(r"\s+", " ", norm)
+    # Be permissive: any button-like text containing "старт".
+    if "старт" not in norm:
+        return False
     if norm in {"старт", "▶ старт", "▶️ старт"}:
         return True
-    return bool(norm.endswith("старт") and ("▶" in norm))
+    return bool(norm.endswith("старт") or "▶" in norm)
 
 
 def _is_allowed(message: Message) -> bool:
@@ -1022,6 +1025,13 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
     if not _is_allowed(message):
         await _deny(message)
         return
+    logger.info(
+        "[FOOTBALL][START_BUTTON] received text=%r user_id=%s chat_id=%s",
+        message.text,
+        message.from_user.id if message.from_user else None,
+        message.chat.id if getattr(message, "chat", None) is not None else None,
+    )
+    await message.answer("▶️ Старт принят. Запускаю live-цикл...", reply_markup=get_signal_control_keyboard())
     from app.services.football_live_session_service import FootballLiveSessionService
 
     from app.services.football_live_runtime_pacing import get_football_live_runtime_pacing
