@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     """Football LIVE only: bounded additive score adjustments from settled rationale/outcome history."""
     s12_live_signals_enabled: bool = False
     """Controlled rollout switch for S12 -> real signals (default OFF)."""
+    s13_live_signals_enabled: bool = False
+    """Controlled rollout switch for S13 probability model -> real live signals (default OFF)."""
     football_min_signal_score: float = 55.0
     football_dedup_relaxed_interval_minutes: int = 30
     football_live_session_duration_minutes: int = 15

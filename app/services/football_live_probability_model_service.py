@@ -178,6 +178,7 @@ class FootballLiveProbabilityModelService:
 
         return {
             "match": str(c0.match.match_name or ""),
+            "tournament_name": str(c0.match.tournament_name or ""),
             "event_id": str(c0.match.external_event_id or ""),
             "fixture_id": fixture_id,
             "minute": minute,
@@ -195,6 +196,14 @@ class FootballLiveProbabilityModelService:
             "bet_kind": best.get("bet_kind"),
             "line": best.get("line"),
             "goals_needed_to_win": best.get("goals_needed_to_win"),
+            "is_exotic": bool(best.get("is_exotic")),
+            "is_corner": bool(best.get("is_corner")),
+            "is_period": bool(best.get("is_period")),
+            "source_market_type": best.get("source_market_type"),
+            "source_market_label": best.get("source_market_label"),
+            "source_selection": best.get("source_selection"),
+            "source_section_name": best.get("source_section_name"),
+            "source_subsection_name": best.get("source_subsection_name"),
             "implied_probability": round(implied, 4),
             "model_probability": round(model_p, 4),
             "value_edge": edge,
@@ -451,6 +460,11 @@ class FootballLiveProbabilityModelService:
                     "is_exotic": bool(is_exotic),
                     "is_corner": bool(is_corner),
                     "is_period": bool(is_period),
+                    "source_market_type": str(c.market.market_type or ""),
+                    "source_market_label": str(c.market.market_label or ""),
+                    "source_selection": str(c.market.selection or ""),
+                    "source_section_name": c.market.section_name,
+                    "source_subsection_name": c.market.subsection_name,
                 }
         return best
 

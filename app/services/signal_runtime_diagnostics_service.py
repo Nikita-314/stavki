@@ -77,6 +77,7 @@ class SignalRuntimeDiagnosticsState:
     football_live_cycle_after_s10: int = 0
     football_live_cycle_after_s11: int = 0
     football_live_cycle_after_s12_controlled: int = 0
+    football_live_cycle_after_s13: int = 0
     football_live_cycle_after_context_filter: int = 0
     football_live_cycle_after_value_filter: int = 0
     football_live_cycle_after_score: int = 0
@@ -150,6 +151,9 @@ class SignalRuntimeDiagnosticsState:
     football_live_s12_controlled_candidates: int = 0
     football_live_s12_controlled_sent: int = 0
     football_live_s12_controlled_blocked: int = 0
+    football_live_s13_candidates: int = 0
+    football_live_s13_sent: int = 0
+    football_live_s13_blocked: int = 0
 
     football_live_rejected_invalid_selection: int = 0
     """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""

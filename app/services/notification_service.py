@@ -116,6 +116,45 @@ class NotificationService:
                 return f"🧩 Контекст: {self._html_text(label)}"
         return "🧩 Контекст: Winline"
 
+    def _football_strategy_lines(self, report: SignalAnalyticsReport) -> list[str]:
+        prediction_logs = report.prediction_logs or []
+        if not prediction_logs:
+            return []
+        log = prediction_logs[0]
+        expl = log.explanation_json or {}
+        snap = log.feature_snapshot_json or {}
+        strategy_id = str(expl.get("football_live_strategy_id") or "").strip()
+        if not strategy_id:
+            return []
+        lines = [f"🏷 Стратегия: {self._html_text(strategy_id)}"]
+        s13 = snap.get("football_live_s13_probability") if isinstance(snap, dict) else None
+        if isinstance(s13, dict) and strategy_id.startswith("S13"):
+            model = self._pct(s13.get("model_probability"))
+            implied = self._pct(s13.get("implied_probability"))
+            edge = self._pct(s13.get("value_edge"), signed=True)
+            confidence = s13.get("confidence_score")
+            risk = str(s13.get("risk_level") or "—")
+            api = "yes" if bool(s13.get("api_intelligence_available")) else "no"
+            lines.extend(
+                [
+                    f"📊 model_prob: {model}",
+                    f"📉 implied_prob: {implied}",
+                    f"📈 edge: {edge}",
+                    f"🧠 confidence: {self._html_text(str(confidence or '—'))}",
+                    f"⚠️ risk: {self._html_text(risk)}",
+                    f"🔗 API: {api}",
+                ]
+            )
+        return lines
+
+    def _pct(self, value: object, *, signed: bool = False) -> str:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        sign = "+" if signed and v >= 0 else ""
+        return f"{sign}{v * 100:.1f}%"
+
     def format_signal_message(self, report: SignalAnalyticsReport) -> str:
         s = report.signal
         match_name = self._humanize_match_name(s.match_name, s.home_team, s.away_team)
@@ -149,6 +188,7 @@ class NotificationService:
                 f"🗓 Начало матча: {self._html_text(match_start)}",
                 f"🎯 Ставка: {self._html_text(bet_presentation.main_label)}",
                 f"💰 Коэффициент: {self._html_text(odds)}",
+                *self._football_strategy_lines(report),
             ]
         )
         if bet_presentation.detail_label and not bool(getattr(s, "is_live", False)):
