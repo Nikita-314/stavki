@@ -8,6 +8,7 @@ from typing import Any
 
 from app.schemas.provider_models import ProviderSignalCandidate
 from app.services.football_bet_formatter_service import FootballBetFormatterService
+from app.services.football_live_ranker_ideas_service import FootballLiveRankerIdeasService
 from app.services.football_signal_send_filter_service import FootballSignalSendFilterService
 
 
@@ -36,9 +37,11 @@ class FootballLiveAnalyticRankerService:
     def __init__(self) -> None:
         self._family = FootballSignalSendFilterService()
         self._fmt = FootballBetFormatterService()
+        self._ideas = FootballLiveRankerIdeasService()
 
     def rank(self, candidates: list[ProviderSignalCandidate], *, limit: int = 10) -> FootballLiveRankerResult:
         rows = [row for c in candidates if (row := self.evaluate(c)) is not None]
+        self._ideas.schedule_persist_preview(rows)
         rows.sort(key=lambda r: (self._bucket_rank(str(r.get("preview_bucket") or "")), float(r.get("analytic_score") or 0.0)), reverse=True)
         eligible_top = [r for r in rows if r.get("preview_bucket") == "eligible"][: max(1, int(limit))]
         watchlist_top = [r for r in rows if r.get("preview_bucket") == "watchlist"][: max(1, int(limit))]
@@ -187,12 +190,23 @@ class FootballLiveAnalyticRankerService:
 
         return {
             "match": str(c.match.match_name or ""),
+            "home_team": str(c.match.home_team or ""),
+            "away_team": str(c.match.away_team or ""),
             "event_id": str(c.match.external_event_id or ""),
+            "event_start_at": c.match.event_start_at.isoformat() if c.match.event_start_at else None,
+            "fixture_id": self._int(api.get("fixture_id")) if api else None,
             "minute": minute,
             "score": f"{sh}:{sa}" if sh is not None and sa is not None else None,
+            "score_home": sh,
+            "score_away": sa,
             "proposed_bet": self._bet_text(c),
             "odds": str(odds) if odds is not None else None,
             "market_type": opportunity["kind"],
+            "market": self._market_name(opportunity),
+            "selection": self._selection_name(c, opportunity),
+            "line": opportunity.get("line"),
+            "team_side": opportunity.get("team_side"),
+            "selection_side": selection_side,
             "analytic_score": round(max(0.0, min(100.0, score)), 1),
             "risk_level": risk_level,
             "api_intelligence": bool(api),
@@ -281,14 +295,48 @@ class FootballLiveAnalyticRankerService:
                 "kind": "match_total_over_need_1",
                 "goals_needed_to_win": goals_needed,
                 "period_scope": ctx.period_scope,
+                "line": line,
+                "team_side": None,
             }
         if ctx.target_scope in {"home_team", "away_team", "team_total"}:
+            team_side = "home" if ctx.target_scope == "home_team" else "away" if ctx.target_scope == "away_team" else None
             return {
                 "kind": "team_total_over_need_1",
                 "goals_needed_to_win": goals_needed,
                 "period_scope": ctx.period_scope,
+                "line": line,
+                "team_side": team_side,
             }
         return None
+
+    def _market_name(self, opportunity: dict[str, object]) -> str:
+        kind = str(opportunity.get("kind") or "")
+        if kind == "match_total_over_need_1":
+            return "match_total_over"
+        if kind == "team_total_over_need_1":
+            return "team_total_over"
+        if kind == "ft_1x2":
+            return "1x2"
+        return kind or "unknown"
+
+    def _selection_name(self, c: ProviderSignalCandidate, opportunity: dict[str, object]) -> str:
+        kind = str(opportunity.get("kind") or "")
+        if kind == "ft_1x2":
+            side = self._selection_side(c)
+            if side == "home":
+                return "home_win"
+            if side == "away":
+                return "away_win"
+            if side == "draw":
+                return "draw"
+            return "unknown"
+        line = opportunity.get("line")
+        if kind == "team_total_over_need_1":
+            side = str(opportunity.get("team_side") or "")
+            return f"team_{side or 'unknown'}_over_{line}"
+        if kind == "match_total_over_need_1":
+            return f"over_{line}"
+        return self._bet_text(c)
 
     def _goals_needed(self, target_scope: str, line: float, sh: int | None, sa: int | None) -> int | None:
         if sh is None or sa is None:

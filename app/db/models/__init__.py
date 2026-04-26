@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.db.models.balance_snapshot import BalanceSnapshot
 from app.db.models.entry import Entry
 from app.db.models.failure_review import FailureReview
+from app.db.models.football_live_ranker_idea import FootballLiveRankerIdea
 from app.db.models.model_version import ModelVersion
 from app.db.models.prediction_log import PredictionLog
 from app.db.models.settlement import Settlement
@@ -12,6 +13,7 @@ __all__ = [
     "BalanceSnapshot",
     "Entry",
     "FailureReview",
+    "FootballLiveRankerIdea",
     "ModelVersion",
     "PredictionLog",
     "Settlement",
