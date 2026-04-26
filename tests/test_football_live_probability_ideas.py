@@ -71,6 +71,9 @@ def test_save_usable_idea_and_skip_raw(monkeypatch) -> None:
                 return holder["session"]
 
         monkeypatch.setattr(mod, "_get_sessionmaker", lambda: _FakeSessionmaker())
+        async def _never_dup(_self, _session, _idea):
+            return False
+        monkeypatch.setattr(FootballLiveProbabilityIdeasService, "_is_recent_duplicate", _never_dup)
         svc = FootballLiveProbabilityIdeasService()
         saved = await svc.persist_usable_rows(
             [
@@ -107,6 +110,112 @@ def test_save_usable_idea_and_skip_raw(monkeypatch) -> None:
         assert saved == 1
         assert len(holder["session"].rows) == 1
         assert holder["session"].rows[0].event_id == "e1"
+
+    _run(scenario())
+
+
+def test_negative_edge_idea_not_saved(monkeypatch) -> None:
+    async def scenario() -> None:
+        import app.services.football_live_probability_ideas_service as mod
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.rows: list[FootballLiveProbabilityIdea] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def add_all(self, ideas):
+                self.rows.extend(list(ideas))
+
+            async def commit(self):
+                return None
+
+        holder = {"session": _FakeSession()}
+
+        class _FakeSessionmaker:
+            def __call__(self):
+                return holder["session"]
+
+        monkeypatch.setattr(mod, "_get_sessionmaker", lambda: _FakeSessionmaker())
+        async def _never_dup(_self, _session, _idea):
+            return False
+        monkeypatch.setattr(FootballLiveProbabilityIdeasService, "_is_recent_duplicate", _never_dup)
+
+        svc = FootballLiveProbabilityIdeasService()
+        saved = await svc.persist_usable_rows(
+            [
+                {
+                    "event_id": "e-neg",
+                    "match": "A vs B",
+                    "bet_kind": "ft_1x2",
+                    "best_bet": "П1: A",
+                    "best_bet_odds": 2.0,
+                    "value_edge": -0.01,
+                    "confidence_score": 90,
+                    "risk_level": "low",
+                    "is_usable": True,
+                }
+            ]
+        )
+        assert saved == 0
+        assert len(holder["session"].rows) == 0
+
+    _run(scenario())
+
+
+def test_duplicate_idea_within_10_minutes_not_saved(monkeypatch) -> None:
+    async def scenario() -> None:
+        import app.services.football_live_probability_ideas_service as mod
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.rows: list[FootballLiveProbabilityIdea] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def add_all(self, ideas):
+                self.rows.extend(list(ideas))
+
+            async def commit(self):
+                return None
+
+        holder = {"session": _FakeSession()}
+
+        class _FakeSessionmaker:
+            def __call__(self):
+                return holder["session"]
+
+        monkeypatch.setattr(mod, "_get_sessionmaker", lambda: _FakeSessionmaker())
+        async def _always_dup(_self, _session, _idea):
+            return True
+        monkeypatch.setattr(FootballLiveProbabilityIdeasService, "_is_recent_duplicate", _always_dup)
+
+        svc = FootballLiveProbabilityIdeasService()
+        saved = await svc.persist_usable_rows(
+            [
+                {
+                    "event_id": "e-dup",
+                    "match": "A vs B",
+                    "bet_kind": "match_total_over",
+                    "best_bet": "ТБ 1.5",
+                    "best_bet_odds": 1.9,
+                    "value_edge": 0.11,
+                    "confidence_score": 75,
+                    "risk_level": "low",
+                    "is_usable": True,
+                }
+            ]
+        )
+        assert saved == 0
+        assert len(holder["session"].rows) == 0
 
     _run(scenario())
 

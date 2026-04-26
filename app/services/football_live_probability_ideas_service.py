@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import get_settings
@@ -36,18 +38,64 @@ class FootballLiveProbabilityIdeasService:
     async def persist_usable_rows(self, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
-        ideas = [self._to_model(r) for r in rows if bool(r.get("is_usable")) and str(r.get("best_bet") or "").strip()]
-        if not ideas:
-            return 0
+        raw = [dict(r) for r in rows]
         sm = _get_sessionmaker()
         try:
             async with sm() as session:
+                ideas: list[FootballLiveProbabilityIdea] = []
+                for row in raw:
+                    if not self._row_is_saveable(row):
+                        continue
+                    model = self._to_model(row)
+                    if await self._is_recent_duplicate(session, model):
+                        continue
+                    ideas.append(model)
+                if not ideas:
+                    return 0
                 session.add_all(ideas)
                 await session.commit()
             return len(ideas)
         except Exception:
             logger.exception("[FOOTBALL][S13_IDEAS] failed to persist usable rows")
             return 0
+
+    async def _is_recent_duplicate(self, session: object, idea: FootballLiveProbabilityIdea) -> bool:
+        dt_from = datetime.now(timezone.utc) - timedelta(minutes=10)
+        try:
+            stmt = (
+                select(FootballLiveProbabilityIdea.id)
+                .where(FootballLiveProbabilityIdea.event_id == idea.event_id)
+                .where(FootballLiveProbabilityIdea.market == idea.market)
+                .where(FootballLiveProbabilityIdea.selection == idea.selection)
+                .where(FootballLiveProbabilityIdea.created_at >= dt_from)
+            )
+            if idea.line is None:
+                stmt = stmt.where(FootballLiveProbabilityIdea.line.is_(None))
+            else:
+                stmt = stmt.where(FootballLiveProbabilityIdea.line == idea.line)
+            if idea.odds is None:
+                stmt = stmt.where(FootballLiveProbabilityIdea.odds.is_(None))
+            else:
+                stmt = stmt.where(FootballLiveProbabilityIdea.odds == idea.odds)
+            res = await session.execute(stmt)
+            return res.first() is not None
+        except Exception:
+            return False
+
+    def _row_is_saveable(self, row: dict[str, Any]) -> bool:
+        if not bool(row.get("is_usable")):
+            return False
+        if not str(row.get("best_bet") or "").strip():
+            return False
+        edge = self._decimal(row.get("value_edge"))
+        if edge is None or edge < Decimal("0.07"):
+            return False
+        conf = self._int(row.get("confidence_score"))
+        if conf is None or conf < 60:
+            return False
+        if str(row.get("risk_level") or "").lower() == "high":
+            return False
+        return True
 
     def _to_model(self, row: dict[str, Any]) -> FootballLiveProbabilityIdea:
         return FootballLiveProbabilityIdea(
