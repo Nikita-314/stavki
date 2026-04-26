@@ -1151,6 +1151,61 @@ async def cmd_football_live_ranker_debug(message: Message, sessionmaker: async_s
     await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 
+@router.message(Command("football_live_probability_debug"))
+async def cmd_football_live_probability_debug(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """Preview-only S13 probability model: one dry-run cycle, no DB writes and no channel sends."""
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("S13 preview: запускаю dry-run live-cycle, сигналы не создаются и не отправляются...")
+    res = await AutoSignalService().run_single_cycle(sessionmaker, message.bot, dry_run=True)
+    AutoSignalService().log_football_cycle_trace(res)
+    diag = SignalRuntimeDiagnosticsService().get_state()
+    try:
+        top = json.loads(str(diag.get("football_live_probability_top_json") or "[]"))
+        if not isinstance(top, list):
+            top = []
+    except (json.JSONDecodeError, TypeError):
+        top = []
+
+    lines = [
+        "🧪 S13_LIVE_ANALYTIC_PROBABILITY_MODEL preview-only",
+        "⚠️ Preview-only: идеи НЕ отправляются в канал и НЕ считаются сигналами.",
+        "",
+        f"after_integrity: {res.report_after_integrity}",
+        f"total_matches_evaluated: {int(diag.get('football_live_probability_matches') or 0)}",
+        f"with_api_intelligence: {int(diag.get('football_live_probability_with_api') or 0)}",
+        f"without_api_intelligence: {int(diag.get('football_live_probability_without_api') or 0)}",
+        f"value_edge>=0.07: {int(diag.get('football_live_probability_value_edge_7_count') or 0)}",
+        f"confidence>=60: {int(diag.get('football_live_probability_confidence_60_count') or 0)}",
+        "",
+        "Top-15 ideas by value_edge:",
+    ]
+
+    if not top:
+        lines.append("— нет")
+    else:
+        for idx, row in enumerate(top[:15], start=1):
+            if not isinstance(row, dict):
+                continue
+            api = "yes" if row.get("api_intelligence_available") else "no"
+            reasons = row.get("reasons")
+            if isinstance(reasons, list):
+                reason_line = "; ".join([str(x) for x in reasons[:3]])
+            else:
+                reason_line = "—"
+            lines.extend(
+                [
+                    f"{idx}. {row.get('match') or '—'}",
+                    f"   {row.get('minute') or '—'}' {row.get('score') or '—'} | {row.get('best_bet') or '—'} | odds {row.get('best_bet_odds') or '—'}",
+                    f"   implied={row.get('implied_probability')} model={row.get('model_probability')} edge={row.get('value_edge')}",
+                    f"   conf={row.get('confidence_score')} risk={row.get('risk_level')} api={api}",
+                    f"   why: {reason_line}",
+                ]
+            )
+    await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
+
+
 @router.message(Command("football_live_strategy_stats"))
 async def cmd_football_live_strategy_stats(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
@@ -3958,6 +4013,7 @@ async def cmd_debug_help(message: Message) -> None:
                 "- /whoami",
                 "- /server_checklist",
                 "- /regression_pack",
+                "- /football_live_probability_debug",
             ]
         ),
         reply_markup=get_debug_keyboard(),

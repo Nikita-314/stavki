@@ -49,6 +49,7 @@ from app.services.football_live_adaptive_learning_service import (
 )
 from app.services.api_football_team_intelligence_service import ApiFootballTeamIntelligenceService
 from app.services.football_live_analytic_ranker_service import FootballLiveAnalyticRankerService
+from app.services.football_live_probability_model_service import FootballLiveProbabilityModelService
 from app.services.football_live_strategy_service import (
     evaluate_football_live_strategies,
     evaluate_football_live_strategies_async,
@@ -3239,6 +3240,36 @@ class AutoSignalService:
                 football_live_ranker_eligible_top_json=None,
                 football_live_ranker_watchlist_top_json=None,
                 football_live_ranker_preview_snapshot_json=None,
+            )
+        try:
+            prob_res = FootballLiveProbabilityModelService().evaluate(list(candidates_to_ingest), limit=15)
+            diagnostics.update(
+                football_live_probability_matches=int(prob_res.total_matches),
+                football_live_probability_with_api=int(prob_res.with_api_intelligence),
+                football_live_probability_without_api=int(prob_res.without_api_intelligence),
+                football_live_probability_top_count=int(len(prob_res.top)),
+                football_live_probability_value_edge_7_count=int(prob_res.value_edge_7_count),
+                football_live_probability_confidence_60_count=int(prob_res.confidence_60_count),
+                football_live_probability_top_json=json.dumps(prob_res.top, default=str, ensure_ascii=False)[:50000],
+            )
+            logger.info(
+                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s edge>=0.07=%s confidence>=60=%s",
+                prob_res.total_matches,
+                prob_res.with_api_intelligence,
+                prob_res.without_api_intelligence,
+                prob_res.value_edge_7_count,
+                prob_res.confidence_60_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[FOOTBALL][S13_PROBABILITY] preview skipped: %s", exc)
+            diagnostics.update(
+                football_live_probability_matches=0,
+                football_live_probability_with_api=0,
+                football_live_probability_without_api=0,
+                football_live_probability_top_count=0,
+                football_live_probability_value_edge_7_count=0,
+                football_live_probability_confidence_60_count=0,
+                football_live_probability_top_json=None,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:
