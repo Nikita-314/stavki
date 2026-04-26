@@ -81,6 +81,7 @@ class FootballLiveProbabilityModelService:
         api = self._api_intelligence(c0)
         api_ok = bool(api)
         competition_risk = self._competition_risk(c0)
+        fixture_id = self._fixture_id(c0, api)
         odds_1x2 = self._extract_1x2_odds(rows)
         ph, pd, pa = self._base_1x2_probs(odds_1x2, minute=minute, sh=sh, sa=sa)
         ph, pd, pa, reasons_api = self._apply_api_adjustments(ph, pd, pa, api)
@@ -171,14 +172,18 @@ class FootballLiveProbabilityModelService:
             best=best,
             competition_risk=competition_risk,
             total_goals=total_goals,
+            value_edge=edge,
         )
         usable_score = round(max(0.0, edge) * float(confidence), 4) if is_usable else 0.0
 
         return {
             "match": str(c0.match.match_name or ""),
             "event_id": str(c0.match.external_event_id or ""),
+            "fixture_id": fixture_id,
             "minute": minute,
             "score": f"{sh}:{sa}",
+            "score_home": sh,
+            "score_away": sa,
             "home": str(c0.match.home_team or ""),
             "away": str(c0.match.away_team or ""),
             "home_win_probability": round(ph, 4),
@@ -385,17 +390,41 @@ class FootballLiveProbabilityModelService:
                     if line is not None:
                         goals_needed = self._goals_needed_to_win(c, ctx, line)
                         if ctx.target_scope == "match":
-                            model_p, reason = over_p, "model_over_next_goal"
+                            lam_total = self._expected_remaining_goals(
+                                minute=self._int(c.feature_snapshot_json.get("football_analytics", {}).get("minute"))
+                                if isinstance(c.feature_snapshot_json, dict)
+                                else None,
+                                score_home=self._int(c.feature_snapshot_json.get("football_analytics", {}).get("score_home"))
+                                if isinstance(c.feature_snapshot_json, dict)
+                                else None,
+                                score_away=self._int(c.feature_snapshot_json.get("football_analytics", {}).get("score_away"))
+                                if isinstance(c.feature_snapshot_json, dict)
+                                else None,
+                                api=self._api_intelligence(c),
+                            )
+                            model_p = self._poisson_prob_at_least(goals_needed, lam_total)
+                            model_p = 0.75 * model_p + 0.25 * over_p
+                            reason = "model_match_total_over_poisson"
                             bet_kind = "match_total_over"
                         elif ctx.target_scope in {"home_team", "away_team", "team_total"}:
-                            # team total over: scale over-next-goal by side bias from 1x2 probs
-                            side_boost = 0.0
-                            if ctx.target_scope == "home_team":
-                                side_boost = (ph - pa) * 0.35
-                            elif ctx.target_scope == "away_team":
-                                side_boost = (pa - ph) * 0.35
-                            model_p = max(0.02, min(0.95, over_p + side_boost))
-                            reason = "model_team_total_over"
+                            lam_total = self._expected_remaining_goals(
+                                minute=self._int(c.feature_snapshot_json.get("football_analytics", {}).get("minute"))
+                                if isinstance(c.feature_snapshot_json, dict)
+                                else None,
+                                score_home=self._int(c.feature_snapshot_json.get("football_analytics", {}).get("score_home"))
+                                if isinstance(c.feature_snapshot_json, dict)
+                                else None,
+                                score_away=self._int(c.feature_snapshot_json.get("football_analytics", {}).get("score_away"))
+                                if isinstance(c.feature_snapshot_json, dict)
+                                else None,
+                                api=self._api_intelligence(c),
+                            )
+                            home_share = max(0.15, min(0.85, ph / max(1e-6, ph + pa)))
+                            side_share = home_share if ctx.target_scope == "home_team" else (1.0 - home_share)
+                            lam_team = max(0.02, lam_total * side_share)
+                            model_p = self._poisson_prob_at_least(goals_needed, lam_team)
+                            model_p = 0.70 * model_p + 0.30 * over_p
+                            reason = "model_team_total_over_poisson"
                             bet_kind = "team_total_over"
             if model_p is None:
                 continue
@@ -425,6 +454,46 @@ class FootballLiveProbabilityModelService:
                 }
         return best
 
+    def _expected_remaining_goals(
+        self,
+        *,
+        minute: int | None,
+        score_home: int | None,
+        score_away: int | None,
+        api: dict[str, Any],
+    ) -> float:
+        m = minute if minute is not None else 45
+        m = max(0, min(90, m))
+        rem_ratio = max(0.05, (90 - m) / 90.0)
+        base_total = 2.45
+        gf_h = self._float(api.get("avg_goals_for_home")) if api else None
+        gf_a = self._float(api.get("avg_goals_for_away")) if api else None
+        ga_h = self._float(api.get("avg_goals_against_home")) if api else None
+        ga_a = self._float(api.get("avg_goals_against_away")) if api else None
+        if None not in (gf_h, gf_a, ga_h, ga_a):
+            base_total = max(1.40, min(4.20, ((gf_h or 0) + (gf_a or 0) + (ga_h or 0) + (ga_a or 0)) / 2.0))
+        total_now = (score_home or 0) + (score_away or 0)
+        tempo = 1.0
+        if total_now >= 3:
+            tempo *= 0.90
+        elif total_now == 0 and m >= 50:
+            tempo *= 0.85
+        elif total_now <= 1 and 35 <= m <= 70:
+            tempo *= 1.07
+        return max(0.05, min(3.5, base_total * rem_ratio * tempo))
+
+    def _poisson_prob_at_least(self, goals_needed: int | None, lam: float) -> float:
+        if goals_needed is None:
+            return 0.5
+        k = int(goals_needed)
+        if k <= 0:
+            return 0.99
+        # P(X >= k) = 1 - sum_{i=0}^{k-1} e^-lam * lam^i / i!
+        cdf = 0.0
+        for i in range(0, max(0, k)):
+            cdf += math.exp(-lam) * (lam**i) / math.factorial(i)
+        return max(0.01, min(0.99, 1.0 - cdf))
+
     def _goals_needed_to_win(self, c: ProviderSignalCandidate, ctx: Any, line: float) -> int | None:
         minute, sh, sa = self._live_state(c)
         if minute is None or sh is None or sa is None:
@@ -449,8 +518,11 @@ class FootballLiveProbabilityModelService:
         best: dict[str, object],
         competition_risk: str,
         total_goals: int,
+        value_edge: float,
     ) -> tuple[bool, list[str]]:
         blockers: list[str] = []
+        if value_edge < 0.07:
+            blockers.append("value_edge_lt_0_07")
         if risk == "high":
             blockers.append("risk_high")
         if confidence < 60:
@@ -603,6 +675,14 @@ class FootballLiveProbabilityModelService:
         fs = c.feature_snapshot_json if isinstance(c.feature_snapshot_json, dict) else {}
         api = fs.get("api_football_team_intelligence")
         return api if isinstance(api, dict) else {}
+
+    def _fixture_id(self, c: ProviderSignalCandidate, api: dict[str, Any]) -> int | None:
+        fid = self._int(api.get("fixture_id")) if api else None
+        if fid:
+            return fid
+        fs = c.feature_snapshot_json if isinstance(c.feature_snapshot_json, dict) else {}
+        ctx = fs.get("football_live_context_filter") if isinstance(fs.get("football_live_context_filter"), dict) else {}
+        return self._int(ctx.get("fixture_id")) if ctx else None
 
     def _selection_side(self, selection: object, home_team: object, away_team: object) -> str | None:
         sel = str(selection or "").strip().lower().replace("х", "x").replace("ё", "е")

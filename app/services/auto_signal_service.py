@@ -49,6 +49,7 @@ from app.services.football_live_adaptive_learning_service import (
 )
 from app.services.api_football_team_intelligence_service import ApiFootballTeamIntelligenceService
 from app.services.football_live_analytic_ranker_service import FootballLiveAnalyticRankerService
+from app.services.football_live_probability_ideas_service import FootballLiveProbabilityIdeasService
 from app.services.football_live_probability_model_service import FootballLiveProbabilityModelService
 from app.services.football_live_strategy_service import (
     evaluate_football_live_strategies,
@@ -3243,6 +3244,12 @@ class AutoSignalService:
             )
         try:
             prob_res = FootballLiveProbabilityModelService().evaluate(list(candidates_to_ingest), limit=15)
+            ideas_saved = 0
+            if dry_run:
+                try:
+                    ideas_saved = await FootballLiveProbabilityIdeasService().persist_usable_rows(list(prob_res.ideas))
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("[FOOTBALL][S13_IDEAS] persist skipped: %s", exc)
             diagnostics.update(
                 football_live_probability_matches=int(prob_res.total_matches),
                 football_live_probability_with_api=int(prob_res.with_api_intelligence),
@@ -3258,14 +3265,17 @@ class AutoSignalService:
                     default=str,
                     ensure_ascii=False,
                 )[:50000],
+                football_live_probability_ideas_saved=int(ideas_saved),
+                football_live_probability_ideas_usable_count=int(prob_res.usable_count),
             )
             logger.info(
-                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s usable=%s raw_high_risk=%s edge>=0.07=%s confidence>=60=%s",
+                "[FOOTBALL][S13_PROBABILITY] matches=%s with_api=%s without_api=%s usable=%s raw_high_risk=%s saved=%s edge>=0.07=%s confidence>=60=%s",
                 prob_res.total_matches,
                 prob_res.with_api_intelligence,
                 prob_res.without_api_intelligence,
                 prob_res.usable_count,
                 prob_res.raw_high_risk_count,
+                ideas_saved,
                 prob_res.value_edge_7_count,
                 prob_res.confidence_60_count,
             )
@@ -3282,6 +3292,8 @@ class AutoSignalService:
                 football_live_probability_raw_high_risk_count=0,
                 football_live_probability_top_json=None,
                 football_live_probability_usable_top_json=None,
+                football_live_probability_ideas_saved=0,
+                football_live_probability_ideas_usable_count=0,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:

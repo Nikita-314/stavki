@@ -223,7 +223,7 @@ def test_normal_match_total_need1_can_be_usable() -> None:
             market_type="total_goals",
             market_label="Тотал [a] (@NP@)",
             selection="Больше 2.5",
-            odds="1.95",
+            odds="2.40",
             minute=60,
             score_home=1,
             score_away=1,

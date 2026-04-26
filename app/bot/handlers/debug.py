@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from app.core.enums import BetResult, EntryStatus, SportType
 from app.db.models.signal import Signal
+from app.db.models.football_live_probability_idea import FootballLiveProbabilityIdea
 from app.core.config import Settings, get_settings
 from app.schemas.entry import EntryCreate
 from app.schemas.settlement import SettlementCreate
@@ -62,6 +63,7 @@ from app.services.signal_runtime_settings_service import SignalRuntimeSettingsSe
 from app.schemas.provider_client import ProviderClientConfig
 from app.services.remote_smoke_service import RemoteSmokeService
 from app.services.football_live_strategy_performance_service import FootballLiveStrategyPerformanceService
+from app.services.football_live_probability_ideas_settlement_service import FootballLiveProbabilityIdeasSettlementService
 
 
 router = Router(name="debug")
@@ -1186,6 +1188,7 @@ async def cmd_football_live_probability_debug(message: Message, sessionmaker: as
         f"confidence>=60: {int(diag.get('football_live_probability_confidence_60_count') or 0)}",
         f"usable_count: {int(diag.get('football_live_probability_usable_count') or 0)}",
         f"raw_high_risk_count: {int(diag.get('football_live_probability_raw_high_risk_count') or 0)}",
+        f"ideas_saved_this_run: {int(diag.get('football_live_probability_ideas_saved') or 0)}",
         "",
         "A) Usable value ideas (sorted by usable_score=value_edge*confidence):",
     ]
@@ -1228,6 +1231,63 @@ async def cmd_football_live_probability_debug(message: Message, sessionmaker: as
         lines.append("— нет")
     else:
         _append(raw_high, with_usable_score=False)
+    await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
+
+
+@router.message(Command("football_probability_ideas_status"))
+async def cmd_football_probability_ideas_status(
+    message: Message,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """S13 ideas storage/settlement status (preview-only analytics storage)."""
+    if not _is_allowed(message):
+        await _deny(message)
+        return
+    await message.answer("S13 ideas status: обновляю settlement и собираю сводку...")
+    settle_svc = FootballLiveProbabilityIdeasSettlementService()
+    rep = await settle_svc.settle_pending(sessionmaker, limit=300, dry_run=False)
+    stat = await settle_svc.status(sessionmaker)
+    latest = await settle_svc.sample_latest(sessionmaker, limit=3)
+    SignalRuntimeDiagnosticsService().update(
+        football_live_probability_ideas_settled=int(rep.settled),
+        football_live_probability_ideas_win=int(rep.win),
+        football_live_probability_ideas_lose=int(rep.lose),
+        football_live_probability_ideas_void=int(rep.void),
+        football_live_probability_ideas_profit_loss=str(rep.total_profit_loss),
+    )
+    lines = [
+        "🧪 S13 probability ideas status (preview-only)",
+        "⚠️ Эти идеи НЕ отправляются в канал, только измерение и settlement.",
+        "",
+        f"total ideas: {int(stat.total)}",
+        f"unsettled: {int(stat.unsettled)}",
+        f"settled: {int(stat.settled)}",
+        f"WIN/LOSE/VOID: {int(stat.win)}/{int(stat.lose)}/{int(stat.void)}",
+        f"profit_loss: {stat.total_profit_loss}",
+        f"ROI: {stat.roi:.4f}" if stat.settled else "ROI: n/a",
+        "",
+        "last settlement run:",
+        f"- checked={rep.checked} fixture_found={rep.fixture_found} finished={rep.finished}",
+        f"- settled={rep.settled} WIN={rep.win} LOSE={rep.lose} VOID={rep.void} UNKNOWN={rep.unknown}",
+        f"- run_profit_loss={rep.total_profit_loss}",
+        "",
+        "market breakdown:",
+    ]
+    if stat.market_breakdown:
+        for row in stat.market_breakdown[:10]:
+            lines.append(f"- {row.get('market')}: count={row.get('count')} pl={row.get('profit_loss')}")
+    else:
+        lines.append("- нет settled rows")
+    lines.append("")
+    lines.append("latest ideas:")
+    if latest:
+        for row in latest:
+            lines.append(
+                f"- id={row.id} {row.match_name} | {row.selection} | odds={row.odds} | "
+                f"edge={row.value_edge} | risk={row.risk_level} | result={row.result or '—'}"
+            )
+    else:
+        lines.append("- нет")
     await _answer_long_message(message, "\n".join(lines), reply_markup=get_signal_control_keyboard())
 
 
@@ -4039,6 +4099,7 @@ async def cmd_debug_help(message: Message) -> None:
                 "- /server_checklist",
                 "- /regression_pack",
                 "- /football_live_probability_debug",
+                "- /football_probability_ideas_status",
             ]
         ),
         reply_markup=get_debug_keyboard(),

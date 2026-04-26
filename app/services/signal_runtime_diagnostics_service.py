@@ -138,6 +138,13 @@ class SignalRuntimeDiagnosticsState:
     football_live_probability_confidence_60_count: int = 0
     football_live_probability_usable_count: int = 0
     football_live_probability_raw_high_risk_count: int = 0
+    football_live_probability_ideas_saved: int = 0
+    football_live_probability_ideas_usable_count: int = 0
+    football_live_probability_ideas_settled: int = 0
+    football_live_probability_ideas_win: int = 0
+    football_live_probability_ideas_lose: int = 0
+    football_live_probability_ideas_void: int = 0
+    football_live_probability_ideas_profit_loss: str | None = None
     football_live_probability_top_json: str | None = None
     football_live_probability_usable_top_json: str | None = None
     football_live_s12_controlled_candidates: int = 0
