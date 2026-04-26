@@ -1005,7 +1005,7 @@ async def cmd_signal_pause(message: Message) -> None:
     )
 
 
-@router.message(_text_is("▶️ Старт"))
+@router.message(_text_is("▶️ Старт", "▶ Старт", "Старт"))
 @router.message(Command("signal_start"))
 async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
