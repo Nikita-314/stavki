@@ -5227,6 +5227,11 @@ class AutoSignalService:
         for cand in candidates_to_ingest:
             odds_f = _safe_float(getattr(cand.market, "odds_value", None))
             minute_i, sh_i, sa_i = _live_ctx_from_candidate(cand)
+            sid_for_value = str((cand.explanation_json or {}).get("football_live_strategy_id") or "")
+            if sid_for_value == S13_CONTROLLED_STRATEGY_ID:
+                passed_value += 1
+                after_value.append(cand)
+                continue
             # If context missing, treat as no-edge (we don't want blind favorites)
             if odds_f is None or minute_i is None or sh_i is None or sa_i is None:
                 rej_no_edge += 1
@@ -5472,6 +5477,16 @@ class AutoSignalService:
             base_decimal = scoring_svc.to_signal_score_decimal(breakdown)
             prev_fs = dict(cand.feature_snapshot_json or {})
             prev_expl = dict(cand.explanation_json or {})
+            if str(prev_expl.get("football_live_strategy_id") or "") == S13_CONTROLLED_STRATEGY_ID:
+                s13_payload = prev_fs.get("football_live_s13_probability")
+                s13_conf = None
+                if isinstance(s13_payload, dict):
+                    try:
+                        s13_conf = Decimal(str(s13_payload.get("confidence_score")))
+                    except Exception:
+                        s13_conf = None
+                if s13_conf is not None:
+                    base_decimal = max(base_decimal, s13_conf.quantize(Decimal("0.0001")))
             summary = [a.as_dict() for a in learning_aggregates[:20]] if learning_aggregates else []
             learning_payload: dict = {"enabled": learning_enabled, "family_multiplier": lf}
             if idx == 0 and summary:
