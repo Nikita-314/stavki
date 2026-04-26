@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from io import BytesIO
 from datetime import datetime, timezone
@@ -195,6 +196,16 @@ def _json_snippet_messages(title: str, text: str | None) -> list[str]:
 def _text_is(*values: str):
     expected = {v.strip() for v in values}
     return lambda m: (m.text or "").strip() in expected
+
+
+def _is_start_button_text(message: Message) -> bool:
+    raw = str(message.text or "")
+    # Telegram clients can send variation selectors/non-breaking spaces.
+    norm = raw.replace("\ufe0f", "").replace("\u00a0", " ").strip().lower()
+    norm = re.sub(r"\s+", " ", norm)
+    if norm in {"старт", "▶ старт", "▶️ старт"}:
+        return True
+    return bool(norm.endswith("старт") and ("▶" in norm))
 
 
 def _is_allowed(message: Message) -> bool:
@@ -1005,7 +1016,7 @@ async def cmd_signal_pause(message: Message) -> None:
     )
 
 
-@router.message(_text_is("▶️ Старт", "▶ Старт", "Старт"))
+@router.message(_is_start_button_text)
 @router.message(Command("signal_start"))
 async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     if not _is_allowed(message):
