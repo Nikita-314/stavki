@@ -1047,35 +1047,29 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
     if chat_id is None:
         return
 
-    async def _run_start_cycle_and_report() -> None:
-        try:
-            t0 = time.perf_counter()
-            cres = await AutoSignalService().run_single_cycle(sessionmaker, bot, dry_run=False)
-            AutoSignalService().update_football_live_session_diagnostics_with_pacing(
-                cres, cycle_wall_seconds=float(time.perf_counter() - t0)
-            )
-            AutoSignalService().log_football_cycle_trace(cres)
-            text = format_football_session_start_user_message(cres, persistent=True)
-            text = (
-                text
-                + "\n\n"
-                + "—\n"
-                + "Live-only: только матчи с признаком live. Повтор той же идеи в сессии блокируется."
-            )
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=get_signal_control_keyboard())
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[FOOTBALL][START_BUTTON] start cycle failed")
-            await bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    "⚠️ Старт принят, но не удалось сформировать старт-отчёт.\n"
-                    f"Кратко: {exc!s}\n"
-                    "Проверьте /auto_signal_status и /football_live_debug."
-                ),
-                reply_markup=get_signal_control_keyboard(),
-            )
-
-    asyncio.create_task(_run_start_cycle_and_report())
+    try:
+        t0 = time.perf_counter()
+        cres = await AutoSignalService().run_single_cycle(sessionmaker, bot, dry_run=False)
+        AutoSignalService().update_football_live_session_diagnostics_with_pacing(
+            cres, cycle_wall_seconds=float(time.perf_counter() - t0)
+        )
+        AutoSignalService().log_football_cycle_trace(cres)
+        text = format_football_session_start_user_message(cres, persistent=True)
+        text = (
+            text
+            + "\n\n"
+            + "—\n"
+            + "Live-only: только матчи с признаком live. Повтор той же идеи в сессии блокируется."
+        )
+        await _answer_long_message(message, text, reply_markup=get_signal_control_keyboard())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[FOOTBALL][START_BUTTON] start cycle/report failed")
+        await message.answer(
+            "⚠️ Старт принят, но не удалось сформировать старт-отчёт.\n"
+            f"Кратко: {exc!s}\n"
+            "Проверьте /auto_signal_status и /football_live_debug.",
+            reply_markup=get_signal_control_keyboard(),
+        )
 
 
 @router.message(Command("football_live_debug"))
