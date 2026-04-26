@@ -32,6 +32,7 @@ from app.services.entry_service import EntryService
 from app.services.failure_review_service import FailureReviewService
 from app.services.signal_quality_service import SignalQualityService
 from app.services.signal_quality_summary_service import SignalQualitySummaryService
+from app.schemas.auto_signal import AutoSignalCycleResult
 from app.services.auto_signal_service import (
     AutoSignalService,
     format_final_live_gate_summary_lines,
@@ -233,20 +234,21 @@ def _fmt_yes_no(v: bool) -> str:
     return "Да" if v else "Нет"
 
 
-def _format_live_session_start_snapshot_report() -> str:
+def _format_live_session_start_post_cycle_report(cres: AutoSignalCycleResult) -> str:
+    """Сводка после первого боевого цикла при ▶️ Старт (диагностика уже обновлена)."""
     diag = SignalRuntimeDiagnosticsService().get_state()
-    live_source = int(diag.get("football_winline_football_event_count") or diag.get("football_live_cycle_live_matches_found") or 0)
-    after_fresh = int(diag.get("football_live_freshness_live_events_accepted") or diag.get("football_live_cycle_after_send_filter") or 0)
-    sendable = int(diag.get("football_live_cycle_new_ideas_sendable") or 0)
-    created = int(diag.get("football_last_combat_created_signals") or diag.get("football_live_last_cycle_created_signals") or 0)
-    sent = int(diag.get("football_last_combat_messages_sent") or 0)
-    after_integrity = int(diag.get("football_live_cycle_after_integrity") or 0)
-    strategy_matches = int(diag.get("football_live_strategy_matches_last_cycle") or 0)
-    bottleneck_ru = str(
-        diag.get("football_live_cycle_bottleneck_ru")
-        or diag.get("football_last_combat_bottleneck_ru")
-        or "после integrity ни один рынок не прошёл strategy gate"
+    live_source = int(
+        diag.get("football_winline_football_event_count") or cres.raw_events_count or 0
     )
+    after_fresh = int(
+        diag.get("football_live_freshness_live_events_accepted")
+        or diag.get("football_live_cycle_after_send_filter")
+        or 0
+    )
+    after_integrity = int(diag.get("football_live_cycle_after_integrity") or 0)
+    s13_candidates = int(diag.get("football_live_s13_candidates") or 0)
+    created = int(cres.created_signals_count or 0)
+    sent = int(cres.notifications_sent_count or 0)
     interval = diag.get("football_live_pacing_current_interval_seconds")
     try:
         interval_s = int(float(interval))
@@ -259,32 +261,23 @@ def _format_live_session_start_snapshot_report() -> str:
         "⚽ Live-сессия запущена",
         "Работает до остановки ⏸ Стоп.",
         "",
-        f"⏱ Между циклами — адаптивная пауза ({pause}).",
-        f"Следующий цикл примерно через {interval_s} с.",
-        "",
+        "📈 Первый live-cycle завершён. Актуальные числа:",
         f"📊 Live-матчей в источнике: {live_source}",
-        f"🧹 После bridge/freshness в контуре: {after_fresh}",
-        f"🎯 Подходящих сигналов (готовых к отправке): {sendable}",
+        f"🧹 После bridge/freshness: {after_fresh}",
+        f"⬇️ После integrity: {after_integrity}",
+        f"🧪 S13 candidates (идей в контуре): {s13_candidates}",
         f"💾 Записано в базу: {created}  ·  📨 Отправлено в Telegram: {sent}",
         "",
     ]
-    if sendable > 0 or sent > 0:
-        lines.append("✅ Сигналы найдены/обработаны. Детали доступны в /football_live_debug.")
-    else:
-        lines.extend(
-            [
-                "❌ Сейчас сигналов нет.",
-                f"Главная причина: {bottleneck_ru}",
-                "",
-                "Дополнительно:",
-                f"• {max(0, after_integrity - strategy_matches)} матч(а): после integrity не нашлось кандидата под стратегию",
-                f"• {strategy_matches} матч(а): рынок не прошёл strategy gate",
-            ]
-        )
+    if not cres.fetch_ok:
+        rr = (cres.rejection_reason or cres.message or "fetch_failed")[:400]
+        lines.append(f"⚠️ Fetch/cycle: не ок — {rr}")
+        lines.append("")
     lines.extend(
         [
+            f"⏱ Дальше — адаптивная пауза ({pause}), следующий цикл ~{interval_s} с.",
             "",
-            "Подробный технический разбор (админы): /football_live_debug",
+            "Подробный разбор: /football_live_debug",
             "",
             "—",
             "Live-only: только матчи с признаком live. Повтор той же идеи в сессии блокируется.",
@@ -1091,7 +1084,10 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
         message.from_user.id if message.from_user else None,
         message.chat.id if getattr(message, "chat", None) is not None else None,
     )
-    await message.answer("▶️ Старт принят. Запускаю live-цикл...", reply_markup=get_signal_control_keyboard())
+    await message.answer(
+        "▶️ Старт принят. Выполняю первый live-cycle, данные появятся после fetch...",
+        reply_markup=get_signal_control_keyboard(),
+    )
     from app.services.football_live_session_service import FootballLiveSessionService
 
     from app.services.football_live_runtime_pacing import get_football_live_runtime_pacing
@@ -1106,24 +1102,25 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
     chat_id = message.chat.id if getattr(message, "chat", None) is not None else None
     if chat_id is None:
         return
-    await _answer_long_message(
-        message,
-        _format_live_session_start_snapshot_report(),
-        reply_markup=get_signal_control_keyboard(),
-    )
-
-    async def _run_start_cycle() -> None:
-        try:
-            t0 = time.perf_counter()
-            cres = await AutoSignalService().run_single_cycle(sessionmaker, bot, dry_run=False)
-            AutoSignalService().update_football_live_session_diagnostics_with_pacing(
-                cres, cycle_wall_seconds=float(time.perf_counter() - t0)
-            )
-            AutoSignalService().log_football_cycle_trace(cres)
-        except Exception:  # noqa: BLE001
-            logger.exception("[FOOTBALL][START_BUTTON] background start cycle failed")
-
-    asyncio.create_task(_run_start_cycle())
+    try:
+        t0 = time.perf_counter()
+        cres = await AutoSignalService().run_single_cycle(sessionmaker, bot, dry_run=False)
+        AutoSignalService().update_football_live_session_diagnostics_with_pacing(
+            cres, cycle_wall_seconds=float(time.perf_counter() - t0)
+        )
+        AutoSignalService().log_football_cycle_trace(cres)
+        await _answer_long_message(
+            message,
+            _format_live_session_start_post_cycle_report(cres),
+            reply_markup=get_signal_control_keyboard(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[FOOTBALL][START_BUTTON] first live-cycle failed")
+        await message.answer(
+            "❌ Первый live-cycle завершился с ошибкой (см. серверный лог: "
+            "[FOOTBALL][START_BUTTON]). Сводка со нулями не отправлялась.",
+            reply_markup=get_signal_control_keyboard(),
+        )
 
 
 @router.message(Command("football_live_debug"))
