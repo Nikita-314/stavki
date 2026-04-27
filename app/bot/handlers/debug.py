@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -235,7 +236,7 @@ def _fmt_yes_no(v: bool) -> str:
 
 
 def _format_live_session_start_post_cycle_report(cres: AutoSignalCycleResult) -> str:
-    """Сводка после первого боевого цикла при ▶️ Старт (диагностика уже обновлена)."""
+    """Короткая сводка после первого боевого цикла при ▶️ Старт (без debug JSON)."""
     diag = SignalRuntimeDiagnosticsService().get_state()
     live_source = int(
         diag.get("football_winline_football_event_count") or cres.raw_events_count or 0
@@ -249,40 +250,25 @@ def _format_live_session_start_post_cycle_report(cres: AutoSignalCycleResult) ->
     s13_candidates = int(diag.get("football_live_s13_candidates") or 0)
     created = int(cres.created_signals_count or 0)
     sent = int(cres.notifications_sent_count or 0)
-    interval = diag.get("football_live_pacing_current_interval_seconds")
-    try:
-        interval_s = int(float(interval))
-    except (TypeError, ValueError):
-        interval_s = 60
-    interval_s = max(30, interval_s)
-    pause = "45–180 с, ориентир 60 с" if interval_s == 60 else f"примерно {interval_s} с"
+    main_reason = str(
+        diag.get("football_last_combat_bottleneck_ru")
+        or diag.get("football_live_cycle_bottleneck_ru")
+        or "—"
+    )
 
     lines = [
-        "⚽ Live-сессия запущена",
-        "Работает до остановки ⏸ Стоп.",
-        "",
-        "📈 Первый live-cycle завершён. Актуальные числа:",
-        f"📊 Live-матчей в источнике: {live_source}",
-        f"🧹 После bridge/freshness: {after_fresh}",
-        f"⬇️ После integrity: {after_integrity}",
-        f"🧪 S13 candidates (идей в контуре): {s13_candidates}",
-        f"💾 Записано в базу: {created}  ·  📨 Отправлено в Telegram: {sent}",
-        "",
+        "Первый live-cycle завершён.",
+        f"Live-матчей: {live_source}",
+        f"После freshness: {after_fresh}",
+        f"После integrity: {after_integrity}",
+        f"S13 candidates: {s13_candidates}",
+        f"Записано: {created} / Отправлено: {sent}",
+        f"Главная причина: {main_reason}",
     ]
     if not cres.fetch_ok:
         rr = (cres.rejection_reason or cres.message or "fetch_failed")[:400]
         lines.append(f"⚠️ Fetch/cycle: не ок — {rr}")
-        lines.append("")
-    lines.extend(
-        [
-            f"⏱ Дальше — адаптивная пауза ({pause}), следующий цикл ~{interval_s} с.",
-            "",
-            "Подробный разбор: /football_live_debug",
-            "",
-            "—",
-            "Live-only: только матчи с признаком live. Повтор той же идеи в сессии блокируется.",
-        ]
-    )
+    lines.extend(["", "Подробнее: /football_live_debug"])
     return "\n".join(lines)
 
 
@@ -642,15 +628,49 @@ def _chunk_answer_text(text: str, limit: int = 3800) -> list[str]:
     return chunks or [""]
 
 
+def _is_telegram_network_delivery_error(exc: BaseException) -> bool:
+    if isinstance(exc, TelegramNetworkError):
+        return True
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None and isinstance(cause, BaseException):
+        return _is_telegram_network_delivery_error(cause)
+    return False
+
+
 async def _answer_long_message(
     message: Message, text: str, *, reply_markup: object | None = None
-) -> None:
+) -> bool:
+    """Отправить текст по частям. При сетевом сбое Telegram — один retry на чанк, затем остановка.
+
+    Returns:
+        True если все чанки доставлены; False если доставка прервана (таймаут/сеть).
+    """
     parts = _chunk_answer_text(text)
     for i, part in enumerate(parts):
-        await message.answer(
-            part,
-            reply_markup=reply_markup if i == 0 and reply_markup is not None else None,
-        )
+        markup = reply_markup if i == 0 and reply_markup is not None else None
+        for attempt in range(2):
+            try:
+                await message.answer(part, reply_markup=markup)
+                break
+            except Exception as exc:
+                if attempt == 0 and _is_telegram_network_delivery_error(exc):
+                    logger.warning(
+                        "Telegram chunk send failed (retry once): part=%s/%s exc=%s",
+                        i + 1,
+                        len(parts),
+                        exc,
+                    )
+                    continue
+                if _is_telegram_network_delivery_error(exc):
+                    logger.warning(
+                        "Telegram chunk send failed after retry: part=%s/%s exc=%s",
+                        i + 1,
+                        len(parts),
+                        exc,
+                    )
+                    return False
+                raise
+    return True
 
 
 def _utc_now() -> datetime:
@@ -1109,11 +1129,17 @@ async def cmd_signal_start(message: Message, sessionmaker: async_sessionmaker[As
             cres, cycle_wall_seconds=float(time.perf_counter() - t0)
         )
         AutoSignalService().log_football_cycle_trace(cres)
-        await _answer_long_message(
+        delivery_ok = await _answer_long_message(
             message,
             _format_live_session_start_post_cycle_report(cres),
             reply_markup=get_signal_control_keyboard(),
         )
+        if not delivery_ok:
+            await message.answer(
+                "✅ Первый live-cycle выполнен, но подробный отчёт не удалось отправить "
+                "из-за таймаута Telegram. Подробности: /football_live_debug",
+                reply_markup=get_signal_control_keyboard(),
+            )
     except Exception:  # noqa: BLE001
         logger.exception("[FOOTBALL][START_BUTTON] first live-cycle failed")
         await message.answer(

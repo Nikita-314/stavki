@@ -27,16 +27,18 @@ def test_format_live_session_start_post_cycle_report_uses_diag_and_cres() -> Non
         "football_live_cycle_after_integrity": 120,
         "football_live_s13_candidates": 35,
         "football_live_pacing_current_interval_seconds": 60,
+        "football_last_combat_bottleneck_ru": "Нет стратегии",
     }
     with patch.object(SignalRuntimeDiagnosticsService, "get_state", return_value=fake_state):
         text = _format_live_session_start_post_cycle_report(cres)
-    assert "79" in text
-    assert "72" in text
-    assert "120" in text
-    assert "35" in text
-    assert "2" in text
-    assert "1" in text
+    assert "Live-матчей: 79" in text
+    assert "После freshness: 72" in text
+    assert "После integrity: 120" in text
+    assert "S13 candidates: 35" in text
+    assert "Записано: 2 / Отправлено: 1" in text
+    assert "Главная причина: Нет стратегии" in text
     assert "Первый live-cycle завершён" in text
+    assert "/football_live_debug" in text
 
 
 def test_format_live_session_start_post_cycle_report_fetch_not_ok_line() -> None:
