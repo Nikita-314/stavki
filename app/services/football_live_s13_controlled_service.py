@@ -21,6 +21,23 @@ class S13ControlledDecision:
 
 S13_GATE_MIN_EDGE = Decimal("0.05")
 S13_GATE_MIN_CONFIDENCE = 55
+S13_COMBAT_OVERCONFIDENT_EDGE_MIN = Decimal("0.10")
+S13_FT_1X2_COMBAT_MIN_CONFIDENCE = 75
+S13_1X2_00_MIN_OVER_NEXT_GOAL = Decimal("0.48")
+
+S13_MARKET_RULE_REASONS = frozenset(
+    {
+        "match_total_goals_needed_not_1",
+        "match_total_minute_window_35_75",
+        "match_total_odds_combat_window",
+        "match_total_line_gt_3_5",
+        "1x2_without_api_intelligence",
+        "ft_1x2_confidence_lt_75_combat",
+        "ft_1x2_edge_combat_band",
+        "ft_1x2_00_no_pressure",
+        "ft_1x2_trailing_side_blocked",
+    }
+)
 
 
 def _row_send_score(row: dict[str, Any]) -> float:
@@ -60,31 +77,75 @@ def evaluate_s13_controlled_idea(row: dict[str, Any]) -> S13ControlledDecision:
     goals_needed = _int(row.get("goals_needed_to_win"))
     api_ok = bool(row.get("api_intelligence_available"))
 
+    # Combat-only: team totals disabled (ideas/preview unchanged).
+    if kind == "team_total_over":
+        reasons.append("blocked_team_total_over")
+        return S13ControlledDecision(passed=False, reasons=reasons)
+
+    if edge is not None and edge >= S13_COMBAT_OVERCONFIDENT_EDGE_MIN:
+        reasons.append("blocked_overconfident_edge")
+        return S13ControlledDecision(passed=False, reasons=reasons)
+
     if kind == "match_total_over":
         if goals_needed != 1:
             reasons.append("match_total_goals_needed_not_1")
         if minute is None or not (35 <= minute <= 75):
             reasons.append("match_total_minute_window_35_75")
-        if odds is None or not (Decimal("1.35") <= odds <= Decimal("2.40")):
-            reasons.append("match_total_odds_window_1_35_2_40")
+        if odds is None or not (Decimal("1.35") <= odds <= Decimal("2.20")):
+            reasons.append("match_total_odds_combat_window")
         if line is None or line > Decimal("3.5"):
             reasons.append("match_total_line_gt_3_5")
-    elif kind == "team_total_over":
-        if goals_needed != 1:
-            reasons.append("team_total_goals_needed_not_1")
-        if minute is None or not (35 <= minute <= 70):
-            reasons.append("team_total_minute_window_35_70")
-        if odds is None or not (Decimal("1.45") <= odds <= Decimal("2.40")):
-            reasons.append("team_total_odds_window_1_45_2_40")
-        if line is None or line > Decimal("2.5"):
-            reasons.append("team_total_line_gt_2_5")
     elif kind == "ft_1x2":
         if not api_ok:
             reasons.append("1x2_without_api_intelligence")
+        if confidence is None or confidence < S13_FT_1X2_COMBAT_MIN_CONFIDENCE:
+            reasons.append("ft_1x2_confidence_lt_75_combat")
+        if edge is None or not (S13_GATE_MIN_EDGE <= edge < S13_COMBAT_OVERCONFIDENT_EDGE_MIN):
+            reasons.append("ft_1x2_edge_combat_band")
+        sh = _int(row.get("score_home"))
+        sa = _int(row.get("score_away"))
+        if sh == 0 and sa == 0:
+            ong = _decimal(row.get("over_next_goal_probability"))
+            if ong is None or ong < S13_1X2_00_MIN_OVER_NEXT_GOAL:
+                reasons.append("ft_1x2_00_no_pressure")
+        if _ft_1x2_is_trailing_side(row):
+            reasons.append("ft_1x2_trailing_side_blocked")
     else:
         reasons.append("unsupported_market_kind")
 
     return S13ControlledDecision(passed=not reasons, reasons=reasons)
+
+
+def _ft_1x2_selection_side(row: dict[str, Any]) -> str | None:
+    sel = str(row.get("source_selection") or "").strip().lower().replace("х", "x").replace("ё", "е")
+    if sel in {"1", "п1", "p1", "home"}:
+        return "home"
+    if sel in {"2", "п2", "p2", "away"}:
+        return "away"
+    if sel in {"x", "draw", "ничья", "н"}:
+        return "draw"
+    home = str(row.get("home") or "").strip().lower().replace("ё", "е")
+    away = str(row.get("away") or "").strip().lower().replace("ё", "е")
+    if home and (sel == home or home in sel):
+        return "home"
+    if away and (sel == away or away in sel):
+        return "away"
+    return None
+
+
+def _ft_1x2_is_trailing_side(row: dict[str, Any]) -> bool:
+    side = _ft_1x2_selection_side(row)
+    if side not in {"home", "away"}:
+        return False
+    sh = _int(row.get("score_home"))
+    sa = _int(row.get("score_away"))
+    if sh is None or sa is None:
+        return False
+    if side == "home" and sh < sa:
+        return True
+    if side == "away" and sa < sh:
+        return True
+    return False
 
 
 def select_s13_controlled_candidates(
@@ -104,10 +165,16 @@ def select_s13_controlled_candidates(
             "blocked": 0,
             "blocked_by_gate": 0,
             "blocked_by_candidate_build": 0,
+            "blocked_team_total_over": 0,
+            "blocked_overconfident_edge": 0,
+            "blocked_market_rules": 0,
         }
     evaluated = 0
     blocked_by_gate = 0
     blocked_by_candidate_build = 0
+    blocked_team_total_over = 0
+    blocked_overconfident_edge = 0
+    blocked_market_rules = 0
     passed: list[tuple[dict[str, Any], list[str]]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -116,6 +183,13 @@ def select_s13_controlled_candidates(
         decision = evaluate_s13_controlled_idea(row)
         if not decision.passed:
             blocked_by_gate += 1
+            rs = set(decision.reasons)
+            if "blocked_team_total_over" in rs:
+                blocked_team_total_over += 1
+            elif "blocked_overconfident_edge" in rs:
+                blocked_overconfident_edge += 1
+            elif rs & S13_MARKET_RULE_REASONS:
+                blocked_market_rules += 1
             continue
         passed.append((row, decision.reasons))
     passed.sort(key=lambda t: _row_send_score(t[0]), reverse=True)
@@ -135,6 +209,9 @@ def select_s13_controlled_candidates(
         "blocked": blocked,
         "blocked_by_gate": blocked_by_gate,
         "blocked_by_candidate_build": blocked_by_candidate_build,
+        "blocked_team_total_over": int(blocked_team_total_over),
+        "blocked_overconfident_edge": int(blocked_overconfident_edge),
+        "blocked_market_rules": int(blocked_market_rules),
     }
 
 

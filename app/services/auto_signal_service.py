@@ -1915,6 +1915,21 @@ def format_football_session_start_debug_message(
         lines.append(f"   Подсказка: {hint.strip()[:400]}")
     lines.append("")
 
+    s13_ev = int(diag.get("football_live_s13_candidates") or 0)
+    if s13_ev > 0 or int(diag.get("football_live_s13_sent") or 0) > 0:
+        lines.append("🧪 S13 combat (последний цикл):")
+        lines.append(
+            f"   кандидатов={s13_ev} после_гейта={int(diag.get('football_live_s13_after_gate') or 0)} "
+            f"отправлено={int(diag.get('football_live_s13_sent') or 0)} "
+            f"лимит={int(diag.get('football_live_s13_blocked_by_limit') or 0)}"
+        )
+        lines.append(
+            f"   отсев: team_total={int(diag.get('football_live_s13_blocked_team_total_over') or 0)} "
+            f"edge≥0.10={int(diag.get('football_live_s13_blocked_overconfident_edge') or 0)} "
+            f"правила_рынка={int(diag.get('football_live_s13_blocked_market_rules') or 0)}"
+        )
+        lines.append("")
+
     # Delivery trace (when ingest ran)
     cdt = d.get("combat_delivery_trace")
     if isinstance(cdt, list) and cdt:
@@ -2198,6 +2213,9 @@ class AutoSignalService:
             football_live_s13_sent=0,
             football_live_s13_blocked=0,
             football_live_s13_blocked_by_limit=0,
+            football_live_s13_blocked_team_total_over=0,
+            football_live_s13_blocked_overconfident_edge=0,
+            football_live_s13_blocked_market_rules=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -2321,6 +2339,9 @@ class AutoSignalService:
                     football_live_s13_sent=0,
                     football_live_s13_blocked=0,
                     football_live_s13_blocked_by_limit=0,
+                    football_live_s13_blocked_team_total_over=0,
+                    football_live_s13_blocked_overconfident_edge=0,
+                    football_live_s13_blocked_market_rules=0,
                     football_live_rejected_s8_home_00_without_api_context=0,
                     football_live_rejected_s8_1x2_00_without_api_context=0,
                     football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -2373,6 +2394,9 @@ class AutoSignalService:
             football_live_s13_sent=0,
             football_live_s13_blocked=0,
             football_live_s13_blocked_by_limit=0,
+            football_live_s13_blocked_team_total_over=0,
+            football_live_s13_blocked_overconfident_edge=0,
+            football_live_s13_blocked_market_rules=0,
             football_live_rejected_s8_home_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_without_api_context=0,
             football_live_rejected_s8_1x2_00_no_pressure=0,
@@ -3347,6 +3371,9 @@ class AutoSignalService:
                 football_live_s13_sent=0,
                 football_live_s13_blocked=0,
                 football_live_s13_blocked_by_limit=0,
+                football_live_s13_blocked_team_total_over=0,
+                football_live_s13_blocked_overconfident_edge=0,
+                football_live_s13_blocked_market_rules=0,
             )
         if not candidates_to_ingest:
             if adaptive_compare_only:
@@ -4405,12 +4432,16 @@ class AutoSignalService:
         s13_passed = s13_after_dedup[:S13_MAX_SIGNALS_PER_LIVE_CYCLE]
         if s13_controlled_enabled:
             logger.info(
-                "[FOOTBALL][S13_CONTROLLED] after_integrity=%s s13_candidates_total=%s s13_after_gate=%s s13_sent=%s s13_blocked_by_limit=%s",
+                "[FOOTBALL][S13_CONTROLLED] after_integrity=%s s13_candidates_total=%s s13_after_gate=%s s13_sent=%s "
+                "s13_blocked_by_limit=%s blocked_team_total_over=%s blocked_overconfident_edge=%s blocked_market_rules=%s",
                 int(post_integrity_count),
                 int(s13_meta.get("evaluated", 0)),
                 int(s13_meta.get("after_gate", 0)),
                 int(len(s13_passed)),
                 int(s13_blocked_by_limit),
+                int(s13_meta.get("blocked_team_total_over", 0)),
+                int(s13_meta.get("blocked_overconfident_edge", 0)),
+                int(s13_meta.get("blocked_market_rules", 0)),
             )
         if s13_passed:
             strategy_stats[S13_CONTROLLED_STRATEGY_ID] = int(strategy_stats.get(S13_CONTROLLED_STRATEGY_ID, 0) or 0) + int(len(s13_passed))
@@ -4471,6 +4502,9 @@ class AutoSignalService:
             "s13_controlled_sent": int(len(s13_passed)),
             "s13_controlled_blocked": int(s13_meta.get("blocked", 0)),
             "s13_controlled_blocked_by_limit": int(s13_blocked_by_limit),
+            "s13_controlled_blocked_team_total_over": int(s13_meta.get("blocked_team_total_over", 0)),
+            "s13_controlled_blocked_overconfident_edge": int(s13_meta.get("blocked_overconfident_edge", 0)),
+            "s13_controlled_blocked_market_rules": int(s13_meta.get("blocked_market_rules", 0)),
             "after_s13": int(after_s13_total),
             "strategy_rejected_samples": strategy_rejected_samples,
             "ft_1x2_rejected_samples": ft_1x2_rejected_samples,
@@ -4490,6 +4524,9 @@ class AutoSignalService:
             football_live_s13_sent=int(len(s13_passed)),
             football_live_s13_blocked=int(s13_meta.get("blocked", 0)),
             football_live_s13_blocked_by_limit=int(s13_blocked_by_limit),
+            football_live_s13_blocked_team_total_over=int(s13_meta.get("blocked_team_total_over", 0)),
+            football_live_s13_blocked_overconfident_edge=int(s13_meta.get("blocked_overconfident_edge", 0)),
+            football_live_s13_blocked_market_rules=int(s13_meta.get("blocked_market_rules", 0)),
             football_live_cycle_after_strategy=int(len(strategy_passed)),
             football_live_cycle_after_context_filter=0,
             football_live_rejected_no_pressure=0,
@@ -4533,6 +4570,9 @@ class AutoSignalService:
                 football_live_s13_blocked_by_limit=int(
                     max(0, len(s13_after_dedup) - S13_MAX_SIGNALS_PER_LIVE_CYCLE)
                 ),
+                football_live_s13_blocked_team_total_over=int(s13_meta.get("blocked_team_total_over", 0)),
+                football_live_s13_blocked_overconfident_edge=int(s13_meta.get("blocked_overconfident_edge", 0)),
+                football_live_s13_blocked_market_rules=int(s13_meta.get("blocked_market_rules", 0)),
                 last_delivery_reason="blocked_no_strategy_match",
                 note="no candidate matched explicit football live strategies",
             )

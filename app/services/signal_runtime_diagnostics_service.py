@@ -156,6 +156,9 @@ class SignalRuntimeDiagnosticsState:
     football_live_s13_sent: int = 0
     football_live_s13_blocked: int = 0
     football_live_s13_blocked_by_limit: int = 0
+    football_live_s13_blocked_team_total_over: int = 0
+    football_live_s13_blocked_overconfident_edge: int = 0
+    football_live_s13_blocked_market_rules: int = 0
 
     football_live_rejected_invalid_selection: int = 0
     """Candidates dropped because 1X2 selection could not be strictly parsed (1/2/X only)."""

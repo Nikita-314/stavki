@@ -145,6 +145,11 @@ class NotificationService:
                     f"🔗 API: {api}",
                 ]
             )
+        strat_reasons = expl.get("football_live_strategy_reasons")
+        if isinstance(strat_reasons, list) and strat_reasons and strategy_id.startswith("S13"):
+            tail = [str(x) for x in strat_reasons if str(x).strip()][-8:]
+            if tail:
+                lines.append(f"🧾 S13 reasons: {self._html_text(', '.join(tail))}")
         return lines
 
     def _pct(self, value: object, *, signed: bool = False) -> str:
