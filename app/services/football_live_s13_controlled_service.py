@@ -36,6 +36,7 @@ S13_MARKET_RULE_REASONS = frozenset(
         "ft_1x2_edge_combat_band",
         "ft_1x2_00_no_pressure",
         "ft_1x2_trailing_side_blocked",
+        "unsupported_market_kind",
     }
 )
 
